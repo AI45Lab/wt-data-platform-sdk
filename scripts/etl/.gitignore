@@ -1,0 +1,2 @@
+# Ignore ETL output files (missing blobs reports, etc.)
+output/

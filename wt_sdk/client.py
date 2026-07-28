@@ -1,0 +1,1298 @@
+import re
+import threading
+import time
+from typing import List, Optional, Union, Dict, Any, Iterator
+from loguru import logger
+import dldb
+import pandas as pd
+from wt_sdk.config import GatewayConfig
+from wt_sdk.dldb_timing import (
+    append_dldb_metrics_log,
+    build_dldb_timing_payload,
+    extract_dldb_last_call,
+    extract_dldb_timing_from_df,
+    format_dldb_metrics_summary,
+    format_dldb_timing_log,
+)
+from wt_sdk.core.schemas import (
+    LANDING_SCALAR_INDEXES,
+    LANDING_PARTITIONS,
+    LANDING_PARTITION_COLUMN,
+    LANDING_PARTITION_TYPE,
+    SERVING_PARTITION_COLUMN,
+)
+from wt_sdk.models import (
+    LandingRecord,
+    ServingRecord,
+    LandingRecordBatch,
+    ServingRecordBatch,
+)
+from wt_sdk.utils import (
+    landing_record_to_dataframe,
+    landing_batch_to_dataframe,
+    serving_record_to_dataframe,
+    serving_batch_to_dataframe,
+    dataframe_to_landing_records,
+    dataframe_to_serving_records,
+)
+
+
+class WTGatewayClient:
+    """Business client for dldb-backed landing and serving tables.
+
+    See README.md for configuration, API examples, and partition constraints.
+    """
+
+    # Logical partition keys. Runtime methods prefer the dldb table metadata
+    # when it is available, so existing dt-partitioned tables still work.
+    LANDING_PARTITION_KEY = LANDING_PARTITION_COLUMN
+    SERVING_PARTITION_KEY = SERVING_PARTITION_COLUMN
+
+    def __init__(self, config: Optional[GatewayConfig] = None):
+        """Initialize with explicit config or fresh environment-based defaults."""
+        self.config = config or GatewayConfig()
+        self._enable_dldb_timing_logs = self.config.resolved_enable_dldb_timing_logs()
+        self._dldb_model = self.config.resolved_dldb_model()
+        self._dldb_metrics_log_path = self.config.resolved_dldb_metrics_log_path()
+
+        # Pass db_name as first positional argument, then other config as kwargs
+        dldb_config = self.config.to_dldb_config()
+        self.session = dldb.connect(
+            self.config.tables.db_uri,
+            **dldb_config
+        )
+
+        self.landing_uri = self.config.tables.landing_uri()
+        self.serving_uri = self.config.tables.serving_uri()
+        self._dirty_landing_index_partitions = set()
+        self._dirty_landing_index_lock = threading.Lock()
+
+        logger.info(f"WTGatewayClient initialized")
+        logger.info(f"Landing table URI: {self.landing_uri}")
+        logger.info(f"Serving table URI: {self.serving_uri}")
+
+    def _extract_dldb_timing_from_df(self, df: Optional[pd.DataFrame]) -> Optional[Dict[str, Any]]:
+        return extract_dldb_timing_from_df(df)
+
+    def _extract_dldb_last_call(self) -> Optional[Dict[str, Any]]:
+        return extract_dldb_last_call(self.session)
+
+    def _log_dldb_timing(
+        self,
+        api_name: str,
+        timing: Optional[Dict[str, Any]],
+        *,
+        table_name: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self._enable_dldb_timing_logs and not self._dldb_metrics_log_path:
+            return
+
+        payload = build_dldb_timing_payload(
+            api_name,
+            timing,
+            table_name=table_name,
+            extra=extra,
+        )
+        append_dldb_metrics_log(self._dldb_metrics_log_path, "dldb_timing", payload)
+
+        if not self._enable_dldb_timing_logs:
+            return
+
+        log_line = format_dldb_timing_log(
+            api_name,
+            timing,
+            table_name=table_name,
+            extra=extra,
+        )
+        if log_line:
+            logger.info(log_line)
+
+    def _log_dldb_metrics_summary(self, summary: Optional[Dict[str, Any]]) -> None:
+        append_dldb_metrics_log(self._dldb_metrics_log_path, "dldb_metrics_summary", summary)
+
+        if not self.config.log_dldb_metrics_summary_on_close:
+            return
+
+        log_line = format_dldb_metrics_summary(summary)
+        if log_line:
+            logger.info(log_line)
+
+    def _filter_table(
+        self,
+        table_name: str,
+        query: str,
+        limit: Optional[int] = None,
+        columns: Optional[List[str]] = None,
+        offset: Optional[int] = None,
+        *,
+        partitions: Optional[list] = None,
+        partition_cond: Optional[str] = None,
+        order_by: Optional[str] = None,
+        ascending: bool = True,
+        checkout_latest: bool = False,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> pd.DataFrame:
+        self._pin_exact_dldb_table(table_name)
+        df = self.session.filter(
+            table_name,
+            query=query,
+            limit=limit,
+            columns=columns,
+            offset=offset,
+            partitions=partitions,
+            partition_cond=partition_cond,
+            order_by=order_by,
+            ascending=ascending,
+            checkout_latest=checkout_latest,
+        )
+        timing = self._extract_dldb_timing_from_df(df) or self._extract_dldb_last_call()
+        log_extra = {
+            "limit": limit,
+            "order_by": order_by,
+            "ascending": ascending,
+            "partition_cond": partition_cond,
+            "checkout_latest": checkout_latest if checkout_latest else None,
+            "columns_count": len(columns) if columns else None,
+            "partitions_count": len(partitions) if partitions else None,
+        }
+        if extra:
+            log_extra.update(extra)
+        self._log_dldb_timing("filter", timing, table_name=table_name, extra=log_extra)
+        return df
+
+    def _count_rows(self, table_name: str, partition: Optional[str] = None) -> int:
+        self._pin_exact_dldb_table(table_name)
+        count = self.session.count_rows(table_name, partition)
+        self._log_dldb_timing(
+            "count_rows",
+            self._extract_dldb_last_call(),
+            table_name=table_name,
+            extra={"partition": partition},
+        )
+        return count
+
+    # ==================== Private Helper Methods ====================
+
+    def _get_partition_key_for_table(self, table_name: str, fallback: str) -> str:
+        """Return the partition key recorded in dldb metadata, if available."""
+        try:
+            schema_table = getattr(self.session, "schema_table", None)
+            record = schema_table.get(table_name) if schema_table is not None else None
+            if record is not None and record.partition_column:
+                return record.partition_column
+        except Exception:
+            pass
+        return fallback
+
+    def _get_partition_metadata_for_table(self, table_name: str, fallback_key: str) -> Dict[str, Any]:
+        """Return dldb partition metadata, falling back to SDK constants."""
+        metadata = {
+            "partition_column": fallback_key,
+            "partition_type": LANDING_PARTITION_TYPE if fallback_key == self.LANDING_PARTITION_KEY else "VALUE",
+            "partitions": LANDING_PARTITIONS if fallback_key == self.LANDING_PARTITION_KEY else None,
+        }
+        try:
+            schema_table = getattr(self.session, "schema_table", None)
+            record = schema_table.get(table_name) if schema_table is not None else None
+            if record is None:
+                return metadata
+            metadata["partition_column"] = getattr(record, "partition_column", None) or metadata["partition_column"]
+            metadata["partition_type"] = getattr(record, "partition_type", None) or metadata["partition_type"]
+            record_partitions = getattr(record, "partitions", None)
+            if isinstance(record_partitions, int) and record_partitions > 0:
+                metadata["partitions"] = record_partitions
+        except Exception:
+            pass
+        return metadata
+
+    def _pin_exact_dldb_table(self, table_name: str) -> None:
+        """Open the exact logical table by dldb metadata, avoiding prefix collisions."""
+        try:
+            schema_table = getattr(self.session, "schema_table", None)
+            record = schema_table.get(table_name) if schema_table is not None else None
+            if record is None:
+                return
+            from dldb.table import open_table_by_partition_type
+            self.session.tables[table_name] = open_table_by_partition_type(
+                self.session.db_conn,
+                self.session.schema_table,
+                table_name,
+                record.partition_type,
+            )
+        except Exception as exc:
+            logger.debug(f"Failed to pin exact dldb table '{table_name}': {exc}")
+
+    def _extract_partition_values_from_query(self, query: str, partition_key: str) -> Optional[List[str]]:
+        """Extract simple equality/IN filters for the partition key from SQL text."""
+        if not query or not partition_key:
+            return None
+
+        quoted_key = re.escape(partition_key)
+        eq_pattern = rf"(?<![\w.]){quoted_key}\s*=\s*'([^']+)'"
+        in_pattern = rf"(?<![\w.]){quoted_key}\s+IN\s*\(([^)]*)\)"
+
+        partitions: List[str] = []
+        partitions.extend(re.findall(eq_pattern, query, flags=re.IGNORECASE))
+
+        for raw_values in re.findall(in_pattern, query, flags=re.IGNORECASE):
+            partitions.extend(re.findall(r"'([^']+)'", raw_values))
+
+        if not partitions:
+            return None
+
+        seen = set()
+        return [value for value in partitions if not (value in seen or seen.add(value))]
+
+    def _resolve_partitions_for_query(self, table_name: str, query: str, fallback_key: str) -> Optional[list]:
+        """Resolve query partition filters into dldb partition arguments."""
+        metadata = self._get_partition_metadata_for_table(table_name, fallback_key)
+        partition_key = metadata.get("partition_column")
+        partition_type = str(metadata.get("partition_type") or "").upper()
+        values = self._extract_partition_values_from_query(query, partition_key)
+        if not values:
+            return None
+
+        if partition_type == "VALUE":
+            return values
+
+        if partition_type == "HASH":
+            partitions_count = metadata.get("partitions")
+            if not isinstance(partitions_count, int) or partitions_count <= 0:
+                logger.warning(
+                    f"Cannot prune HASH partition for table '{table_name}': invalid partitions={partitions_count}"
+                )
+                return None
+            try:
+                from dldb.utils import stable_hash
+            except Exception as exc:
+                logger.warning(f"Cannot import dldb.utils.stable_hash for HASH partition pruning: {exc}")
+                return None
+            return sorted({stable_hash(value) % partitions_count for value in values})
+
+        return None
+
+    def _resolve_explicit_partition_for_table(
+        self,
+        table_name: str,
+        partition: Optional[Union[str, int]],
+        fallback_key: str,
+    ) -> Optional[Union[str, int]]:
+        """Convert a caller-supplied logical partition value to dldb's partition argument."""
+        if partition is None:
+            return None
+
+        metadata = self._get_partition_metadata_for_table(table_name, fallback_key)
+        partition_type = str(metadata.get("partition_type") or "").upper()
+
+        if partition_type == "HASH":
+            if isinstance(partition, int):
+                return partition
+
+            partitions_count = metadata.get("partitions")
+            if not isinstance(partitions_count, int) or partitions_count <= 0:
+                logger.warning(
+                    f"Cannot resolve HASH partition for table '{table_name}': invalid partitions={partitions_count}"
+                )
+                return partition
+            try:
+                from dldb.utils import stable_hash
+            except Exception as exc:
+                logger.warning(f"Cannot import dldb.utils.stable_hash for HASH partition resolution: {exc}")
+                return partition
+            return stable_hash(str(partition)) % partitions_count
+
+        return partition
+
+    def _list_existing_partitions_for_table(self, table_name: str) -> List[Union[str, int]]:
+        """List existing dldb logical partitions/buckets for a table."""
+        self._pin_exact_dldb_table(table_name)
+        table = self.session.tables.get(table_name)
+        if table is None or not hasattr(table, "list_partitions"):
+            return []
+        return sorted(table.list_partitions())
+
+    def _track_landing_index_partitions_from_df(self, table_name: str, df: pd.DataFrame) -> None:
+        """Remember HASH buckets touched by landing writes for later index maintenance."""
+        metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
+        if str(metadata.get("partition_type") or "").upper() != "HASH":
+            return
+
+        partition_key = metadata.get("partition_column") or self.LANDING_PARTITION_KEY
+        if partition_key not in df.columns:
+            return
+
+        partitions = set()
+        for raw_value in df[partition_key].dropna().unique():
+            partition = self._resolve_explicit_partition_for_table(
+                table_name,
+                raw_value,
+                self.LANDING_PARTITION_KEY,
+            )
+            if isinstance(partition, int):
+                partitions.add(partition)
+
+        if partitions:
+            with self._dirty_landing_index_lock:
+                self._dirty_landing_index_partitions.update(partitions)
+
+    def get_dirty_landing_index_partitions(self) -> List[int]:
+        """Return HASH buckets touched by landing writes since the last maintenance clear."""
+        with self._dirty_landing_index_lock:
+            return sorted(self._dirty_landing_index_partitions)
+
+    def clear_dirty_landing_index_partitions(self, partitions: Optional[List[int]] = None) -> None:
+        """Clear tracked landing HASH buckets after successful index maintenance."""
+        with self._dirty_landing_index_lock:
+            if partitions is None:
+                self._dirty_landing_index_partitions.clear()
+            else:
+                self._dirty_landing_index_partitions.difference_update(partitions)
+
+    def _is_hash_partition_table(self, table_name: str, fallback_key: str) -> bool:
+        metadata = self._get_partition_metadata_for_table(table_name, fallback_key)
+        return str(metadata.get("partition_type") or "").upper() == "HASH"
+
+    def _escape_sql_string(self, value: str) -> str:
+        return value.replace("'", "''")
+
+    def _add_hash_partition_filter_for_raw_value(
+        self,
+        table_name: str,
+        query: str,
+        partition: Optional[Union[str, int]],
+        fallback_key: str,
+    ) -> str:
+        """Add a job_id predicate when a raw HASH partition value is supplied."""
+        if partition is None or isinstance(partition, int):
+            return query
+        if not self._is_hash_partition_table(table_name, fallback_key):
+            return query
+
+        metadata = self._get_partition_metadata_for_table(table_name, fallback_key)
+        partition_key = metadata.get("partition_column") or fallback_key
+        if self._extract_partition_values_from_query(query, partition_key):
+            return query
+
+        partition_filter = f"{partition_key} = '{self._escape_sql_string(str(partition))}'"
+        if query and query.strip():
+            return f"({query}) AND {partition_filter}"
+        return partition_filter
+
+    def _resolve_landing_query_partitions(self, table_name: str, query: str) -> Optional[list]:
+        """Resolve job_id partitions for landing-like tables when the query contains job_id."""
+        metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
+        if metadata.get("partition_column") != self.LANDING_PARTITION_KEY:
+            return None
+        return self._resolve_partitions_for_query(table_name, query, self.LANDING_PARTITION_KEY)
+
+    def _get_table_info(self, table: str) -> Dict[str, Any]:
+        """Return metadata and record converters for landing or serving."""
+        if table == "landing":
+            table_name = self.config.tables.landing_table
+            self._pin_exact_dldb_table(table_name)
+            return {
+                "table_name": table_name,
+                "partition_key": self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)["partition_column"],
+                "to_dataframe_single": landing_record_to_dataframe,
+                "to_dataframe_batch": landing_batch_to_dataframe,
+                "from_dataframe": dataframe_to_landing_records,
+                "record_type": "LandingRecord",
+            }
+        elif table == "serving":
+            table_name = self.config.tables.serving_table
+            self._pin_exact_dldb_table(table_name)
+            return {
+                "table_name": table_name,
+                "partition_key": self._get_partition_key_for_table(table_name, self.SERVING_PARTITION_KEY),
+                "to_dataframe_single": serving_record_to_dataframe,
+                "to_dataframe_batch": serving_batch_to_dataframe,
+                "from_dataframe": dataframe_to_serving_records,
+                "record_type": "ServingRecord",
+            }
+        else:
+            raise ValueError(f"Unknown table: {table}. Must be 'landing' or 'serving'")
+
+    def _ingest(
+        self,
+        table: str,
+        record_or_batch: Union[LandingRecord, ServingRecord, List, LandingRecordBatch, ServingRecordBatch]
+    ) -> None:
+        from wt_sdk.utils import landing_record_to_arrow, landing_batch_to_arrow, serving_record_to_arrow, serving_batch_to_arrow
+        from wt_sdk.core.schemas import LANDING_SCHEMA, SERVING_SCHEMA
+
+        info = self._get_table_info(table)
+        schema = LANDING_SCHEMA if table == "landing" else SERVING_SCHEMA
+
+        # Convert to PyArrow table with explicit schema
+        if isinstance(record_or_batch, list):
+            if not record_or_batch:
+                logger.warning(f"Empty records list, skipping ingestion to {table}")
+                return
+            # Create batch object
+            if table == "landing":
+                batch = LandingRecordBatch(records=record_or_batch)
+            else:
+                batch = ServingRecordBatch(records=record_or_batch)
+            arrow_table = landing_batch_to_arrow(batch, schema) if table == "landing" else serving_batch_to_arrow(batch, schema)
+            logger.info(f"Ingested {len(arrow_table)} records to {table} table")
+        elif isinstance(record_or_batch, (LandingRecordBatch, ServingRecordBatch)):
+            arrow_table = landing_batch_to_arrow(record_or_batch, schema) if table == "landing" else serving_batch_to_arrow(record_or_batch, schema)
+            logger.info(f"Ingested {len(arrow_table)} records to {table} table")
+        else:
+            # Single record
+            arrow_table = landing_record_to_arrow(record_or_batch, schema) if table == "landing" else serving_record_to_arrow(record_or_batch, schema)
+            logger.debug(f"Ingested single record to {table} table: {record_or_batch.id}")
+
+        # Convert Arrow table to DataFrame (preserves Arrow schema) and pass to DLDB
+        df = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
+        self.session.add(info["table_name"], df)
+        if table == "landing":
+            self._track_landing_index_partitions_from_df(info["table_name"], df)
+        self._log_dldb_timing(
+            "add",
+            self._extract_dldb_last_call(),
+            table_name=info["table_name"],
+            extra={"input_rows": len(arrow_table)},
+        )
+        logger.info(f"Successfully added {len(arrow_table)} records to {table} table via DLDB wrapper")
+
+    def _query(
+        self,
+        table: str,
+        filter_query: str = "",
+        limit: Optional[int] = None,
+        columns: Optional[List[str]] = None,
+        partition: Optional[str] = None
+    ) -> Union[List[LandingRecord], List[ServingRecord]]:
+        """Internal generic query path for landing and serving tables."""
+        info = self._get_table_info(table)
+        effective_query = filter_query
+        partitions = None
+        if partition is not None:
+            fallback_key = self.LANDING_PARTITION_KEY if table == "landing" else self.SERVING_PARTITION_KEY
+            resolved_partition = self._resolve_explicit_partition_for_table(
+                info["table_name"],
+                partition,
+                fallback_key,
+            )
+            partitions = [resolved_partition]
+            if table == "landing":
+                effective_query = self._add_hash_partition_filter_for_raw_value(
+                    info["table_name"],
+                    filter_query,
+                    partition,
+                    fallback_key,
+                )
+        elif table == "landing":
+            partitions = self._resolve_landing_query_partitions(info["table_name"], filter_query)
+
+        df = self._filter_table(
+            info["table_name"],
+            effective_query,
+            limit,
+            columns,
+            partitions=partitions,
+            extra={"partition": partition},
+        )
+        records = info["from_dataframe"](df)
+        logger.info(f"Queried {table} table: {len(records)} results" + (f" (partition={partition})" if partition else ""))
+        return records
+
+    def _count(self, table: str, partition: Optional[str] = None) -> int:
+        """Count rows for one logical table or one resolved partition."""
+        info = self._get_table_info(table)
+        resolved_partition = None
+        if partition is not None:
+            fallback_key = self.LANDING_PARTITION_KEY if table == "landing" else self.SERVING_PARTITION_KEY
+            resolved_partition = self._resolve_explicit_partition_for_table(
+                info["table_name"],
+                partition,
+                fallback_key,
+            )
+            if table == "landing" and self._is_hash_partition_table(info["table_name"], fallback_key) and not isinstance(partition, int):
+                query = self._add_hash_partition_filter_for_raw_value(
+                    info["table_name"],
+                    "",
+                    partition,
+                    fallback_key,
+                )
+                df = self._filter_table(
+                    info["table_name"],
+                    query=query,
+                    limit=None,
+                    columns=["id"],
+                    partitions=[resolved_partition],
+                    extra={"partition": partition, "api": "count"},
+                )
+                count = len(df)
+                logger.info(f"{table.capitalize()} table count: {count}" + (f" (partition={partition})" if partition else ""))
+                return count
+        count = self._count_rows(info["table_name"], resolved_partition)
+        logger.info(f"{table.capitalize()} table count: {count}" + (f" (partition={partition})" if partition else ""))
+        return count
+
+    def _check_existing_records(
+        self,
+        table: str,
+        record_ids: List[str]
+    ) -> set:
+        """Return existing IDs in batches for idempotency checks."""
+        if not record_ids:
+            return set()
+
+        existing = set()
+
+        # Batch IDs to stay within practical SQL query limits.
+        batch_size = 1000
+        for i in range(0, len(record_ids), batch_size):
+            batch = record_ids[i:i + batch_size]
+            ids_str = ", ".join([f"'{rec_id}'" for rec_id in batch])
+            filter_query = f"id IN ({ids_str})"
+
+            try:
+                results = self._query(table, filter_query, limit=len(batch))
+                for record in results:
+                    if hasattr(record, 'id'):
+                        existing.add(record.id)
+                    elif isinstance(record, dict):
+                        existing.add(record.get('id'))
+            except Exception as e:
+                # Empty or uninitialized tables have no existing IDs.
+                error_msg = str(e)
+                if "not exist" in error_msg:
+                    logger.debug(f"Table {table} has no partitions yet, skipping duplicate check for {len(batch)} records")
+                else:
+                    logger.warning(f"Error checking batch of {len(batch)} records: {e}")
+
+        logger.info(f"Checked {len(record_ids)} records, found {len(existing)} existing")
+        return existing
+
+    def _delete(self, table: str, filter_query: str) -> int:
+        info = self._get_table_info(table)
+        partitions = None
+        if table == "landing":
+            partitions = self._resolve_landing_query_partitions(info["table_name"], filter_query)
+
+        # dldb does not return delete counts, so count before deletion.
+        try:
+            df = self._filter_table(
+                info["table_name"],
+                query=filter_query,
+                limit=None,
+                columns=["id"],  # Only need id for counting
+                partition_cond=None,
+                partitions=partitions,
+            )
+            count_before = len(df)
+        except Exception as e:
+            logger.debug(f"Error counting records: {e}")
+            count_before = 0
+
+        if count_before > 0:
+            if partitions:
+                for partition in partitions:
+                    self.session.delete(info["table_name"], filter_query, partition=partition)
+            else:
+                self.session.delete(info["table_name"], filter_query)
+            self._log_dldb_timing(
+                "delete",
+                self._extract_dldb_last_call(),
+                table_name=info["table_name"],
+                extra={"deleted_rows": count_before, "partitions_count": len(partitions) if partitions else None},
+            )
+            logger.info(f"Deleted {count_before} records from {table} table")
+
+        return count_before
+
+    # ==================== Landing Table Operations ====================
+
+    def ingest_landing(self, record: LandingRecord) -> None:
+        self._ingest("landing", record)
+
+    def ingest_landing_batch(
+        self,
+        records: Union[List[LandingRecord], LandingRecordBatch]
+    ) -> None:
+        self._ingest("landing", records)
+
+    def query_landing(
+        self,
+        filter_query: str = "",
+        limit: Optional[int] = None,
+        columns: Optional[List[str]] = None,
+        partition: Optional[Union[str, int]] = None,
+        order_by: Optional[str] = None,
+        ascending: bool = True,
+        checkout_latest: bool = False,
+        as_dataframe: bool = False,
+    ) -> Union[List[LandingRecord], pd.DataFrame]:
+        """Query landing records or a DataFrame.
+
+        Include job_id for HASH partition pruning, especially with order_by or limit.
+        """
+        info = self._get_table_info("landing")
+        effective_query = filter_query if filter_query and filter_query.strip() else "id IS NOT NULL"
+        if partition is not None:
+            effective_query = self._add_hash_partition_filter_for_raw_value(
+                info["table_name"],
+                effective_query,
+                partition,
+                self.LANDING_PARTITION_KEY,
+            )
+            resolved_partition = self._resolve_explicit_partition_for_table(
+                info["table_name"],
+                partition,
+                self.LANDING_PARTITION_KEY,
+            )
+            partitions = [resolved_partition]
+        else:
+            partitions = self._resolve_partitions_for_query(
+                info["table_name"],
+                effective_query,
+                self.LANDING_PARTITION_KEY,
+            )
+
+        df = self._filter_table(
+            info["table_name"],
+            query=effective_query,
+            limit=limit,
+            columns=columns,
+            partitions=partitions,
+            order_by=order_by,
+            ascending=ascending,
+            checkout_latest=checkout_latest,
+            extra={
+                "partition": partition,
+                "api": "query_landing",
+            },
+        )
+        if as_dataframe:
+            return df
+
+        records = dataframe_to_landing_records(df)
+        logger.info(f"Queried landing table: {len(records)} results")
+        return records
+
+    def update_landing(
+        self,
+        filter_query: str,
+        updates: Dict[str, Any],
+        partition: Optional[Union[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """Update matching landing rows and return an execution acknowledgement.
+
+        id, created_at, and job_id are immutable. Include job_id for HASH pruning.
+        """
+        if not filter_query or not filter_query.strip():
+            raise ValueError("filter_query is required for update_landing")
+        if not updates:
+            raise ValueError("updates is required for update_landing")
+
+        protected_columns = {"id", "created_at", "job_id"}
+        protected_updates = protected_columns.intersection(updates)
+        if protected_updates:
+            columns = ", ".join(sorted(protected_updates))
+            raise ValueError(f"update_landing cannot update protected columns: {columns}")
+
+        info = self._get_table_info("landing")
+        effective_filter_query = self._add_hash_partition_filter_for_raw_value(
+            info["table_name"],
+            filter_query,
+            partition,
+            self.LANDING_PARTITION_KEY,
+        )
+        update_partition = self._resolve_explicit_partition_for_table(
+            info["table_name"],
+            partition,
+            self.LANDING_PARTITION_KEY,
+        )
+        resolved_partitions = None
+        if update_partition is None:
+            resolved_partitions = self._resolve_partitions_for_query(
+                info["table_name"],
+                effective_filter_query,
+                self.LANDING_PARTITION_KEY,
+            )
+            if resolved_partitions and len(resolved_partitions) == 1:
+                update_partition = resolved_partitions[0]
+
+        result = self.session.update(info["table_name"], effective_filter_query, updates, partition=update_partition)
+        self._log_dldb_timing(
+            "update",
+            self._extract_dldb_last_call(),
+            table_name=info["table_name"],
+            extra={
+                "api": "update_landing",
+                "updated_fields": len(updates),
+                "partition": update_partition,
+                "partitions_count": len(resolved_partitions) if resolved_partitions else None,
+            },
+        )
+        logger.info(
+            f"Submitted landing update: table={info['table_name']}, "
+            f"fields={list(updates.keys())}, partition={update_partition}"
+        )
+        return {
+            "updated": True,
+            "table_name": info["table_name"],
+            "partition": update_partition,
+            "updated_fields": sorted(updates.keys()),
+            "dldb_result": result,
+        }
+
+    def count_landing(self, partition: Optional[str] = None) -> int:
+        return self._count("landing", partition)
+
+    def delete_landing(self, filter_query: str) -> int:
+        return self._delete("landing", filter_query)
+
+    # ==================== Serving Table Operations ====================
+
+    def ingest_serving(self, record: ServingRecord) -> None:
+        self._ingest("serving", record)
+
+    def ingest_serving_batch(
+        self,
+        records: Union[List[ServingRecord], ServingRecordBatch]
+    ) -> None:
+        self._ingest("serving", records)
+
+    def count_serving(self, partition: Optional[str] = None) -> int:
+        return self._count("serving", partition)
+
+    def delete_serving(self, filter_query: str) -> int:
+        return self._delete("serving", filter_query)
+
+    def get_tags_distribution(self, table: Optional[str] = None) -> Dict[str, int]:
+        """Return tag occurrence counts for the serving table or a named table."""
+        table_name = table or self.config.tables.serving_table
+
+        logger.info(f"Getting tags distribution from table '{table_name}'")
+
+        df = self._filter_table(
+            table_name,
+            query="",  # No filter - get all rows
+            limit=None,  # No limit
+            columns=["tags"],  # Only fetch tags column for efficiency
+            partition_cond=None,  # All partitions
+        )
+
+        tag_counts: Dict[str, int] = {}
+        for tags_list in df["tags"]:
+            if tags_list is not None:
+                for tag in tags_list:
+                    if tag:  # Skip empty strings
+                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        logger.info(f"Found {len(tag_counts)} unique tags in table '{table_name}'")
+        return tag_counts
+
+    # ==================== Data Reading Methods ====================
+
+    def fetch_data(
+        self,
+        dataset_type: str,
+        where_sql: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        chunk_size: int = 10000,
+        order_by: str = "created_at",
+        ascending: bool = True,
+    ) -> Iterator[pd.DataFrame]:
+        """Yield landing DataFrames in created_at cursor batches."""
+        table_name = self.config.tables.landing_table
+        partition_metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
+        partition_key = partition_metadata["partition_column"]
+        from datetime import datetime
+
+        filters = [f"dataset_type = '{dataset_type}'"]
+
+        if start_time is not None:
+            filters.append(f"created_at >= {start_time}")
+        if end_time is not None:
+            filters.append(f"created_at <= {end_time}")
+        if where_sql:
+            filters.append(f"({where_sql})")
+
+        # Legacy dt tables still use date-range pruning.
+        partition_cond = None
+        static_partitions = None
+        if partition_key == "dt" and (start_time or end_time):
+            dt_parts = []
+            if start_time:
+                start_dt = datetime.fromtimestamp(start_time).strftime('%Y-%m-%d')
+                dt_parts.append(f"dt >= '{start_dt}'")
+            if end_time:
+                end_dt = datetime.fromtimestamp(end_time).strftime('%Y-%m-%d')
+                dt_parts.append(f"dt <= '{end_dt}'")
+            if dt_parts:
+                partition_cond = " AND ".join(dt_parts)
+        else:
+            static_filter = " AND ".join(filters)
+            static_partitions = self._resolve_partitions_for_query(table_name, static_filter, self.LANDING_PARTITION_KEY)
+
+        cursor = None
+
+        while True:
+            query_filters = filters.copy()
+            if cursor is not None:
+                query_filters.append(f"created_at > {cursor}")
+
+            query = " AND ".join(query_filters)
+
+            logger.info(f"Fetching data from table '{table_name}': filter={query}, chunk_size={chunk_size}")
+
+            df = self._filter_table(
+                table_name,
+                query=query,
+                limit=chunk_size,
+                partitions=static_partitions,
+                partition_cond=partition_cond,
+                order_by=order_by,
+                ascending=ascending,
+            )
+
+            if df is None or len(df) == 0:
+                break
+
+            yield df
+            logger.debug(f"Yielded batch: {len(df)} rows")
+
+            cursor = int(df["created_at"].iloc[-1])
+
+            if len(df) < chunk_size:
+                break
+
+    def pull_data(
+        self,
+        dataset_type: str,
+        where_sql: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        cursor: Optional[int] = None,
+        order_by: str = "created_at",
+        ascending: bool = True,
+        limit: int = 10000,
+        checkout_latest: bool = False,
+    ) -> pd.DataFrame:
+        """Return one cursor-based landing page as a DataFrame."""
+        table_name = self.config.tables.landing_table
+        partition_metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
+        partition_key = partition_metadata["partition_column"]
+        from datetime import datetime
+
+        filters = [f"dataset_type = '{dataset_type}'"]
+
+        if cursor is not None:
+            filters.append(f"created_at > {cursor}")
+
+        if start_time is not None:
+            filters.append(f"created_at >= {start_time}")
+        if end_time is not None:
+            filters.append(f"created_at <= {end_time}")
+        if where_sql:
+            filters.append(f"({where_sql})")
+
+        final_filter = " AND ".join(filters)
+
+        # Legacy dt tables still use date-range pruning.
+        partition_cond = None
+        partitions = None
+        if partition_key == "dt" and (start_time or end_time):
+            dt_parts = []
+            if start_time:
+                start_dt = datetime.fromtimestamp(start_time).strftime('%Y-%m-%d')
+                dt_parts.append(f"dt >= '{start_dt}'")
+            if end_time:
+                end_dt = datetime.fromtimestamp(end_time).strftime('%Y-%m-%d')
+                dt_parts.append(f"dt <= '{end_dt}'")
+            if dt_parts:
+                partition_cond = " AND ".join(dt_parts)
+        else:
+            partitions = self._resolve_partitions_for_query(table_name, final_filter, self.LANDING_PARTITION_KEY)
+
+        logger.info(f"Pulling data from table '{table_name}': filter={final_filter}, cursor={cursor}, limit={limit}")
+
+        df = self._filter_table(
+            table_name,
+            query=final_filter,
+            limit=limit,
+            partitions=partitions,
+            partition_cond=partition_cond,
+            order_by=order_by,
+            ascending=ascending,
+            checkout_latest=checkout_latest,
+        )
+
+        return df
+
+    def extract_cursor(self, df: pd.DataFrame) -> Optional[int]:
+        """Return the final row's created_at cursor, or None for an empty frame."""
+        if df is None or len(df) == 0:
+            return None
+
+        last_row = df.iloc[-1]
+        created_at = last_row["created_at"]
+
+        return int(created_at)
+
+    def get_max_created_at(
+        self,
+        where_sql: str,
+        table: Optional[str] = None
+    ) -> Optional[dict]:
+        """Return the latest matching row by created_at, or None."""
+        table_name = table or self.config.tables.landing_table
+        partitions = self._resolve_landing_query_partitions(table_name, where_sql)
+
+        logger.info(f"Getting max record from table '{table_name}': filter={where_sql}")
+
+        df = self._filter_table(
+            table_name,
+            query=where_sql,
+            limit=1,
+            partitions=partitions,
+            order_by="created_at",
+            ascending=False,  # Descending: first row is the max
+            extra={"api": "get_max_created_at"},
+        )
+
+        if df is None or len(df) == 0:
+            logger.info("No matching records found")
+            return None
+
+        record = df.iloc[0].to_dict()
+        logger.info(f"Max record: id={record.get('id')}, created_at={record.get('created_at')}")
+
+        return record
+
+    def search(
+        self,
+        query: Union[str, List[float]],  # 支持Keyword或Vector
+        limit: int = 10,
+        tags: List[str] = None,
+        where_sql: str = None,
+        dataset_type: str = None,
+        stream: bool = False,
+        table: Optional[str] = None,
+        search_fields: List[str] = None
+    ) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
+        """Run a keyword search and return a DataFrame or one-frame iterator.
+
+        Vector search is unsupported. Use search_text or other scalar fields, not nested messages.
+        """
+        table_name = table or self.config.tables.serving_table
+        if isinstance(query, list):
+            raise NotImplementedError(
+                "Vector search is NOT supported by DLDB yet. "
+                "Please use text keyword search (str) instead of vector embeddings (List[float]). "
+                "Request vector-search support from the DLDB platform team if needed."
+            )
+
+        filters = []
+
+        if dataset_type:
+            filters.append(f"dataset_type = '{dataset_type}'")
+
+        if tags:
+            for tag in tags:
+                filters.append(f"array_contains(tags, '{tag}')")
+
+        if where_sql:
+            filters.append(f"({where_sql})")
+
+        if isinstance(query, str) and query.strip():
+            default_search_fields = ["search_text"]
+            fields_to_search = search_fields if search_fields else default_search_fields
+            search_conditions = []
+            for field in fields_to_search:
+                if field == "messages":
+                    logger.warning(
+                        "Cannot search 'messages' field directly - LanceDB doesn't support "
+                        "casting complex nested structures to STRING. Use 'search_text' field instead. "
+                        "Skipping 'messages' field from search."
+                    )
+                    continue
+                search_conditions.append(f"{field} LIKE '%{query}%'")
+
+            if search_conditions:
+                filters.append(f"({' OR '.join(search_conditions)})")
+
+        final_filter = " AND ".join(filters) if filters else ""
+        partitions = self._resolve_landing_query_partitions(table_name, final_filter)
+
+        logger.info(f"Searching table '{table_name}': query={query}, limit={limit}, stream={stream}, dataset_type={dataset_type}")
+
+        df = self._filter_table(
+            table_name,
+            query=final_filter if final_filter else "",
+            limit=limit,
+            columns=None,
+            partitions=partitions,
+            partition_cond=None,
+            extra={"stream": stream, "dataset_type": dataset_type, "api": "search"},
+        )
+
+        if stream:
+            def result_iterator():
+                yield df
+            return result_iterator()
+        return df
+
+    def get_by_id(
+        self,
+        record_id: str
+    ) -> Optional[Dict[str, Any]]:
+        filter_query = f"id = '{record_id}'"
+
+        logger.debug(f"Looking for record {record_id} in serving table...")
+        results = self._filter_table(
+            self.config.tables.serving_table,
+            query=filter_query,
+            limit=1,
+        )
+
+        if len(results) > 0:
+            logger.debug(f"Record {record_id} found in serving table")
+            return results.iloc[0].to_dict()
+
+        logger.debug(f"Record {record_id} not found in serving table, searching landing table...")
+        results = self._filter_table(
+            self.config.tables.landing_table,
+            query=filter_query,
+            limit=1,
+        )
+
+        if len(results) > 0:
+            logger.debug(f"Record {record_id} found in landing table")
+            return results.iloc[0].to_dict()
+
+        logger.debug(f"Record {record_id} not found in either table")
+        return None
+
+    # ==================== Index Management ====================
+
+    def _resolve_landing_index_partitions(
+        self,
+        table_name: str,
+        partitions: Optional[Union[str, int, List[Union[str, int]]]],
+        *,
+        all_partitions: bool,
+    ) -> List[int]:
+        if all_partitions:
+            return [
+                int(partition)
+                for partition in self._list_existing_partitions_for_table(table_name)
+            ]
+
+        if partitions is None:
+            return self.get_dirty_landing_index_partitions()
+
+        if isinstance(partitions, (str, int)):
+            requested = [partitions]
+        else:
+            requested = list(partitions)
+
+        resolved = []
+        for partition in requested:
+            bucket = self._resolve_explicit_partition_for_table(
+                table_name,
+                partition,
+                self.LANDING_PARTITION_KEY,
+            )
+            if not isinstance(bucket, int):
+                raise ValueError(
+                    f"Landing index maintenance requires HASH bucket int, got {bucket!r}"
+                )
+            resolved.append(bucket)
+
+        return sorted(set(resolved))
+
+    def maintain_landing_indexes(
+        self,
+        partitions: Optional[Union[str, int, List[Union[str, int]]]] = None,
+        *,
+        all_partitions: bool = False,
+        columns: Optional[List[str]] = None,
+        create_missing: bool = True,
+        optimize: bool = True,
+        clear_tracked: bool = True,
+        cleanup_older_than=None,
+        delete_unverified: bool = False,
+        retrain: bool = False,
+    ) -> Dict[str, Any]:
+        """Create missing landing indexes and optionally optimize HASH buckets.
+
+        Intended for explicit background or operations use, not the write path.
+        """
+        info = self._get_table_info("landing")
+        table_name = info["table_name"]
+        metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
+        if str(metadata.get("partition_type") or "").upper() != "HASH":
+            raise ValueError(
+                f"Landing index maintenance currently expects HASH partitioning, "
+                f"got {metadata.get('partition_type')!r} for {table_name}"
+            )
+
+        target_partitions = self._resolve_landing_index_partitions(
+            table_name,
+            partitions,
+            all_partitions=all_partitions,
+        )
+
+        index_type_by_column = dict(LANDING_SCALAR_INDEXES)
+        if columns is None:
+            index_specs = list(LANDING_SCALAR_INDEXES)
+        else:
+            index_specs = [
+                (column, index_type_by_column.get(column, "BTREE"))
+                for column in columns
+            ]
+
+        summary: Dict[str, Any] = {
+            "table_name": table_name,
+            "partitions": target_partitions,
+            "expected_indexes": [f"{column}_idx" for column, _ in index_specs],
+            "indexes_created": [],
+            "optimized_partitions": [],
+            "errors": [],
+        }
+
+        if not target_partitions:
+            logger.info("No landing index partitions to maintain")
+            return summary
+
+        successful_partitions = []
+        for partition in target_partitions:
+            partition_ok = True
+            try:
+                existing_indexes = {
+                    index["name"] if isinstance(index, dict) else index.name
+                    for index in self.session.list_indices(table_name, partition=partition)
+                }
+            except Exception as exc:
+                existing_indexes = set()
+                logger.warning(
+                    f"Could not list indexes for {table_name} partition={partition}: {exc}"
+                )
+
+            if create_missing:
+                for column, index_type in index_specs:
+                    index_name = f"{column}_idx"
+                    if index_name in existing_indexes:
+                        continue
+                    try:
+                        self.session.create_scalar_index(
+                            table_name,
+                            column,
+                            partition=partition,
+                            index_type=index_type,
+                        )
+                        summary["indexes_created"].append(
+                            {
+                                "partition": partition,
+                                "column": column,
+                                "index_name": index_name,
+                                "index_type": index_type,
+                            }
+                        )
+                        self._log_dldb_timing(
+                            "create_scalar_index",
+                            self._extract_dldb_last_call(),
+                            table_name=table_name,
+                            extra={
+                                "partition": partition,
+                                "column": column,
+                                "index_type": index_type,
+                                "api": "maintain_landing_indexes",
+                            },
+                        )
+                    except Exception as exc:
+                        partition_ok = False
+                        error = {
+                            "partition": partition,
+                            "column": column,
+                            "action": "create_scalar_index",
+                            "error": str(exc),
+                        }
+                        summary["errors"].append(error)
+                        logger.warning(f"Failed to create index during maintenance: {error}")
+
+            if optimize:
+                if not hasattr(self.session, "optimize"):
+                    raise RuntimeError("Installed dldb does not expose session.optimize(...)")
+                try:
+                    self.session.optimize(
+                        table_name,
+                        partition=partition,
+                        cleanup_older_than=cleanup_older_than,
+                        delete_unverified=delete_unverified,
+                        retrain=retrain,
+                    )
+                    summary["optimized_partitions"].append(partition)
+                    self._log_dldb_timing(
+                        "optimize",
+                        self._extract_dldb_last_call(),
+                        table_name=table_name,
+                        extra={
+                            "partition": partition,
+                            "api": "maintain_landing_indexes",
+                        },
+                    )
+                except Exception as exc:
+                    partition_ok = False
+                    error = {
+                        "partition": partition,
+                        "action": "optimize",
+                        "error": str(exc),
+                    }
+                    summary["errors"].append(error)
+                    logger.warning(f"Failed to optimize during maintenance: {error}")
+
+            if partition_ok:
+                successful_partitions.append(partition)
+
+        if clear_tracked and successful_partitions and partitions is None:
+            self.clear_dirty_landing_index_partitions(successful_partitions)
+
+        logger.info(
+            f"Landing index maintenance complete: table={table_name}, "
+            f"partitions={len(target_partitions)}, "
+            f"indexes_created={len(summary['indexes_created'])}, "
+            f"optimized={len(summary['optimized_partitions'])}, "
+            f"errors={len(summary['errors'])}"
+        )
+        return summary
+
+    def create_scalar_index(
+        self,
+        table: str = "landing",
+        column: str = "id",
+        index_type: str = "BTREE"
+    ) -> None:
+        info = self._get_table_info(table)
+        self.session.create_scalar_index(info["table_name"], column, index_type=index_type)
+        self._log_dldb_timing(
+            "create_scalar_index",
+            self._extract_dldb_last_call(),
+            table_name=info["table_name"],
+            extra={"column": column, "index_type": index_type},
+        )
+        logger.info(f"Created scalar index on {table}.{column}")
+
+    # ==================== Lifecycle Management ====================
+
+    def close(self) -> Optional[Dict[str, Any]]:
+        summary = self.session.shutdown()
+        if isinstance(summary, dict):
+            self._log_dldb_metrics_summary(summary)
+        logger.info("WTGatewayClient closed")
+        return summary
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        _ = exc_type, exc_val, exc_tb
+        self.close()
