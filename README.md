@@ -1,5 +1,9 @@
 # WT Data Platform SDK
 
+<p align="center">
+    <a href="README_CN.md">中文</a> &nbsp; | &nbsp; English
+</p>
+
 Python SDK for writing, querying, and managing agent trajectory data on the Wind Tunnel data platform. All database operations use dldb, which manages logical partitions on top of LanceDB.
 
 ## Install
