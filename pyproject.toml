@@ -24,7 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "dldb @ git+https://gitee.pjlab.org.cn/L2/caikun/dldb.git@feature/timing-model",
+    "dldb>=1.0.0,<2",
     "pydantic>=2.5.0",
     "loguru>=0.7.2",
     "pandas>=2.3.3",
@@ -40,6 +40,11 @@ dev = [
     "black>=23.11.0",
     "ruff>=0.1.6",
 ]
+
+# Default to the vendored package for uv-based installs.
+# Plain pip users should install packages/dldb first (see README).
+[tool.uv.sources]
+dldb = { path = "packages/dldb", editable = true }
 
 [project.urls]
 Homepage = "https://github.com/AI45Lab/wt-data-platform-sdk"
