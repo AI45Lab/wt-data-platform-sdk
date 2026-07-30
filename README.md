@@ -8,7 +8,10 @@ Python SDK for writing, querying, and managing agent trajectory data on the Wind
 
 ## Install
 
-dldb is currently installed from the repository declared in pyproject.toml.
+dldb is installed from the public
+[DeepLink-org/Persisting](https://github.com/DeepLink-org/Persisting) repository
+declared in `pyproject.toml`. The supported Python versions are 3.10 through
+3.12.
 
 ```bash
 python -m pip install -e .

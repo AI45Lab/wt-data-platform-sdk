@@ -7,7 +7,7 @@ name = "wt-data-platform-sdk"
 version = "0.1.0"
 description = "Wind Tunnel Data Platform SDK"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
 keywords = ["sdk", "data-platform", "etl", "ingestion", "search"]
 authors = [
@@ -18,13 +18,12 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "dldb @ git+https://gitee.pjlab.org.cn/L2/caikun/dldb.git@feature/timing-model",
+    "dldb @ git+https://github.com/DeepLink-org/Persisting.git@2eb21d003160fa57d8fd5444b598eab84dc12bf0#subdirectory=persisting/dldb",
     "pydantic>=2.5.0",
     "loguru>=0.7.2",
     "pandas>=2.3.3",
@@ -56,11 +55,11 @@ exclude = ["wt_data_platform_sdk.egg-info*", "tests*"]
 
 [tool.black]
 line-length = 100
-target-version = ["py39", "py310", "py311"]
+target-version = ["py310", "py311", "py312"]
 
 [tool.ruff]
 line-length = 100
-target-version = ["py39"]
+target-version = ["py310"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]

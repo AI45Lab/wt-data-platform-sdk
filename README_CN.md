@@ -8,7 +8,9 @@
 
 ## 安装
 
-dldb 当前通过 `pyproject.toml` 中声明的代码仓库安装。
+dldb 当前通过 `pyproject.toml` 中声明的公开仓库
+[DeepLink-org/Persisting](https://github.com/DeepLink-org/Persisting) 安装。
+当前支持 Python 3.10 至 3.12。
 
 ```bash
 python -m pip install -e .
