@@ -86,9 +86,18 @@ Set WT_SDK_PROFILE=test to use test tables without changing application code.
 and AWS credentials above are shared by both databases. An explicit `db_uri=`
 passed to `EnvConfigManager` takes precedence.
 
-## Best-Practice Integration
+## End-to-End Best Practice
 
-Load credentials and the table profile through environment variables. In application code, reuse one client, batch trajectory writes, and scope every landing read or update by `job_id` and `session_id`.
+The following workflow models one agent evaluation job from raw trajectory
+capture to training consumption and searchable serving data. Load credentials
+and the table profile through environment variables, then reuse one client
+within each process.
+
+### 1. Capture and Finalize a Trajectory
+
+Use `ingest_landing()` for an event that must be persisted immediately and
+`ingest_landing_batch()` for buffered events. Generate `id` and `created_at`
+upstream; keep `step_id` unique and increasing within a session.
 
 ```python
 import json
@@ -102,51 +111,74 @@ def message(role: str, text: str) -> ChatMessage:
     return ChatMessage(role=role, content=[ContentItem(type="text", text=text)])
 
 
-job_id = "evaluation-run-001"       # One application run
-session_id = str(uuid.uuid4())      # One trajectory
+job_id = "evaluation-run-001"       # One evaluation run and HASH partition key
+session_id = str(uuid.uuid4())      # One agent trajectory
 created_at = int(time.time())
 
-records = [
-    LandingRecord(
+
+def make_record(step_id: int, terminal: bool = False) -> LandingRecord:
+    return LandingRecord(
         id=f"{session_id}:{step_id}",  # Caller-provided and globally unique
         dataset_type="RL",
         job_id=job_id,
         session_id=session_id,
         step_id=step_id,
         created_at=created_at + step_id,
-        is_terminal=step_id == 2,
-        is_session_completed=step_id == 2,
+        is_terminal=terminal,
+        is_session_completed=terminal,
         messages=[message("user", f"task input for step {step_id}")],
         response=message("assistant", f"result for step {step_id}"),
-        meta_json=json.dumps({"task_id": "benchmark-task-42", "group_id": "group-a"}),
+        meta_json=json.dumps(
+            {"task_id": "benchmark-task-42", "group_id": "group-a"}
+        ),
     )
-    for step_id in (1, 2)
-]
 
+
+first = make_record(1)
+buffered = [make_record(2), make_record(3, terminal=True)]
 scope = f"job_id = '{job_id}' AND session_id = '{session_id}'"
 
 with WTGatewayClient() as client:
-    client.ingest_landing_batch(records)
+    client.ingest_landing(first)             # Low-latency single write
+    client.ingest_landing_batch(buffered)    # Higher-throughput buffered write
+
+    # Reward may arrive after the terminal event has been stored.
     client.update_landing(
-        f"{scope} AND step_id = 2",
-        {"is_trainable": True},
+        f"{scope} AND step_id = 3",
+        {"reward": 1.0, "step_reward": 1.0, "is_trainable": True},
     )
+
     trajectory = client.query_landing(
         scope,
         order_by="step_id",
         checkout_latest=True,
     )
+    job_row_count = client.count_landing(partition=job_id)
+
+    # Prefer this pruned lookup when both job_id and id are known.
+    exact_event = client.query_landing(
+        f"job_id = '{job_id}' AND id = '{buffered[-1].id}'",
+        limit=1,
+    )
+
+    # Use only when the globally unique id is known but its job_id is not.
+    fallback_event = client.get_by_id(buffered[-1].id)
 ```
 
-Generate `id` and `created_at` upstream, keep `step_id` unique and increasing within a session, and let the SDK resolve the HASH bucket from `job_id`. Fields without a shared query contract, such as `task_id` and `group_id`, belong in `meta_json`. The context manager closes the dldb session and emits its final metrics summary when enabled.
+`get_by_id()` checks serving first and then landing. Because an ID alone cannot
+identify a landing HASH bucket, it is a convenient fallback rather than the
+preferred hot-path lookup. When `job_id` is available, use `query_landing()`
+with both values for physical partition pruning.
 
-### Incremental and Batch Reads
+### 2. Consume Completed Events
 
-SAfactory-style consumers pull one page at a time and persist the returned cursor only after processing that page successfully. Keep `job_id` in `where_sql` so the SDK can prune HASH partitions.
+A long-running trainer pulls one page at a time and saves the cursor only after
+that page is processed successfully. `pull_data()` adds the `dataset_type`
+filter; keep `job_id` in `where_sql` for HASH pruning.
 
 ```python
 job_filter = "job_id = 'evaluation-run-001' AND is_terminal = True"
-stored_cursor = None  # Load this from the consumer's durable checkpoint.
+stored_cursor = None  # Load from the consumer's durable checkpoint.
 
 with WTGatewayClient() as client:
     page = client.pull_data(
@@ -157,7 +189,7 @@ with WTGatewayClient() as client:
         checkout_latest=True,
     )
     if not page.empty:
-        # Process page, then persist next_cursor as the new checkpoint.
+        # Process page successfully, then persist the new checkpoint.
         next_cursor = client.extract_cursor(page)
 
     latest_record = client.get_max_created_at(
@@ -165,7 +197,8 @@ with WTGatewayClient() as client:
     )
 ```
 
-For an offline scan, `fetch_data()` manages the `created_at` cursor and yields DataFrame batches:
+For an offline export or backfill, `fetch_data()` manages the `created_at`
+cursor and yields DataFrame batches:
 
 ```python
 with WTGatewayClient() as client:
@@ -176,6 +209,63 @@ with WTGatewayClient() as client:
     ):
         print(f"received {len(batch)} rows")
 ```
+
+### 3. Publish Searchable Data
+
+After ETL or training selection, publish enriched records to serving. Keyword
+search operates on `search_text`; vector search is not currently exposed.
+
+```python
+from wt_sdk import ServingRecord
+
+serving_data = buffered[-1].model_dump()
+serving_data.update(reward=1.0, step_reward=1.0, is_trainable=True)
+serving_record = ServingRecord(
+    **serving_data,
+    search_text="benchmark task final successful response",
+    tags=["trainable", "successful"],
+)
+
+with WTGatewayClient() as client:
+    client.ingest_serving(serving_record)
+    matches = client.search(
+        "successful",
+        dataset_type="RL",
+        tags=["trainable"],
+        limit=20,
+    )
+```
+
+### 4. Maintain Incremental Indexes
+
+Do not build indexes in the synchronous writer path. After a job finishes, or
+from a background operations process, refresh only the bucket touched by that
+job:
+
+```python
+with WTGatewayClient() as client:
+    summary = client.maintain_landing_indexes(
+        partitions=["evaluation-run-001"],
+    )
+```
+
+This creates missing configured indexes and runs dldb optimize so appended rows
+enter existing indexes. Use `all_partitions=True` only for scheduled full-table
+maintenance. The context manager closes the dldb session and emits its final
+metrics summary when enabled.
+
+### Choosing a Read API
+
+| Need | Recommended API | Why |
+| --- | --- | --- |
+| Reconstruct one trajectory | `query_landing(job_id + session_id)` | Ordered, HASH-pruned trajectory read |
+| Read one event with its job known | `query_landing(job_id + id)` | Precise and HASH-pruned |
+| Read one event when only its ID is known | `get_by_id(id)` | Convenient fallback across serving and landing |
+| Poll newly completed events | `pull_data()` + `extract_cursor()` | One checkpointed page at a time |
+| Export or backfill a job | `fetch_data()` | Iterates through DataFrame batches |
+| Inspect a consumer watermark | `get_max_created_at()` | Returns the latest matching record |
+| Count rows for one job | `count_landing(partition=job_id)` | Resolves and filters the correct HASH bucket |
+| Search enriched output | `search()` | Queries serving `search_text` and tags |
 
 ## Client Interface
 
@@ -226,17 +316,10 @@ Vector search is not currently exposed by dldb. search() accepts keyword queries
 
 ### Index Maintenance
 
-Landing scalar indexes are configured for dataset_type, is_terminal, and is_trainable. Keep indexing out of the synchronous writer path:
-
-```python
-# Run after a job finishes or from a background maintenance process.
-job_id = "evaluation-run-001"
-
-with WTGatewayClient() as client:
-    summary = client.maintain_landing_indexes(partitions=[job_id])
-```
-
-`maintain_landing_indexes()` accepts raw job IDs, maps them to HASH buckets, creates missing configured indexes, and optionally runs dldb optimize so appended rows enter existing indexes. Use `all_partitions=True` for scheduled full-table maintenance, not after every write.
+Landing scalar indexes are configured for `dataset_type`, `is_terminal`, and
+`is_trainable`. `maintain_landing_indexes()` accepts raw job IDs, maps them to
+HASH buckets, creates missing indexes, and optionally runs dldb optimize. See
+the end-to-end workflow above for the recommended background usage.
 
 ## Timing and Metrics
 

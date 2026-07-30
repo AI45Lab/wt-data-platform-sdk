@@ -84,9 +84,17 @@ services:
 `evaluation_env_config`，不受 `WT_SDK_PROFILE` 影响。上面的 endpoint 和 AWS
 凭证由两个数据库共用。显式传给 `EnvConfigManager` 的 `db_uri=` 具有更高优先级。
 
-## 最佳实践示例
+## 端到端最佳实践
 
-通过环境变量加载凭证和表环境；在应用代码中复用同一个客户端，批量写入轨迹，并使用 `job_id` 和 `session_id` 限定每次 landing 查询或更新。
+下面用一次 agent evaluation job 串起原始轨迹写入、训练消费和 serving
+检索。数据库凭证和表环境通过环境变量加载；每个进程内部应复用同一个
+client。
+
+### 1. 写入并完成一条轨迹
+
+必须立即落库的事件使用 `ingest_landing()`，已经在内存中缓冲的事件使用
+`ingest_landing_batch()`。`id` 和 `created_at` 由上游生成，同一 session
+中的 `step_id` 应唯一且单调递增。
 
 ```python
 import json
@@ -100,47 +108,71 @@ def message(role: str, text: str) -> ChatMessage:
     return ChatMessage(role=role, content=[ContentItem(type="text", text=text)])
 
 
-job_id = "evaluation-run-001"       # 一次应用运行
-session_id = str(uuid.uuid4())      # 一条轨迹
+job_id = "evaluation-run-001"       # 一次评测运行，也是 HASH 分区键
+session_id = str(uuid.uuid4())      # 一条 agent 轨迹
 created_at = int(time.time())
 
-records = [
-    LandingRecord(
+
+def make_record(step_id: int, terminal: bool = False) -> LandingRecord:
+    return LandingRecord(
         id=f"{session_id}:{step_id}",  # 由调用方生成且全局唯一
         dataset_type="RL",
         job_id=job_id,
         session_id=session_id,
         step_id=step_id,
         created_at=created_at + step_id,
-        is_terminal=step_id == 2,
-        is_session_completed=step_id == 2,
+        is_terminal=terminal,
+        is_session_completed=terminal,
         messages=[message("user", f"task input for step {step_id}")],
         response=message("assistant", f"result for step {step_id}"),
-        meta_json=json.dumps({"task_id": "benchmark-task-42", "group_id": "group-a"}),
+        meta_json=json.dumps(
+            {"task_id": "benchmark-task-42", "group_id": "group-a"}
+        ),
     )
-    for step_id in (1, 2)
-]
 
+
+first = make_record(1)
+buffered = [make_record(2), make_record(3, terminal=True)]
 scope = f"job_id = '{job_id}' AND session_id = '{session_id}'"
 
 with WTGatewayClient() as client:
-    client.ingest_landing_batch(records)
+    client.ingest_landing(first)             # 低时延单条写入
+    client.ingest_landing_batch(buffered)    # 更高吞吐的批量写入
+
+    # reward 可能在 terminal 事件落库后才返回。
     client.update_landing(
-        f"{scope} AND step_id = 2",
-        {"is_trainable": True},
+        f"{scope} AND step_id = 3",
+        {"reward": 1.0, "step_reward": 1.0, "is_trainable": True},
     )
+
     trajectory = client.query_landing(
         scope,
         order_by="step_id",
         checkout_latest=True,
     )
+    job_row_count = client.count_landing(partition=job_id)
+
+    # 同时知道 job_id 和 id 时，优先使用这种可剪枝查询。
+    exact_event = client.query_landing(
+        f"job_id = '{job_id}' AND id = '{buffered[-1].id}'",
+        limit=1,
+    )
+
+    # 只知道全局唯一 id、不知道 job_id 时再使用。
+    fallback_event = client.get_by_id(buffered[-1].id)
 ```
 
-`id` 和 `created_at` 由上游生成，同一 session 内的 `step_id` 应唯一且单调递增；HASH bucket 由 SDK 根据 `job_id` 自动计算。`task_id`、`group_id` 等尚无统一查询契约的字段放入 `meta_json`。使用 context manager 可以确保 dldb session 被关闭，并在启用 metrics 时输出最终汇总。
+`get_by_id()` 会先查询 serving，再查询 landing。单独一个 ID 无法定位 landing
+的 HASH bucket，因此它适合作为便捷的兜底接口，而不是高频查询首选。能够取得
+`job_id` 时，应使用同时包含 `job_id` 和 `id` 的 `query_landing()`，让 SDK
+执行物理分区剪枝。`task_id`、`group_id` 等尚无统一查询契约的字段放在
+`meta_json` 中。
 
-### 增量与分批读取
+### 2. 消费已完成事件
 
-SAfactory 一类的持续消费方可以每次调用 `pull_data()` 拉取一页，并在该页处理成功后持久化返回的游标。`where_sql` 中应包含 `job_id`，以便 SDK 对 HASH 分区进行物理剪枝。
+持续运行的训练消费者每次使用 `pull_data()` 拉取一页，并且只在该页处理成功后
+持久化新游标。`pull_data()` 会自动添加 `dataset_type` 条件；`where_sql` 中
+仍应包含 `job_id`，以便进行 HASH 剪枝。
 
 ```python
 job_filter = "job_id = 'evaluation-run-001' AND is_terminal = True"
@@ -155,7 +187,7 @@ with WTGatewayClient() as client:
         checkout_latest=True,
     )
     if not page.empty:
-        # 先处理本页，再将 next_cursor 持久化为新的 checkpoint。
+        # 先成功处理本页，再持久化新的 checkpoint。
         next_cursor = client.extract_cursor(page)
 
     latest_record = client.get_max_created_at(
@@ -163,7 +195,8 @@ with WTGatewayClient() as client:
     )
 ```
 
-离线遍历数据时，可以使用 `fetch_data()` 自动维护 `created_at` 游标并逐批返回 DataFrame：
+离线导出或回填时，使用 `fetch_data()` 自动维护 `created_at` 游标并逐批返回
+DataFrame：
 
 ```python
 with WTGatewayClient() as client:
@@ -174,6 +207,61 @@ with WTGatewayClient() as client:
     ):
         print(f"received {len(batch)} rows")
 ```
+
+### 3. 发布可检索数据
+
+ETL 或训练筛选完成后，可以把增强后的记录发布到 serving。关键词检索基于
+`search_text`；dldb 当前尚未开放向量搜索。
+
+```python
+from wt_sdk import ServingRecord
+
+serving_data = buffered[-1].model_dump()
+serving_data.update(reward=1.0, step_reward=1.0, is_trainable=True)
+serving_record = ServingRecord(
+    **serving_data,
+    search_text="benchmark task final successful response",
+    tags=["trainable", "successful"],
+)
+
+with WTGatewayClient() as client:
+    client.ingest_serving(serving_record)
+    matches = client.search(
+        "successful",
+        dataset_type="RL",
+        tags=["trainable"],
+        limit=20,
+    )
+```
+
+### 4. 维护增量索引
+
+不要在同步写入链路中构建索引。一个 job 完成后，或由独立后台运维任务，仅刷新
+该 job 触达的 bucket：
+
+```python
+with WTGatewayClient() as client:
+    summary = client.maintain_landing_indexes(
+        partitions=["evaluation-run-001"],
+    )
+```
+
+该方法会创建缺失的预设索引并执行 dldb optimize，使新增数据进入已有索引。
+`all_partitions=True` 只用于定期全表维护，不应在每次写入后调用。context
+manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇总。
+
+### 如何选择读取接口
+
+| 需求 | 推荐接口 | 原因 |
+| --- | --- | --- |
+| 还原一条完整轨迹 | `query_landing(job_id + session_id)` | 有序读取轨迹并执行 HASH 剪枝 |
+| 已知所属 job，读取一条事件 | `query_landing(job_id + id)` | 精确且可执行 HASH 剪枝 |
+| 只知道事件 ID | `get_by_id(id)` | 在 serving 和 landing 之间兜底查询 |
+| 持续轮询新增完成事件 | `pull_data()` + `extract_cursor()` | 每次拉取一页并保存 checkpoint |
+| 导出或回填一个 job | `fetch_data()` | 自动分批返回 DataFrame |
+| 查看消费者数据水位 | `get_max_created_at()` | 返回满足条件的最新记录 |
+| 统计一个 job 的数据量 | `count_landing(partition=job_id)` | 定位 bucket 后仍按原始 job 过滤 |
+| 检索增强后的结果 | `search()` | 查询 serving 的 `search_text` 和 tags |
 
 ## 客户端接口
 
@@ -224,17 +312,10 @@ dldb 当前尚未开放向量搜索。`search()` 接受关键词查询；设置 
 
 ### 索引维护
 
-Landing 标量索引配置在 `dataset_type`、`is_terminal` 和 `is_trainable` 字段上。索引维护不应放入同步写入链路：
-
-```python
-# 在一个 job 完成后或独立后台维护任务中执行。
-job_id = "evaluation-run-001"
-
-with WTGatewayClient() as client:
-    summary = client.maintain_landing_indexes(partitions=[job_id])
-```
-
-`maintain_landing_indexes()` 接受原始 `job_id`，自动映射到 HASH bucket，创建缺失的预设索引，并可选执行 dldb optimize，让新增数据进入已有索引。定期全表维护可使用 `all_partitions=True`，但不要在每次写入后调用。
+Landing 标量索引配置在 `dataset_type`、`is_terminal` 和 `is_trainable`
+字段上。`maintain_landing_indexes()` 接受原始 `job_id`，自动映射到 HASH
+bucket，创建缺失索引，并可选执行 dldb optimize。推荐的后台调用方式见上面的
+端到端流程。
 
 ## 时延与指标
 
