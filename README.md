@@ -86,36 +86,59 @@ Set WT_SDK_PROFILE=test to use test tables without changing application code.
 and AWS credentials above are shared by both databases. An explicit `db_uri=`
 passed to `EnvConfigManager` takes precedence.
 
-## Quick Start
+## Best-Practice Integration
 
-Landing uses HASH(job_id) with 128 buckets. Include job_id in landing reads and updates so the SDK can prune to one physical bucket.
+Load credentials and the table profile through environment variables. In application code, reuse one client, batch trajectory writes, and scope every landing read or update by `job_id` and `session_id`.
 
 ```python
+import json
 import time
+import uuid
 
 from wt_sdk import ChatMessage, ContentItem, LandingRecord, WTGatewayClient
 
-record = LandingRecord(
-    id="trajectory-step-001",
-    dataset_type="RL",
-    job_id="job-001",
-    session_id="session-001",
-    step_id=1,
-    created_at=int(time.time()),
-    is_terminal=False,
-    messages=[ChatMessage(role="user", content=[ContentItem(type="text", text="Solve the task")])],
-    response=ChatMessage(role="assistant", content=[ContentItem(type="text", text="Working on it")]),
-)
+
+def message(role: str, text: str) -> ChatMessage:
+    return ChatMessage(role=role, content=[ContentItem(type="text", text=text)])
+
+
+job_id = "evaluation-run-001"       # One application run
+session_id = str(uuid.uuid4())      # One trajectory
+created_at = int(time.time())
+
+records = [
+    LandingRecord(
+        id=f"{session_id}:{step_id}",  # Caller-provided and globally unique
+        dataset_type="RL",
+        job_id=job_id,
+        session_id=session_id,
+        step_id=step_id,
+        created_at=created_at + step_id,
+        is_terminal=step_id == 2,
+        is_session_completed=step_id == 2,
+        messages=[message("user", f"task input for step {step_id}")],
+        response=message("assistant", f"result for step {step_id}"),
+        meta_json=json.dumps({"task_id": "benchmark-task-42", "group_id": "group-a"}),
+    )
+    for step_id in (1, 2)
+]
+
+scope = f"job_id = '{job_id}' AND session_id = '{session_id}'"
 
 with WTGatewayClient() as client:
-    client.ingest_landing(record)
-    steps = client.query_landing(
-        "job_id = 'job-001' AND session_id = 'session-001'",
+    client.ingest_landing_batch(records)
+    client.update_landing(
+        f"{scope} AND step_id = 2",
+        {"is_trainable": True},
+    )
+    trajectory = client.query_landing(
+        scope,
         order_by="step_id",
+        checkout_latest=True,
     )
 ```
 
-id and created_at are caller-provided. dt and blob_manifest are derived during record conversion. Within one session, step_id should be unique and monotonically increasing.
+Generate `id` and `created_at` upstream, keep `step_id` unique and increasing within a session, and let the SDK resolve the HASH bucket from `job_id`. Fields without a shared query contract, such as `task_id` and `group_id`, belong in `meta_json`. The context manager closes the dldb session and emits its final metrics summary when enabled.
 
 ## Client Interface
 

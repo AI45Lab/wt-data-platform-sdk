@@ -84,36 +84,59 @@ services:
 `evaluation_env_config`，不受 `WT_SDK_PROFILE` 影响。上面的 endpoint 和 AWS
 凭证由两个数据库共用。显式传给 `EnvConfigManager` 的 `db_uri=` 具有更高优先级。
 
-## 快速开始
+## 最佳实践示例
 
-Landing 表使用 128 个 bucket 的 `HASH(job_id)` 分区。读取和更新 landing 数据时应包含 `job_id`，使 SDK 能够剪枝到单个物理 bucket。
+通过环境变量加载凭证和表环境；在应用代码中复用同一个客户端，批量写入轨迹，并使用 `job_id` 和 `session_id` 限定每次 landing 查询或更新。
 
 ```python
+import json
 import time
+import uuid
 
 from wt_sdk import ChatMessage, ContentItem, LandingRecord, WTGatewayClient
 
-record = LandingRecord(
-    id="trajectory-step-001",
-    dataset_type="RL",
-    job_id="job-001",
-    session_id="session-001",
-    step_id=1,
-    created_at=int(time.time()),
-    is_terminal=False,
-    messages=[ChatMessage(role="user", content=[ContentItem(type="text", text="Solve the task")])],
-    response=ChatMessage(role="assistant", content=[ContentItem(type="text", text="Working on it")]),
-)
+
+def message(role: str, text: str) -> ChatMessage:
+    return ChatMessage(role=role, content=[ContentItem(type="text", text=text)])
+
+
+job_id = "evaluation-run-001"       # 一次应用运行
+session_id = str(uuid.uuid4())      # 一条轨迹
+created_at = int(time.time())
+
+records = [
+    LandingRecord(
+        id=f"{session_id}:{step_id}",  # 由调用方生成且全局唯一
+        dataset_type="RL",
+        job_id=job_id,
+        session_id=session_id,
+        step_id=step_id,
+        created_at=created_at + step_id,
+        is_terminal=step_id == 2,
+        is_session_completed=step_id == 2,
+        messages=[message("user", f"task input for step {step_id}")],
+        response=message("assistant", f"result for step {step_id}"),
+        meta_json=json.dumps({"task_id": "benchmark-task-42", "group_id": "group-a"}),
+    )
+    for step_id in (1, 2)
+]
+
+scope = f"job_id = '{job_id}' AND session_id = '{session_id}'"
 
 with WTGatewayClient() as client:
-    client.ingest_landing(record)
-    steps = client.query_landing(
-        "job_id = 'job-001' AND session_id = 'session-001'",
+    client.ingest_landing_batch(records)
+    client.update_landing(
+        f"{scope} AND step_id = 2",
+        {"is_trainable": True},
+    )
+    trajectory = client.query_landing(
+        scope,
         order_by="step_id",
+        checkout_latest=True,
     )
 ```
 
-`id` 和 `created_at` 由调用方提供。`dt` 和 `blob_manifest` 在记录转换过程中生成。同一个 session 内的 `step_id` 应保持唯一且单调递增。
+`id` 和 `created_at` 由上游生成，同一 session 内的 `step_id` 应唯一且单调递增；HASH bucket 由 SDK 根据 `job_id` 自动计算。`task_id`、`group_id` 等尚无统一查询契约的字段放入 `meta_json`。使用 context manager 可以确保 dldb session 被关闭，并在启用 metrics 时输出最终汇总。
 
 ## 客户端接口
 
