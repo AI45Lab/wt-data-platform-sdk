@@ -140,6 +140,43 @@ with WTGatewayClient() as client:
 
 Generate `id` and `created_at` upstream, keep `step_id` unique and increasing within a session, and let the SDK resolve the HASH bucket from `job_id`. Fields without a shared query contract, such as `task_id` and `group_id`, belong in `meta_json`. The context manager closes the dldb session and emits its final metrics summary when enabled.
 
+### Incremental and Batch Reads
+
+SAfactory-style consumers pull one page at a time and persist the returned cursor only after processing that page successfully. Keep `job_id` in `where_sql` so the SDK can prune HASH partitions.
+
+```python
+job_filter = "job_id = 'evaluation-run-001' AND is_terminal = True"
+stored_cursor = None  # Load this from the consumer's durable checkpoint.
+
+with WTGatewayClient() as client:
+    page = client.pull_data(
+        dataset_type="RL",
+        where_sql=job_filter,
+        cursor=stored_cursor,
+        limit=1000,
+        checkout_latest=True,
+    )
+    if not page.empty:
+        # Process page, then persist next_cursor as the new checkpoint.
+        next_cursor = client.extract_cursor(page)
+
+    latest_record = client.get_max_created_at(
+        where_sql=f"dataset_type = 'RL' AND {job_filter}",
+    )
+```
+
+For an offline scan, `fetch_data()` manages the `created_at` cursor and yields DataFrame batches:
+
+```python
+with WTGatewayClient() as client:
+    for batch in client.fetch_data(
+        dataset_type="RL",
+        where_sql="job_id = 'evaluation-run-001'",
+        chunk_size=1000,
+    ):
+        print(f"received {len(batch)} rows")
+```
+
 ## Client Interface
 
 ### Landing Data
@@ -192,11 +229,14 @@ Vector search is not currently exposed by dldb. search() accepts keyword queries
 Landing scalar indexes are configured for dataset_type, is_terminal, and is_trainable. Keep indexing out of the synchronous writer path:
 
 ```python
+# Run after a job finishes or from a background maintenance process.
+job_id = "evaluation-run-001"
+
 with WTGatewayClient() as client:
-    client.maintain_landing_indexes(all_partitions=True)
+    summary = client.maintain_landing_indexes(partitions=[job_id])
 ```
 
-maintain_landing_indexes() creates missing per-bucket indexes and optionally runs dldb optimize.
+`maintain_landing_indexes()` accepts raw job IDs, maps them to HASH buckets, creates missing configured indexes, and optionally runs dldb optimize so appended rows enter existing indexes. Use `all_partitions=True` for scheduled full-table maintenance, not after every write.
 
 ## Timing and Metrics
 

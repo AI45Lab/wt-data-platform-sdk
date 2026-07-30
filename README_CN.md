@@ -138,6 +138,43 @@ with WTGatewayClient() as client:
 
 `id` 和 `created_at` 由上游生成，同一 session 内的 `step_id` 应唯一且单调递增；HASH bucket 由 SDK 根据 `job_id` 自动计算。`task_id`、`group_id` 等尚无统一查询契约的字段放入 `meta_json`。使用 context manager 可以确保 dldb session 被关闭，并在启用 metrics 时输出最终汇总。
 
+### 增量与分批读取
+
+SAfactory 一类的持续消费方可以每次调用 `pull_data()` 拉取一页，并在该页处理成功后持久化返回的游标。`where_sql` 中应包含 `job_id`，以便 SDK 对 HASH 分区进行物理剪枝。
+
+```python
+job_filter = "job_id = 'evaluation-run-001' AND is_terminal = True"
+stored_cursor = None  # 从消费方持久化的 checkpoint 中读取。
+
+with WTGatewayClient() as client:
+    page = client.pull_data(
+        dataset_type="RL",
+        where_sql=job_filter,
+        cursor=stored_cursor,
+        limit=1000,
+        checkout_latest=True,
+    )
+    if not page.empty:
+        # 先处理本页，再将 next_cursor 持久化为新的 checkpoint。
+        next_cursor = client.extract_cursor(page)
+
+    latest_record = client.get_max_created_at(
+        where_sql=f"dataset_type = 'RL' AND {job_filter}",
+    )
+```
+
+离线遍历数据时，可以使用 `fetch_data()` 自动维护 `created_at` 游标并逐批返回 DataFrame：
+
+```python
+with WTGatewayClient() as client:
+    for batch in client.fetch_data(
+        dataset_type="RL",
+        where_sql="job_id = 'evaluation-run-001'",
+        chunk_size=1000,
+    ):
+        print(f"received {len(batch)} rows")
+```
+
 ## 客户端接口
 
 ### Landing 数据
@@ -190,11 +227,14 @@ dldb 当前尚未开放向量搜索。`search()` 接受关键词查询；设置 
 Landing 标量索引配置在 `dataset_type`、`is_terminal` 和 `is_trainable` 字段上。索引维护不应放入同步写入链路：
 
 ```python
+# 在一个 job 完成后或独立后台维护任务中执行。
+job_id = "evaluation-run-001"
+
 with WTGatewayClient() as client:
-    client.maintain_landing_indexes(all_partitions=True)
+    summary = client.maintain_landing_indexes(partitions=[job_id])
 ```
 
-`maintain_landing_indexes()` 会为各 bucket 创建缺失索引，并可选执行 dldb optimize。
+`maintain_landing_indexes()` 接受原始 `job_id`，自动映射到 HASH bucket，创建缺失的预设索引，并可选执行 dldb optimize，让新增数据进入已有索引。定期全表维护可使用 `all_partitions=True`，但不要在每次写入后调用。
 
 ## 时延与指标
 
