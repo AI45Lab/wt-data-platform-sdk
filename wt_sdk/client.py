@@ -785,7 +785,7 @@ class WTGatewayClient:
 
         df = self._filter_table(
             table_name,
-            query="",  # No filter - get all rows
+            query="id IS NOT NULL",  # dldb rejects an empty WHERE expression
             limit=None,  # No limit
             columns=["tags"],  # Only fetch tags column for efficiency
             partition_cond=None,  # All partitions
@@ -1209,14 +1209,14 @@ class WTGatewayClient:
             if search_conditions:
                 filters.append(f"({' OR '.join(search_conditions)})")
 
-        final_filter = " AND ".join(filters) if filters else ""
+        final_filter = " AND ".join(filters) if filters else "id IS NOT NULL"
         partitions = self._resolve_landing_query_partitions(table_name, final_filter)
 
         logger.info(f"Searching table '{table_name}': query={query}, limit={limit}, stream={stream}, dataset_type={dataset_type}")
 
         df = self._filter_table(
             table_name,
-            query=final_filter if final_filter else "",
+            query=final_filter,
             limit=limit,
             columns=None,
             partitions=partitions,

@@ -622,8 +622,26 @@ def test_keyword_search_defaults_to_search_text_and_rejects_nested_fields(monkey
     client.search("example")
     assert fake_session.last_filter_kwargs["query"] == "(search_text LIKE '%example%')"
 
+    client.search("")
+    assert fake_session.last_filter_kwargs["query"] == "id IS NOT NULL"
+
     with pytest.raises(ValueError, match="nested field 'chosen_trace'"):
         client.search("example", search_fields=["chosen_trace"])
+
+
+def test_get_tags_distribution_uses_non_empty_filter(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.rows["serving_test"] = [
+        {"id": "serving-1", "tags": ["safe", "trainable"]},
+        {"id": "serving-2", "tags": ["safe"]},
+    ]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+
+    assert client.get_tags_distribution() == {"safe": 2, "trainable": 1}
+    assert fake_session.last_filter_kwargs["query"] == "id IS NOT NULL"
 
 
 def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):

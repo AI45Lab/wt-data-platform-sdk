@@ -134,7 +134,8 @@ def add_missing_indexes(table_name: str, db_uri: str = None, dry_run: bool = Fal
 
     if not partitions:
         print(f"  No partitions found (table is empty)")
-        print(f"  Indexes will be created automatically when partitions are created")
+        print("  HASH bucket indexes cannot exist before data creates physical buckets.")
+        print("  Re-run this command after the first records are written.")
         session.shutdown()
         return 0
 
