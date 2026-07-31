@@ -28,7 +28,7 @@ Example usage:
     client.ingest_landing(record)
 
     # Query data
-    results = client.query_landing("dataset_type = 'chat_training'", limit=10)
+    results = client.query_data("dataset_type = 'chat_training'", limit=10)
 
     # Use context manager for automatic cleanup
     with WTGatewayClient() as client:

@@ -10,21 +10,9 @@ from .landing import LandingRecord
 class ServingRecord(LandingRecord):
     """
     Serving table record model.
-    Enriched data with search capabilities and vector embeddings.
-    Inherits all fields from LandingRecord and adds serving-specific fields.
+    Uses exactly the same fields as LandingRecord.
     """
-    # Search Enhancement
-    search_text: Optional[str] = Field(None, description="Full-text search aggregated content")
-    tags: Optional[List[str]] = Field(None, description="Business tags")
-
-    # Vector Capabilities
-    instruction_vector: Optional[List[float]] = Field(
-        None,
-        description="1536-dim float32 vector (OpenAI embedding compatible)"
-    )
-
-    # Large Vector/Matrix Storage (ETL output)
-    vector_file_path: Optional[str] = Field(None, description="S3 path to large vector file")
+    pass
 
 
 class ServingRecordBatch(BaseModel):

@@ -13,8 +13,8 @@ IDENTITY_COLUMNS = ["id", "job_id", "session_id", "created_at"]
 NESTED_COLUMNS = [
     "messages",
     "response",
-    "chosen_response",
-    "rejected_response",
+    "chosen_trace",
+    "rejected_trace",
     "blob_manifest",
 ]
 

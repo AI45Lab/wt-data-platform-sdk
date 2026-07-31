@@ -70,10 +70,8 @@ def _get_partition_column(session, table_name: str) -> str:
     except Exception:
         pass
 
-    if table_name in ["wind_tunnel_serving", "serving_test"]:
-        return "dataset_type"
-    if table_name in ["wind_tunnel_landing", "landing_test"]:
-        return "dt"
+    if table_name in TABLE_INDEXES:
+        return "job_id"
     return "dataset_type"
 
 
@@ -136,7 +134,8 @@ def add_missing_indexes(table_name: str, db_uri: str = None, dry_run: bool = Fal
 
     if not partitions:
         print(f"  No partitions found (table is empty)")
-        print(f"  Indexes will be created automatically when partitions are created")
+        print("  HASH bucket indexes cannot exist before data creates physical buckets.")
+        print("  Re-run this command after the first records are written.")
         session.shutdown()
         return 0
 

@@ -5,7 +5,7 @@ Main ETL script for ingesting data from S3 into serving table.
 This is a one-time job to ingest tagged data directly into wind_tunnel_serving table.
 
 Usage:
-    python scripts/etl/run_serving_etl.py --s3-prefix s3://wind-tunnel-landing/owner/dataset/type/dt_v1/
+    python scripts/existing_data_etl/run_serving_etl.py --s3-prefix s3://wind-tunnel-landing/owner/dataset/type/dt_v1/
 
 For serving table ingestion:
 - search_text: empty (None)
@@ -22,7 +22,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scripts.etl.ingest_serving_data import ServingDataETL
+from scripts.existing_data_etl.ingest_serving_data import ServingDataETL
 
 
 def main():
@@ -32,18 +32,18 @@ def main():
         epilog="""
 Examples:
   # Dry run (validate only)
-  python scripts/etl/run_serving_etl.py --dry-run
+  python scripts/existing_data_etl/run_serving_etl.py --dry-run
 
   # Skip blob verification
-  python scripts/etl/run_serving_etl.py --skip-blob-check
+  python scripts/existing_data_etl/run_serving_etl.py --skip-blob-check
 
   # Custom S3 prefix with batch size
-  python scripts/etl/run_serving_etl.py \\
+  python scripts/existing_data_etl/run_serving_etl.py \\
       --s3-prefix "s3://wind-tunnel-landing/owner/dataset/type/2025-01-04_v1/" \\
       --batch-size 200
 
   # Allow duplicates (skip idempotence check)
-  python scripts/etl/run_serving_etl.py --allow-duplicates
+  python scripts/existing_data_etl/run_serving_etl.py --allow-duplicates
         """
     )
     parser.add_argument(

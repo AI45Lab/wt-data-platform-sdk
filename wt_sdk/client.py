@@ -1,5 +1,7 @@
 import re
+import sqlite3
 import threading
+import tempfile
 import time
 from typing import List, Optional, Union, Dict, Any, Iterator
 from loguru import logger
@@ -32,6 +34,7 @@ from wt_sdk.utils import (
     landing_batch_to_dataframe,
     serving_record_to_dataframe,
     serving_batch_to_dataframe,
+    dataframe_to_dict_records,
     dataframe_to_landing_records,
     dataframe_to_serving_records,
 )
@@ -477,15 +480,19 @@ class WTGatewayClient:
                 fallback_key,
             )
             partitions = [resolved_partition]
-            if table == "landing":
-                effective_query = self._add_hash_partition_filter_for_raw_value(
-                    info["table_name"],
-                    filter_query,
-                    partition,
-                    fallback_key,
-                )
-        elif table == "landing":
-            partitions = self._resolve_landing_query_partitions(info["table_name"], filter_query)
+            effective_query = self._add_hash_partition_filter_for_raw_value(
+                info["table_name"],
+                filter_query,
+                partition,
+                fallback_key,
+            )
+        else:
+            fallback_key = self.LANDING_PARTITION_KEY if table == "landing" else self.SERVING_PARTITION_KEY
+            partitions = self._resolve_partitions_for_query(
+                info["table_name"],
+                filter_query,
+                fallback_key,
+            )
 
         df = self._filter_table(
             info["table_name"],
@@ -510,7 +517,7 @@ class WTGatewayClient:
                 partition,
                 fallback_key,
             )
-            if table == "landing" and self._is_hash_partition_table(info["table_name"], fallback_key) and not isinstance(partition, int):
+            if self._is_hash_partition_table(info["table_name"], fallback_key) and not isinstance(partition, int):
                 query = self._add_hash_partition_filter_for_raw_value(
                     info["table_name"],
                     "",
@@ -570,9 +577,12 @@ class WTGatewayClient:
 
     def _delete(self, table: str, filter_query: str) -> int:
         info = self._get_table_info(table)
-        partitions = None
-        if table == "landing":
-            partitions = self._resolve_landing_query_partitions(info["table_name"], filter_query)
+        fallback_key = self.LANDING_PARTITION_KEY if table == "landing" else self.SERVING_PARTITION_KEY
+        partitions = self._resolve_partitions_for_query(
+            info["table_name"],
+            filter_query,
+            fallback_key,
+        )
 
         # dldb does not return delete counts, so count before deletion.
         try:
@@ -616,7 +626,7 @@ class WTGatewayClient:
     ) -> None:
         self._ingest("landing", records)
 
-    def query_landing(
+    def query_data(
         self,
         filter_query: str = "",
         limit: Optional[int] = None,
@@ -625,36 +635,38 @@ class WTGatewayClient:
         order_by: Optional[str] = None,
         ascending: bool = True,
         checkout_latest: bool = False,
-        as_dataframe: bool = False,
-    ) -> Union[List[LandingRecord], pd.DataFrame]:
-        """Query landing records or a DataFrame.
+        table: Optional[str] = None,
+        exclude_none: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Query landing (default) or a named table.
 
-        Include job_id for HASH partition pruning, especially with order_by or limit.
+        Returns dictionaries with null object fields omitted recursively by default.
+        Include job_id for HASH pruning, especially with order_by or limit.
         """
-        info = self._get_table_info("landing")
+        table_name = table or self.config.tables.landing_table
         effective_query = filter_query if filter_query and filter_query.strip() else "id IS NOT NULL"
         if partition is not None:
             effective_query = self._add_hash_partition_filter_for_raw_value(
-                info["table_name"],
+                table_name,
                 effective_query,
                 partition,
                 self.LANDING_PARTITION_KEY,
             )
             resolved_partition = self._resolve_explicit_partition_for_table(
-                info["table_name"],
+                table_name,
                 partition,
                 self.LANDING_PARTITION_KEY,
             )
             partitions = [resolved_partition]
         else:
             partitions = self._resolve_partitions_for_query(
-                info["table_name"],
+                table_name,
                 effective_query,
                 self.LANDING_PARTITION_KEY,
             )
 
         df = self._filter_table(
-            info["table_name"],
+            table_name,
             query=effective_query,
             limit=limit,
             columns=columns,
@@ -664,14 +676,11 @@ class WTGatewayClient:
             checkout_latest=checkout_latest,
             extra={
                 "partition": partition,
-                "api": "query_landing",
+                "api": "query_data",
             },
         )
-        if as_dataframe:
-            return df
-
-        records = dataframe_to_landing_records(df)
-        logger.info(f"Queried landing table: {len(records)} results")
+        records = dataframe_to_dict_records(df, exclude_none=exclude_none)
+        logger.info(f"Queried table {table_name}: {len(records)} results")
         return records
 
     def update_landing(
@@ -772,7 +781,7 @@ class WTGatewayClient:
 
         df = self._filter_table(
             table_name,
-            query="",  # No filter - get all rows
+            query="id IS NOT NULL",  # dldb rejects an empty WHERE expression
             limit=None,  # No limit
             columns=["tags"],  # Only fetch tags column for efficiency
             partition_cond=None,  # All partitions
@@ -790,7 +799,7 @@ class WTGatewayClient:
 
     # ==================== Data Reading Methods ====================
 
-    def fetch_data(
+    def iter_data_batches(
         self,
         dataset_type: str,
         where_sql: Optional[str] = None,
@@ -799,9 +808,10 @@ class WTGatewayClient:
         chunk_size: int = 10000,
         order_by: str = "created_at",
         ascending: bool = True,
+        table: Optional[str] = None,
     ) -> Iterator[pd.DataFrame]:
-        """Yield landing DataFrames in created_at cursor batches."""
-        table_name = self.config.tables.landing_table
+        """Iterate over DataFrame batches from landing (default) or a named table."""
+        table_name = table or self.config.tables.landing_table
         partition_metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
         partition_key = partition_metadata["partition_column"]
         from datetime import datetime
@@ -864,6 +874,166 @@ class WTGatewayClient:
             if len(df) < chunk_size:
                 break
 
+    def export_data_batches(
+        self,
+        filter_query: str = "",
+        batch_size: int = 10000,
+        columns: Optional[List[str]] = None,
+        table: Optional[str] = None,
+    ) -> Iterator[pd.DataFrame]:
+        """Export a fixed set of matching rows in verified batches.
+
+        Defaults to serving. Keep matching rows unchanged until iteration finishes;
+        otherwise the export fails instead of returning incomplete data.
+        """
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        if columns is not None and not columns:
+            raise ValueError("columns must be None or a non-empty list")
+
+        table_name = table or self.config.tables.serving_table
+        effective_query = filter_query if filter_query and filter_query.strip() else "id IS NOT NULL"
+        existing_partitions = self._list_existing_partitions_for_table(table_name)
+        resolved_partitions = self._resolve_partitions_for_query(
+            table_name,
+            effective_query,
+            self.LANDING_PARTITION_KEY,
+        )
+        if resolved_partitions is None:
+            export_partitions = existing_partitions
+        else:
+            resolved_set = set(resolved_partitions)
+            export_partitions = [
+                partition for partition in existing_partitions if partition in resolved_set
+            ]
+
+        logger.info(
+            f"Building export manifest for table '{table_name}': "
+            f"partitions={len(export_partitions)}, batch_size={batch_size}"
+        )
+
+        with tempfile.TemporaryDirectory(prefix="wt-sdk-export-") as staging_dir:
+            manifest_path = f"{staging_dir}/manifest.sqlite3"
+            manifest = sqlite3.connect(manifest_path)
+            try:
+                manifest.execute(
+                    "CREATE TABLE export_ids ("
+                    "partition_order INTEGER NOT NULL, "
+                    "record_id TEXT NOT NULL UNIQUE"
+                    ")"
+                )
+
+                # Complete the manifest before yielding anything. The UNIQUE
+                # constraint enforces the SDK's global caller-provided ID contract.
+                for partition_order, partition in enumerate(export_partitions):
+                    id_frame = self._filter_table(
+                        table_name,
+                        query=effective_query,
+                        limit=None,
+                        columns=["id"],
+                        partitions=[partition],
+                        order_by="id",
+                        ascending=True,
+                        checkout_latest=True,
+                        extra={
+                            "api": "export_data_batches",
+                            "phase": "manifest",
+                            "partition": partition,
+                        },
+                    )
+                    if "id" not in id_frame.columns:
+                        raise RuntimeError(
+                            f"Export manifest query did not return the id column for partition {partition!r}"
+                        )
+                    if id_frame["id"].isna().any():
+                        raise RuntimeError(
+                            f"Export requires non-null IDs; partition {partition!r} contains a null id"
+                        )
+
+                    manifest_rows = [
+                        (partition_order, str(record_id))
+                        for record_id in id_frame["id"].tolist()
+                    ]
+                    try:
+                        manifest.executemany(
+                            "INSERT INTO export_ids (partition_order, record_id) VALUES (?, ?)",
+                            manifest_rows,
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise RuntimeError(
+                            "Export requires globally unique IDs, but duplicate IDs were found "
+                            f"while scanning partition {partition!r}"
+                        ) from exc
+                manifest.commit()
+
+                total_rows = manifest.execute("SELECT COUNT(*) FROM export_ids").fetchone()[0]
+                logger.info(
+                    f"Export manifest ready for table '{table_name}': {total_rows} rows"
+                )
+
+                query_columns = None
+                if columns is not None:
+                    query_columns = list(columns)
+                    if "id" not in query_columns:
+                        query_columns.append("id")
+
+                for partition_order, partition in enumerate(export_partitions):
+                    cursor = manifest.execute(
+                        "SELECT record_id FROM export_ids "
+                        "WHERE partition_order = ? ORDER BY record_id",
+                        (partition_order,),
+                    )
+                    while True:
+                        requested_ids = [row[0] for row in cursor.fetchmany(batch_size)]
+                        if not requested_ids:
+                            break
+
+                        escaped_ids = ", ".join(
+                            f"'{self._escape_sql_string(record_id)}'"
+                            for record_id in requested_ids
+                        )
+                        batch_query = f"({effective_query}) AND id IN ({escaped_ids})"
+                        frame = self._filter_table(
+                            table_name,
+                            query=batch_query,
+                            limit=None,
+                            columns=query_columns,
+                            partitions=[partition],
+                            order_by="id",
+                            ascending=True,
+                            checkout_latest=True,
+                            extra={
+                                "api": "export_data_batches",
+                                "phase": "data",
+                                "partition": partition,
+                            },
+                        )
+
+                        if "id" not in frame.columns:
+                            raise RuntimeError(
+                                f"Export data query did not return the id column for partition {partition!r}"
+                            )
+                        returned_ids = [str(record_id) for record_id in frame["id"].tolist()]
+                        if len(returned_ids) != len(requested_ids) or set(returned_ids) != set(requested_ids):
+                            missing = sorted(set(requested_ids) - set(returned_ids))
+                            unexpected = sorted(set(returned_ids) - set(requested_ids))
+                            raise RuntimeError(
+                                "Export source changed after manifest capture; discard the partial export "
+                                f"and retry. partition={partition!r}, missing_ids={missing[:5]}, "
+                                f"unexpected_ids={unexpected[:5]}"
+                            )
+
+                        if columns is not None:
+                            frame = frame.loc[:, columns]
+                        frame.attrs["wt_export"] = {
+                            "table": table_name,
+                            "partition": partition,
+                            "manifest_rows": total_rows,
+                        }
+                        yield frame
+            finally:
+                manifest.close()
+
     def pull_data(
         self,
         dataset_type: str,
@@ -875,9 +1045,10 @@ class WTGatewayClient:
         ascending: bool = True,
         limit: int = 10000,
         checkout_latest: bool = False,
+        table: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Return one cursor-based landing page as a DataFrame."""
-        table_name = self.config.tables.landing_table
+        """Return one cursor page from landing (default) or a named table."""
+        table_name = table or self.config.tables.landing_table
         partition_metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
         partition_key = partition_metadata["partition_column"]
         from datetime import datetime
@@ -978,9 +1149,10 @@ class WTGatewayClient:
         table: Optional[str] = None,
         search_fields: List[str] = None
     ) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
-        """Run a keyword search and return a DataFrame or one-frame iterator.
+        """Filter/search rows and return a DataFrame or one-frame iterator.
 
-        Vector search is unsupported. Use search_text or other scalar fields, not nested messages.
+        Vector search is unsupported. Keyword search defaults to search_text;
+        callers may provide explicit scalar string search_fields instead.
         """
         table_name = table or self.config.tables.serving_table
         if isinstance(query, list):
@@ -1003,30 +1175,36 @@ class WTGatewayClient:
             filters.append(f"({where_sql})")
 
         if isinstance(query, str) and query.strip():
-            default_search_fields = ["search_text"]
-            fields_to_search = search_fields if search_fields else default_search_fields
+            fields_to_search = search_fields or ["search_text"]
             search_conditions = []
+            nested_fields = {
+                "messages",
+                "response",
+                "chosen_trace",
+                "rejected_trace",
+                "tags",
+                "blob_manifest",
+            }
             for field in fields_to_search:
-                if field == "messages":
-                    logger.warning(
-                        "Cannot search 'messages' field directly - LanceDB doesn't support "
-                        "casting complex nested structures to STRING. Use 'search_text' field instead. "
-                        "Skipping 'messages' field from search."
+                if field in nested_fields:
+                    raise ValueError(
+                        f"Keyword search does not support nested field {field!r}; "
+                        "use tags= for tag filtering or choose a scalar string field."
                     )
-                    continue
-                search_conditions.append(f"{field} LIKE '%{query}%'")
+                escaped_query = self._escape_sql_string(query)
+                search_conditions.append(f"{field} LIKE '%{escaped_query}%'")
 
             if search_conditions:
                 filters.append(f"({' OR '.join(search_conditions)})")
 
-        final_filter = " AND ".join(filters) if filters else ""
+        final_filter = " AND ".join(filters) if filters else "id IS NOT NULL"
         partitions = self._resolve_landing_query_partitions(table_name, final_filter)
 
         logger.info(f"Searching table '{table_name}': query={query}, limit={limit}, stream={stream}, dataset_type={dataset_type}")
 
         df = self._filter_table(
             table_name,
-            query=final_filter if final_filter else "",
+            query=final_filter,
             limit=limit,
             columns=None,
             partitions=partitions,
@@ -1042,33 +1220,29 @@ class WTGatewayClient:
 
     def get_by_id(
         self,
-        record_id: str
+        record_id: str,
+        table: Optional[str] = None,
+        exclude_none: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        filter_query = f"id = '{record_id}'"
+        """Return one dictionary by ID from serving (default) or a named table."""
+        table_name = table or self.config.tables.serving_table
+        filter_query = f"id = '{self._escape_sql_string(record_id)}'"
 
-        logger.debug(f"Looking for record {record_id} in serving table...")
+        logger.debug(f"Looking for record {record_id} in table {table_name}...")
         results = self._filter_table(
-            self.config.tables.serving_table,
+            table_name,
             query=filter_query,
             limit=1,
         )
 
         if len(results) > 0:
-            logger.debug(f"Record {record_id} found in serving table")
-            return results.iloc[0].to_dict()
+            logger.debug(f"Record {record_id} found in table {table_name}")
+            return dataframe_to_dict_records(
+                results,
+                exclude_none=exclude_none,
+            )[0]
 
-        logger.debug(f"Record {record_id} not found in serving table, searching landing table...")
-        results = self._filter_table(
-            self.config.tables.landing_table,
-            query=filter_query,
-            limit=1,
-        )
-
-        if len(results) > 0:
-            logger.debug(f"Record {record_id} found in landing table")
-            return results.iloc[0].to_dict()
-
-        logger.debug(f"Record {record_id} not found in either table")
+        logger.debug(f"Record {record_id} not found in table {table_name}")
         return None
 
     # ==================== Index Management ====================
