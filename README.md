@@ -411,6 +411,10 @@ python scripts/inspect/query_data.py --table landing_test \
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
+# Write full nested results as pretty JSON without flooding the console
+python scripts/inspect/query_data.py --table landing_test --limit 1 \
+  --output ./artifacts/landing_sample.json
+
 # Show expected versus existing scalar indexes by partition
 python scripts/inspect/show_table_indexes.py landing_test
 

@@ -407,6 +407,10 @@ python scripts/inspect/query_data.py --table landing_test \
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
+# 将完整嵌套结果写为 pretty JSON，避免控制台刷屏
+python scripts/inspect/query_data.py --table landing_test --limit 1 \
+  --output ./artifacts/landing_sample.json
+
 # 按分区对比预期标量索引和现有标量索引
 python scripts/inspect/show_table_indexes.py landing_test
 

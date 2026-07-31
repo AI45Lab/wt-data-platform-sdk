@@ -29,6 +29,9 @@ Usage:
   # Show full nested structures (DataFrame format)
   python scripts/inspect/query_data.py --table landing_test --query "dataset_type = 'TEST'" --limit 1 --show-nested
 
+  # Write nested results as pretty JSON instead of printing them
+  python scripts/inspect/query_data.py --table landing_test --limit 1 --output ./artifacts/sample.json
+
 Examples:
   # Get chat training data
   python scripts/inspect/query_data.py --table wind_tunnel_landing --query "dataset_type = 'SFT'"
@@ -46,7 +49,12 @@ Examples:
   python scripts/inspect/query_data.py --table wind_tunnel_landing --query "meta_json LIKE '%safety_image_ch%'" --count
 """
 import argparse
+import base64
+from datetime import date, datetime
+import json
+from pathlib import Path
 import sys
+
 import numpy as np
 
 import dldb
@@ -204,6 +212,70 @@ def _format_field_value(val, col_name, no_truncate=False):
     return str(val)
 
 
+def _to_json_compatible(value):
+    """Recursively convert DataFrame and Arrow-derived values to JSON types."""
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return [_to_json_compatible(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return _to_json_compatible(value.item())
+    if isinstance(value, dict):
+        return {str(key): _to_json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_compatible(item) for item in value]
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        encoded = base64.b64encode(bytes(value)).decode("ascii")
+        return {"encoding": "base64", "data": encoded}
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return value.isoformat()
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _parse_embedded_json(value):
+    """Expand JSON strings inside meta_json for easier inspection."""
+    if isinstance(value, dict):
+        return {key: _parse_embedded_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_parse_embedded_json(item) for item in value]
+    if isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+        try:
+            return _parse_embedded_json(json.loads(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return value
+    return value
+
+
+def _dataframe_to_json_records(frame: pd.DataFrame):
+    records = []
+    for raw_record in frame.to_dict(orient="records"):
+        record = {
+            str(key): _to_json_compatible(value)
+            for key, value in raw_record.items()
+        }
+        if isinstance(record.get("meta_json"), str):
+            record["meta_json"] = _parse_embedded_json(record["meta_json"])
+        records.append(record)
+    return records
+
+
+def _write_json_output(output_path: str, payload: dict) -> Path:
+    path = Path(output_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path.resolve()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Query wind tunnel data tables",
@@ -231,6 +303,8 @@ def main():
                        help="Show full nested structures (default: simplified view)")
     parser.add_argument("--no-truncate", action="store_true",
                        help="Don't truncate long string values (default: truncate at 100 chars)")
+    parser.add_argument("--output", type=str, default=None,
+                       help="Write results as pretty JSON to this path instead of printing rows")
 
     args = parser.parse_args()
 
@@ -262,9 +336,11 @@ def main():
         return 1
     _pin_exact_dldb_table(session, table_name)
 
-    # Determine filter
-    query = args.query if args.query else ""  # Empty query returns all rows
-    print(f"Filter query: {query if query else '(all rows)'}")
+    # dldb 1.0 rejects an empty WHERE expression, so use a universal
+    # predicate internally while keeping the CLI output as "(all rows)".
+    requested_query = args.query.strip() if args.query else ""
+    query = requested_query or "1 = 1"
+    print(f"Filter query: {requested_query if requested_query else '(all rows)'}")
     if args.limit:
         print(f"Limit: {args.limit}")
     print("=" * 80)
@@ -279,7 +355,8 @@ def main():
         try:
             total_count = session.count_rows(table_name)
             print(f"Total rows in table: {total_count}")
-            if query:
+            filtered_count = None
+            if requested_query:
                 # Count rows matching the filter
                 result = session.filter(table_name, query=query, limit=None, columns=columns)
                 filtered_count = len(result)
@@ -287,6 +364,18 @@ def main():
                 print(f"Rows matching filter: {filtered_count}")
             else:
                 print("No filter specified, showing total count")
+            if args.output:
+                output_path = _write_json_output(
+                    args.output,
+                    {
+                        "database": db_name,
+                        "table": table_name,
+                        "filter": requested_query or None,
+                        "total_rows": total_count,
+                        "filtered_rows": filtered_count,
+                    },
+                )
+                print(f"JSON output: {output_path}")
         except Exception as e:
             print(f"Error counting rows: {e}")
             session.shutdown()
@@ -296,6 +385,7 @@ def main():
         return 0
 
     # Show total count for regular queries
+    total_count = None
     try:
         total_count = session.count_rows(table_name)
         print(f"Total rows in table: {total_count}")
@@ -311,7 +401,25 @@ def main():
         session.shutdown()
         return 1
 
-    if len(result) == 0:
+    if args.output:
+        try:
+            output_path = _write_json_output(
+                args.output,
+                {
+                    "database": db_name,
+                    "table": table_name,
+                    "filter": requested_query or None,
+                    "total_rows": total_count,
+                    "returned_rows": len(result),
+                    "rows": _dataframe_to_json_records(result),
+                },
+            )
+        except Exception as e:
+            print(f"Error writing JSON output: {e}")
+            session.shutdown()
+            return 1
+        print(f"JSON output: {output_path}")
+    elif len(result) == 0:
         print("No results found.")
     else:
         print(f"\nFound {len(result)} rows:\n")
