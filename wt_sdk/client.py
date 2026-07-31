@@ -885,18 +885,10 @@ class WTGatewayClient:
         columns: Optional[List[str]] = None,
         table: Optional[str] = None,
     ) -> Iterator[pd.DataFrame]:
-        """Reliably export a fixed ID manifest from serving (default) in batches.
+        """Export a fixed set of matching rows in verified batches.
 
-        The method first captures every matching caller-provided ``id`` from the
-        physical partitions that exist when the export starts. It then fetches
-        rows by those exact IDs, validating every batch before yielding it. This
-        avoids the duplicate-timestamp and cross-partition ordering gaps of a
-        ``created_at`` cursor and excludes rows appended after manifest capture.
-
-        Source rows should be immutable for the duration of the export. A delete,
-        duplicate ID, or update that changes whether a row matches ``filter_query``
-        causes the export to fail instead of silently returning an incomplete
-        batch. Publish an export artifact only after the iterator is exhausted.
+        Defaults to serving. Keep matching rows unchanged until iteration finishes;
+        otherwise the export fails instead of returning incomplete data.
         """
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
