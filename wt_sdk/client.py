@@ -477,15 +477,19 @@ class WTGatewayClient:
                 fallback_key,
             )
             partitions = [resolved_partition]
-            if table == "landing":
-                effective_query = self._add_hash_partition_filter_for_raw_value(
-                    info["table_name"],
-                    filter_query,
-                    partition,
-                    fallback_key,
-                )
-        elif table == "landing":
-            partitions = self._resolve_landing_query_partitions(info["table_name"], filter_query)
+            effective_query = self._add_hash_partition_filter_for_raw_value(
+                info["table_name"],
+                filter_query,
+                partition,
+                fallback_key,
+            )
+        else:
+            fallback_key = self.LANDING_PARTITION_KEY if table == "landing" else self.SERVING_PARTITION_KEY
+            partitions = self._resolve_partitions_for_query(
+                info["table_name"],
+                filter_query,
+                fallback_key,
+            )
 
         df = self._filter_table(
             info["table_name"],
@@ -510,7 +514,7 @@ class WTGatewayClient:
                 partition,
                 fallback_key,
             )
-            if table == "landing" and self._is_hash_partition_table(info["table_name"], fallback_key) and not isinstance(partition, int):
+            if self._is_hash_partition_table(info["table_name"], fallback_key) and not isinstance(partition, int):
                 query = self._add_hash_partition_filter_for_raw_value(
                     info["table_name"],
                     "",
@@ -570,9 +574,12 @@ class WTGatewayClient:
 
     def _delete(self, table: str, filter_query: str) -> int:
         info = self._get_table_info(table)
-        partitions = None
-        if table == "landing":
-            partitions = self._resolve_landing_query_partitions(info["table_name"], filter_query)
+        fallback_key = self.LANDING_PARTITION_KEY if table == "landing" else self.SERVING_PARTITION_KEY
+        partitions = self._resolve_partitions_for_query(
+            info["table_name"],
+            filter_query,
+            fallback_key,
+        )
 
         # dldb does not return delete counts, so count before deletion.
         try:
@@ -757,6 +764,64 @@ class WTGatewayClient:
         records: Union[List[ServingRecord], ServingRecordBatch]
     ) -> None:
         self._ingest("serving", records)
+
+    def query_serving(
+        self,
+        filter_query: str = "",
+        limit: Optional[int] = None,
+        columns: Optional[List[str]] = None,
+        partition: Optional[Union[str, int]] = None,
+        order_by: Optional[str] = None,
+        ascending: bool = True,
+        checkout_latest: bool = False,
+        as_dataframe: bool = False,
+    ) -> Union[List[ServingRecord], pd.DataFrame]:
+        """Query serving records or a DataFrame.
+
+        Include job_id for HASH partition pruning, especially with order_by or limit.
+        """
+        info = self._get_table_info("serving")
+        effective_query = filter_query if filter_query and filter_query.strip() else "id IS NOT NULL"
+        if partition is not None:
+            effective_query = self._add_hash_partition_filter_for_raw_value(
+                info["table_name"],
+                effective_query,
+                partition,
+                self.SERVING_PARTITION_KEY,
+            )
+            resolved_partition = self._resolve_explicit_partition_for_table(
+                info["table_name"],
+                partition,
+                self.SERVING_PARTITION_KEY,
+            )
+            partitions = [resolved_partition]
+        else:
+            partitions = self._resolve_partitions_for_query(
+                info["table_name"],
+                effective_query,
+                self.SERVING_PARTITION_KEY,
+            )
+
+        df = self._filter_table(
+            info["table_name"],
+            query=effective_query,
+            limit=limit,
+            columns=columns,
+            partitions=partitions,
+            order_by=order_by,
+            ascending=ascending,
+            checkout_latest=checkout_latest,
+            extra={
+                "partition": partition,
+                "api": "query_serving",
+            },
+        )
+        if as_dataframe:
+            return df
+
+        records = dataframe_to_serving_records(df)
+        logger.info(f"Queried serving table: {len(records)} results")
+        return records
 
     def count_serving(self, partition: Optional[str] = None) -> int:
         return self._count("serving", partition)
@@ -978,9 +1043,10 @@ class WTGatewayClient:
         table: Optional[str] = None,
         search_fields: List[str] = None
     ) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
-        """Run a keyword search and return a DataFrame or one-frame iterator.
+        """Filter/search rows and return a DataFrame or one-frame iterator.
 
-        Vector search is unsupported. Use search_text or other scalar fields, not nested messages.
+        Vector search is unsupported. Keyword search requires explicit scalar
+        search_fields because the unified schema has no search_text column.
         """
         table_name = table or self.config.tables.serving_table
         if isinstance(query, list):
@@ -1003,17 +1069,26 @@ class WTGatewayClient:
             filters.append(f"({where_sql})")
 
         if isinstance(query, str) and query.strip():
-            default_search_fields = ["search_text"]
-            fields_to_search = search_fields if search_fields else default_search_fields
+            if not search_fields:
+                raise ValueError(
+                    "Keyword search requires explicit scalar search_fields; "
+                    "the unified landing/serving schema has no search_text column."
+                )
             search_conditions = []
-            for field in fields_to_search:
-                if field == "messages":
-                    logger.warning(
-                        "Cannot search 'messages' field directly - LanceDB doesn't support "
-                        "casting complex nested structures to STRING. Use 'search_text' field instead. "
-                        "Skipping 'messages' field from search."
+            nested_fields = {
+                "messages",
+                "response",
+                "chosen_trace",
+                "rejected_trace",
+                "tags",
+                "blob_manifest",
+            }
+            for field in search_fields:
+                if field in nested_fields:
+                    raise ValueError(
+                        f"Keyword search does not support nested field {field!r}; "
+                        "use tags= for tag filtering or choose a scalar string field."
                     )
-                    continue
                 search_conditions.append(f"{field} LIKE '%{query}%'")
 
             if search_conditions:

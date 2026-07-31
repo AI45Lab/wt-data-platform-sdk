@@ -208,28 +208,28 @@ with WTGatewayClient() as client:
         print(f"received {len(batch)} rows")
 ```
 
-### 3. 发布可检索数据
+### 3. 发布增值数据
 
-ETL 或训练筛选完成后，可以把增强后的记录发布到 serving。关键词检索基于
-`search_text`；dldb 当前尚未开放向量搜索。
+ETL 或训练筛选完成后，可以把增强后的记录发布到 serving。Landing 与 serving
+使用相同 schema；尚未经过增值处理的字段在 landing 中保持 null。dldb 当前尚未
+开放向量搜索。
 
 ```python
 from wt_sdk import ServingRecord
 
 serving_data = buffered[-1].model_dump()
-serving_data.update(reward=1.0, step_reward=1.0, is_trainable=True)
-serving_record = ServingRecord(
-    **serving_data,
-    search_text="benchmark task final successful response",
+serving_data.update(
+    reward=1.0,
+    step_reward=1.0,
+    is_trainable=True,
     tags=["trainable", "successful"],
 )
+serving_record = ServingRecord(**serving_data)
 
 with WTGatewayClient() as client:
     client.ingest_serving(serving_record)
-    matches = client.search(
-        "successful",
-        dataset_type="RL",
-        tags=["trainable"],
+    matches = client.query_serving(
+        "job_id = 'evaluation-run-001' AND array_contains(tags, 'trainable')",
         limit=20,
     )
 ```
@@ -261,7 +261,7 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 | 导出或回填一个 job | `fetch_data()` | 自动分批返回 DataFrame |
 | 查看消费者数据水位 | `get_max_created_at()` | 返回满足条件的最新记录 |
 | 统计一个 job 的数据量 | `count_landing(partition=job_id)` | 定位 bucket 后仍按原始 job 过滤 |
-| 检索增强后的结果 | `search()` | 查询 serving 的 `search_text` 和 tags |
+| 读取增值后的结果 | `query_serving()` | 对 serving 使用与 landing 相同的查询约定 |
 
 ## 客户端接口
 
@@ -301,21 +301,24 @@ with WTGatewayClient() as client:
 | 方法 | 用途 |
 | --- | --- |
 | `ingest_serving(record)` / `ingest_serving_batch(records)` | 写入处理后的 serving 记录。 |
+| `query_serving(filter_query, ...)` | 使用与 `query_landing()` 相同的参数和 HASH 剪枝行为查询 serving。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
-| `search(query, ...)` | 类 SQL 关键词搜索，默认查询 serving 表。 |
+| `search(query, ...)` | 按 tags/SQL 过滤 serving，或检索显式指定的标量字符串字段。 |
 | `get_tags_distribution()` | 返回 serving 标签频次。 |
 | `get_by_id(record_id)` | 先在 serving 表、再在 landing 表中查找 ID。 |
 | `pull_data(...)` / `fetch_data(...)` | 使用游标分页或分批读取 landing 数据。 |
 | `get_max_created_at(where_sql)` / `extract_cursor(df)` | 构建基于游标的读取流程。 |
 
-dldb 当前尚未开放向量搜索。`search()` 接受关键词查询；设置 `stream=True` 时，会返回包含当前结果 DataFrame 的迭代器。
+dldb 当前尚未开放向量搜索。关键词检索必须显式传入标量
+`search_fields`；嵌套 trace 应通过普通 SQL 条件或 tags 查询。设置
+`stream=True` 时，会返回包含当前结果 DataFrame 的迭代器。
 
 ### 索引维护
 
-Landing 标量索引配置在 `dataset_type`、`is_terminal` 和 `is_trainable`
-字段上。`maintain_landing_indexes()` 接受原始 `job_id`，自动映射到 HASH
-bucket，创建缺失索引，并可选执行 dldb optimize。推荐的后台调用方式见上面的
-端到端流程。
+Landing 标量索引配置在 `id`、`job_id`、`session_id`、`created_at`、
+`is_terminal` 和 `is_trainable` 字段上。`maintain_landing_indexes()` 接受原始
+`job_id`，自动映射到 HASH bucket，创建缺失索引，并可选执行 dldb optimize。
+推荐的后台调用方式见上面的端到端流程。
 
 ## 时延与指标
 
@@ -420,9 +423,8 @@ python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 10
 # 定位包含无法读取嵌套字段的 HASH bucket 和候选记录
 python scripts/inspect/scan_landing_nested_decode.py --table landing_test
 
-# 查看 serving 标签或 serving 文本搜索行为
+# 查看 serving 标签
 python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
-python scripts/inspect/check_search_text.py --table wind_tunnel_serving
 ```
 
 ### 数据清理与索引

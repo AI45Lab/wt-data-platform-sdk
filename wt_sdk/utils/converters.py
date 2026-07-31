@@ -88,7 +88,7 @@ def landing_record_to_dataframe(record: LandingRecord) -> pd.DataFrame:
     df = pd.DataFrame([data])
 
     # Ensure struct columns are object type for Arrow compatibility
-    struct_columns = ['messages', 'response', 'chosen_response', 'rejected_response']
+    struct_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace']
     for col in struct_columns:
         if col in df.columns:
             df[col] = df[col].astype(object)
@@ -107,7 +107,7 @@ def landing_batch_to_dataframe(batch: LandingRecordBatch) -> pd.DataFrame:
     df = pd.DataFrame(records_data)
 
     # Ensure struct columns are object type for Arrow compatibility
-    struct_columns = ['messages', 'response', 'chosen_response', 'rejected_response']
+    struct_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace']
     for col in struct_columns:
         if col in df.columns:
             df[col] = df[col].astype(object)
@@ -126,7 +126,7 @@ def serving_record_to_dataframe(record: ServingRecord) -> pd.DataFrame:
     df = pd.DataFrame([data])
 
     # Ensure struct columns are object type for Arrow compatibility
-    struct_columns = ['messages', 'response', 'chosen_response', 'rejected_response']
+    struct_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace']
     for col in struct_columns:
         if col in df.columns:
             df[col] = df[col].astype(object)
@@ -145,7 +145,7 @@ def serving_batch_to_dataframe(batch: ServingRecordBatch) -> pd.DataFrame:
     df = pd.DataFrame(records_data)
 
     # Ensure struct columns are object type for Arrow compatibility
-    struct_columns = ['messages', 'response', 'chosen_response', 'rejected_response']
+    struct_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace']
     for col in struct_columns:
         if col in df.columns:
             df[col] = df[col].astype(object)
@@ -398,24 +398,20 @@ def _clean_dict_value(d: Dict) -> Any:
     return cleaned
 
 
-def dict_to_pyarrow_schema(data: Dict, schema: pa.Schema) -> pa.Table:
+def dict_to_pyarrow_schema(
+    data: Dict,
+    schema: pa.Schema,
+    *,
+    columnar: bool = False,
+) -> pa.Table:
     """
     Convert dictionary data to PyArrow Table with explicit schema.
 
     This ensures that nested structs match the Arrow schema exactly.
     """
-    # Determine the number of rows
-    # Use the first non-empty list to determine row count, or default to 1
     num_rows = 1
-    if data:
-        for value in data.values():
-            if isinstance(value, list) and len(value) > 0:
-                num_rows = len(value)
-                break
-            elif not isinstance(value, list):
-                # Scalar value - single row
-                num_rows = 1
-                break
+    if columnar and data:
+        num_rows = len(next(iter(data.values())))
 
     # Build arrays for each field in the schema
     arrays = []
@@ -425,28 +421,14 @@ def dict_to_pyarrow_schema(data: Dict, schema: pa.Schema) -> pa.Table:
             value = data[field_name]
             # Special handling for list-type fields
             if pa.types.is_list(field.type) or pa.types.is_large_list(field.type):
-                # Check if this is a list-type field that needs special handling
-                # For list fields: if value[0] is a list, we have multiple rows
-                # For single row: if value is a list of non-lists, we need to wrap it
-                if isinstance(value, list) and value:
-                    # Check if we have a list of lists (multiple records being stacked)
-                    if isinstance(value[0], list):
-                        # Multiple rows - each element is a list for one row
-                        arrays.append(_convert_list_column(value, field.type))
-                    else:
-                        # Single row - value is a list, but needs to be treated as one row's list field
-                        # Create a single-element list containing this list
-                        arrays.append(_convert_list_column([value], field.type))
-                else:
-                    # Empty or None value - create empty list array with correct number of rows
-                    arrays.append(_convert_list_column([[] for _ in range(num_rows)], field.type))
+                row_values = value if columnar else [value]
+                arrays.append(_convert_list_column(row_values, field.type))
             else:
                 arrays.append(_convert_value_to_array(value, field.type))
         else:
-            # Field missing - create null array or empty list array with correct length
+            # Missing optional list fields remain null rather than becoming [].
             if pa.types.is_list(field.type) or pa.types.is_large_list(field.type):
-                # Missing list field - create empty lists for each row
-                arrays.append(_convert_list_column([[] for _ in range(num_rows)], field.type))
+                arrays.append(_convert_list_column([None for _ in range(num_rows)], field.type))
             else:
                 arrays.append(pa.nulls(num_rows, field.type))
 
@@ -486,8 +468,13 @@ def _convert_list_column(values: List[Any], list_type: pa.ListType) -> pa.Array:
         # Convert to primitive array
         element_array = pa.array(all_elements, type=element_type)
 
-    # Create the list array
-    return pa.ListArray.from_arrays(offsets=pa.array(offsets), values=element_array, type=list_type)
+    null_mask = pa.array([value_list is None for value_list in values], type=pa.bool_())
+    return pa.ListArray.from_arrays(
+        offsets=pa.array(offsets),
+        values=element_array,
+        type=list_type,
+        mask=null_mask,
+    )
 
 
 def _convert_value_to_array(value: Any, arrow_type: pa.DataType) -> pa.Array:
@@ -626,7 +613,7 @@ def landing_batch_to_arrow(batch: LandingRecordBatch, schema: pa.Schema) -> pa.T
                 columns[key] = []
             columns[key].append(value)
 
-    return dict_to_pyarrow_schema(columns, schema)
+    return dict_to_pyarrow_schema(columns, schema, columnar=True)
 
 
 def serving_record_to_arrow(record: ServingRecord, schema: pa.Schema) -> pa.Table:
@@ -650,7 +637,7 @@ def serving_batch_to_arrow(batch: ServingRecordBatch, schema: pa.Schema) -> pa.T
                 columns[key] = []
             columns[key].append(value)
 
-    return dict_to_pyarrow_schema(columns, schema)
+    return dict_to_pyarrow_schema(columns, schema, columnar=True)
 
 
 def normalize_content_field(record: Dict) -> Dict:
@@ -671,13 +658,19 @@ def normalize_content_field(record: Dict) -> Dict:
             normalized_messages.append(msg)
         record["messages"] = normalized_messages
 
-    # Handle response, chosen_response, rejected_response
-    for field in ["response", "chosen_response", "rejected_response"]:
+    # Handle response
+    for field in ["response"]:
         if field in record and record[field]:
             if isinstance(record[field], dict):
                 if "content" in record[field] and isinstance(record[field]["content"], str):
                     record[field]["content"] = [
                         ContentItem(type="text", text=record[field]["content"])
                     ]
+
+    # Handle chosen/rejected trace message lists
+    for field in ["chosen_trace", "rejected_trace"]:
+        for message in record.get(field) or []:
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                message["content"] = [ContentItem(type="text", text=message["content"])]
 
     return record

@@ -210,28 +210,28 @@ with WTGatewayClient() as client:
         print(f"received {len(batch)} rows")
 ```
 
-### 3. Publish Searchable Data
+### 3. Publish Enriched Data
 
-After ETL or training selection, publish enriched records to serving. Keyword
-search operates on `search_text`; vector search is not currently exposed.
+After ETL or training selection, publish enriched records to serving. Landing
+and serving use the same schema; fields that have not been enriched yet remain
+null in landing. Vector search is not currently exposed.
 
 ```python
 from wt_sdk import ServingRecord
 
 serving_data = buffered[-1].model_dump()
-serving_data.update(reward=1.0, step_reward=1.0, is_trainable=True)
-serving_record = ServingRecord(
-    **serving_data,
-    search_text="benchmark task final successful response",
+serving_data.update(
+    reward=1.0,
+    step_reward=1.0,
+    is_trainable=True,
     tags=["trainable", "successful"],
 )
+serving_record = ServingRecord(**serving_data)
 
 with WTGatewayClient() as client:
     client.ingest_serving(serving_record)
-    matches = client.search(
-        "successful",
-        dataset_type="RL",
-        tags=["trainable"],
+    matches = client.query_serving(
+        "job_id = 'evaluation-run-001' AND array_contains(tags, 'trainable')",
         limit=20,
     )
 ```
@@ -265,7 +265,7 @@ metrics summary when enabled.
 | Export or backfill a job | `fetch_data()` | Iterates through DataFrame batches |
 | Inspect a consumer watermark | `get_max_created_at()` | Returns the latest matching record |
 | Count rows for one job | `count_landing(partition=job_id)` | Resolves and filters the correct HASH bucket |
-| Search enriched output | `search()` | Queries serving `search_text` and tags |
+| Read enriched output | `query_serving()` | Uses the same query contract as landing against the serving table |
 
 ## Client Interface
 
@@ -305,21 +305,26 @@ update_landing() returns an execution acknowledgement. dldb does not yet return 
 | Method | Purpose |
 | --- | --- |
 | ingest_serving(record) / ingest_serving_batch(records) | Write processed serving records. |
+| query_serving(filter_query, ...) | Query serving with the same parameters and HASH pruning behavior as query_landing. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
-| search(query, ...) | SQL-like keyword search. Defaults to the serving table. |
+| search(query, ...) | Filter serving by tags/SQL, or search explicit scalar string fields. |
 | get_tags_distribution() | Return serving tag frequencies. |
 | get_by_id(record_id) | Check serving, then landing, for an ID. |
 | pull_data(...) / fetch_data(...) | Read landing data with cursor pagination or batches. |
 | get_max_created_at(where_sql) / extract_cursor(df) | Build cursor-based readers. |
 
-Vector search is not currently exposed by dldb. search() accepts keyword queries; stream=True returns an iterator containing the current result frame.
+Vector search is not currently exposed by dldb. Keyword search requires
+explicit scalar `search_fields`; nested traces are queried through normal SQL
+filters or tags. `stream=True` returns an iterator containing the current
+result frame.
 
 ### Index Maintenance
 
-Landing scalar indexes are configured for `dataset_type`, `is_terminal`, and
-`is_trainable`. `maintain_landing_indexes()` accepts raw job IDs, maps them to
-HASH buckets, creates missing indexes, and optionally runs dldb optimize. See
-the end-to-end workflow above for the recommended background usage.
+Landing scalar indexes are configured for `id`, `job_id`, `session_id`,
+`created_at`, `is_terminal`, and `is_trainable`.
+`maintain_landing_indexes()` accepts raw job IDs, maps them to HASH buckets,
+creates missing indexes, and optionally runs dldb optimize. See the end-to-end
+workflow above for the recommended background usage.
 
 ## Timing and Metrics
 
@@ -424,9 +429,8 @@ python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 10
 # Locate HASH buckets and candidate rows with unreadable nested fields
 python scripts/inspect/scan_landing_nested_decode.py --table landing_test
 
-# Inspect serving tags or serving text search behavior
+# Inspect serving tags
 python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
-python scripts/inspect/check_search_text.py --table wind_tunnel_serving
 ```
 
 ### Cleanup and Indexes

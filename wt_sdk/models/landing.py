@@ -33,8 +33,8 @@ class LandingRecord(BaseModel):
     # Content Payload
     messages: List[ChatMessage] = Field(default_factory=list)
     response: Optional[ChatMessage] = None
-    chosen_response: Optional[ChatMessage] = None
-    rejected_response: Optional[ChatMessage] = None
+    chosen_trace: Optional[List[ChatMessage]] = None
+    rejected_trace: Optional[List[ChatMessage]] = None
 
     # Answers
     ground_truth_answer: Optional[str] = None
@@ -45,7 +45,8 @@ class LandingRecord(BaseModel):
     env_name: Optional[str] = None
     is_session_completed: Optional[bool] = None
     is_trainable: Optional[bool] = None
-    meta_json: Optional[str] = None  # Fallback JSON string
+    meta_json: Optional[str] = None  # Arrow JSON logical type; Python API remains a JSON string
+    tags: Optional[List[str]] = None
 
     # Additional Fields (2025-03)
     env_id: Optional[str] = Field(None, description="Environment ID")
@@ -95,8 +96,8 @@ class LandingRecord(BaseModel):
         Recursively extracts S3 URLs from:
         - messages
         - response
-        - chosen_response
-        - rejected_response
+        - chosen_trace
+        - rejected_trace
 
         Returns:
             List of unique S3 blob URLs
@@ -147,13 +148,11 @@ class LandingRecord(BaseModel):
         if self.response and hasattr(self.response, 'content') and self.response.content:
             extract_from_content_items(self.response.content)
 
-        # Extract from chosen_response
-        if self.chosen_response and hasattr(self.chosen_response, 'content') and self.chosen_response.content:
-            extract_from_content_items(self.chosen_response.content)
-
-        # Extract from rejected_response
-        if self.rejected_response and hasattr(self.rejected_response, 'content') and self.rejected_response.content:
-            extract_from_content_items(self.rejected_response.content)
+        # Extract from chosen/rejected traces
+        for trace in (self.chosen_trace, self.rejected_trace):
+            for msg in trace or []:
+                if msg and hasattr(msg, 'content') and msg.content:
+                    extract_from_content_items(msg.content)
 
         # Return unique blobs (preserve order)
         seen = set()

@@ -81,8 +81,8 @@ BASE_FIELDS = [
     # --- Payload  ---
     pa.field('messages', pa.list_(message_type)),
     pa.field('response', message_type),
-    pa.field('chosen_response', message_type),
-    pa.field('rejected_response', message_type),
+    pa.field('chosen_trace', pa.list_(message_type)),
+    pa.field('rejected_trace', pa.list_(message_type)),
     
     # --- 答案与文本  ---
     pa.field('ground_truth_answer', pa.string()),
@@ -93,7 +93,8 @@ BASE_FIELDS = [
     pa.field('env_name', pa.string()),
     pa.field('is_session_completed', pa.bool_()),
     pa.field('is_trainable', pa.bool_()),
-    pa.field('meta_json', pa.string()), # 兜底
+    pa.field('meta_json', pa.json_(pa.string())), # 兜底，Python API 仍使用 JSON 字符串
+    pa.field('tags', pa.list_(pa.string())),
 
     # --- 资产清单  ---
     # Ingest 阶段生成，Landing表也需要它来支持训练平台的预加载
@@ -109,19 +110,8 @@ BASE_FIELDS = [
 LANDING_SCHEMA = pa.schema(BASE_FIELDS)
 
 # --- Serving Table  ---
-# 包含基础字段 + 增值字段
-SERVING_SCHEMA = pa.schema(BASE_FIELDS + [
-    # 搜索增强
-    pa.field('search_text', pa.string()),       # 全文检索聚合字段
-    pa.field('tags', pa.list_(pa.string())),    # 业务标签
-
-    # 向量能力
-    # 1536维 float32 向量 (适配 OpenAI embedding)
-    pa.field('instruction_vector', pa.list_(pa.float32(), 1536)),
-
-    # 超大向量/矩阵存储路径 (ETL 产物)
-    pa.field('vector_file_path', pa.string())
-])
+# 与 Landing Table 使用完全相同的字段定义
+SERVING_SCHEMA = LANDING_SCHEMA
 
 # ==============================================================================
 # 4. Partition Definitions
@@ -132,38 +122,38 @@ LANDING_PARTITION_COLUMN = "job_id"
 LANDING_PARTITION_TYPE = "HASH"
 LANDING_PARTITIONS = 128
 
-# Serving table: partition by dataset_type (VALUE partition)
-SERVING_PARTITION_COLUMN = "dataset_type"
-SERVING_PARTITION_TYPE = "VALUE"
+# Serving table: partition by job_id (HASH partition)
+SERVING_PARTITION_COLUMN = "job_id"
+SERVING_PARTITION_TYPE = "HASH"
+SERVING_PARTITIONS = 128
 
 # ==============================================================================
 # 5. Scalar Index Definitions
 #    Define which columns should have scalar indexes for query performance
-#    Note: partition key (job_id) does not need a separate index.
+#    Note: job_id仍需要索引，用于HASH bucket内处理碰撞后的精确过滤。
 # ==============================================================================
 
 # Scalar indexes for landing table
 LANDING_SCALAR_INDEXES = [
-    ("dataset_type", "BTREE"),
-    ("is_terminal", "BTREE"),
-    ("is_trainable", "BTREE"),
+    ("id", "BTREE"),
+    ("job_id", "BTREE"),
+    ("session_id", "BTREE"),
+    ("created_at", "BTREE"),
+    ("is_terminal", "BITMAP"),
+    ("is_trainable", "BITMAP"),
 ]
 
 # Scalar indexes for serving table
 SERVING_SCALAR_INDEXES = [
     ("id", "BTREE"),
+    ("job_id", "BTREE"),
     ("session_id", "BTREE"),
     ("created_at", "BTREE"),
+    ("dataset_type", "BITMAP"),
+    ("is_terminal", "BITMAP"),
     ("step_reward", "BTREE"),
     ("reward", "BTREE"),
     ("agent_model", "BTREE"),
     ("env_name", "BTREE"),
+    ("tags", "LABEL_LIST"),
 ]
-
-# TODO: Add FTS (Full-Text Search) index for 'search_text' field
-#       when dldb/LanceDB supports it. This will enable efficient
-#       full-text search across message content.
-#
-# TODO: Add vector index for 'instruction_vector' field
-#       when dldb/LanceDB supports it. This will enable efficient
-#       vector similarity search for semantic retrieval.

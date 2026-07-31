@@ -70,10 +70,8 @@ def _get_partition_column(session, table_name: str) -> str:
     except Exception:
         pass
 
-    if table_name in ["wind_tunnel_serving", "serving_test"]:
-        return "dataset_type"
-    if table_name in ["wind_tunnel_landing", "landing_test"]:
-        return "dt"
+    if table_name in TABLE_INDEXES:
+        return "job_id"
     return "dataset_type"
 
 

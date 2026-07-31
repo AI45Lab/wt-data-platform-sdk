@@ -75,6 +75,7 @@ def create_test_serving_records(count: int = 20) -> List[ServingRecord]:
             dataset_type="TEST_TAGS",
             dt="2025-01-15",
             id=f"serving_test_{current_time}_{i}",
+            job_id="serving-test-tags",
             session_id=f"session_{i % 5}",
             created_at=current_time + i,
             step_id=i,
@@ -105,9 +106,6 @@ def create_test_serving_records(count: int = 20) -> List[ServingRecord]:
             agent_model="test-model",
             env_name="test-env",
             is_session_completed=(i == count - 1),
-            # Serving-specific fields
-            # search_text should contain aggregated message content for keyword search
-            search_text=f"[user] Test message {i} with tags: {', '.join(tags)} [assistant] Test response {i} Final response {i}",
             tags=tags,
         )
         records.append(record)
@@ -167,7 +165,9 @@ def cleanup_serving_test_table():
     client = WTGatewayClient(config=TEST_SERVING_CONFIG)
 
     try:
-        deleted = client.delete_serving("dataset_type = 'TEST_TAGS'")
+        deleted = client.delete_serving(
+            "job_id = 'serving-test-tags' AND dataset_type = 'TEST_TAGS'"
+        )
         logger.info(f"Deleted {deleted} records from serving_test table")
     finally:
         client.close()
