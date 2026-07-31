@@ -101,7 +101,7 @@ def test_insert_query_delete():
 
         # Query all records with our session_id
         print("\n4. Querying records back...")
-        queried_records = client.query_landing(
+        queried_records = client.query_data(
             filter_query=f"job_id = '{job_id}' AND session_id = '{test_session_id}'"
         )
 
@@ -119,7 +119,7 @@ def test_insert_query_delete():
 
         # Query with limit
         print("\n5. Querying with limit=2...")
-        limited_records = client.query_landing(
+        limited_records = client.query_data(
             filter_query=f"job_id = '{job_id}' AND session_id = '{test_session_id}'",
             limit=2
         )
@@ -141,7 +141,7 @@ def test_insert_query_delete():
         # NOTE: Delete uses LanceDB native SDK while query uses DLDB wrapper.
         # There might be a delay for consistency between the two connections.
         time.sleep(3)  # Give more time for deletion to propagate
-        remaining_records = client.query_landing(
+        remaining_records = client.query_data(
             filter_query=f"job_id = '{job_id}' AND session_id = '{test_session_id}'"
         )
         print(f"   Remaining records with session_id: {len(remaining_records)}")
@@ -187,7 +187,7 @@ def test_insert_single_and_batch():
 
         # Query and verify
         print("\n3. Verifying inserts...")
-        all_records = client.query_landing(
+        all_records = client.query_data(
             filter_query=f"job_id = '{job_id}' AND session_id = '{test_session_id}'"
         )
         print(f"   Total records found: {len(all_records)}")

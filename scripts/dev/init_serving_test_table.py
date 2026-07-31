@@ -103,6 +103,7 @@ def create_test_serving_records(count: int = 20) -> List[ServingRecord]:
                 ]
             ),
             ground_truth_answer=f"Answer_{i}",
+            search_text=f"Test message {i} Test response {i} Final response {i}",
             agent_model="test-model",
             env_name="test-env",
             is_session_completed=(i == count - 1),

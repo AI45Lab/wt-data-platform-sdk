@@ -148,7 +148,7 @@ with WTGatewayClient() as client:
         {"reward": 1.0, "step_reward": 1.0, "is_trainable": True},
     )
 
-    trajectory = client.query_landing(
+    trajectory = client.query_data(
         scope,
         order_by="step_id",
         checkout_latest=True,
@@ -156,19 +156,22 @@ with WTGatewayClient() as client:
     job_row_count = client.count_landing(partition=job_id)
 
     # Prefer this pruned lookup when both job_id and id are known.
-    exact_event = client.query_landing(
+    exact_event = client.query_data(
         f"job_id = '{job_id}' AND id = '{buffered[-1].id}'",
         limit=1,
     )
 
-    # Use only when the globally unique id is known but its job_id is not.
-    fallback_event = client.get_by_id(buffered[-1].id)
+    # Without job_id, explicitly select the table to scan by globally unique ID.
+    landing_event = client.get_by_id(
+        buffered[-1].id,
+        table=client.config.tables.landing_table,
+    )
 ```
 
-`get_by_id()` checks serving first and then landing. Because an ID alone cannot
-identify a landing HASH bucket, it is a convenient fallback rather than the
-preferred hot-path lookup. When `job_id` is available, use `query_landing()`
-with both values for physical partition pruning.
+`get_by_id()` queries serving by default, or exactly the named `table`; it does
+not fall back across the internal/external table boundary. Because an ID alone
+cannot identify a HASH bucket, prefer `query_data()` with both `job_id` and
+`id` on hot paths.
 
 ### 2. Consume Completed Events
 
@@ -197,18 +200,47 @@ with WTGatewayClient() as client:
     )
 ```
 
-For an offline export or backfill, `fetch_data()` manages the `created_at`
-cursor and yields DataFrame batches:
+For a convenient one-run scan or backfill, `iter_data_batches()` manages the
+`created_at` cursor and yields DataFrame batches lazily:
 
 ```python
 with WTGatewayClient() as client:
-    for batch in client.fetch_data(
+    for batch in client.iter_data_batches(
         dataset_type="RL",
         where_sql="job_id = 'evaluation-run-001'",
         chunk_size=1000,
     ):
         print(f"received {len(batch)} rows")
 ```
+
+`pull_data()` and `iter_data_batches()` keep landing as their default. External consumers can pass
+`table=client.config.tables.serving_table` without changing SAfactory's existing
+calls. Both APIs use a `created_at` cursor, so they are not the formal export path
+when multiple rows can share a timestamp.
+
+For a formal offline export, use `export_data_batches()`. It defaults to serving,
+captures a complete unique-ID manifest before yielding the first batch, and then
+validates every exact-ID batch. Rows appended after manifest capture are excluded;
+duplicate IDs or source rows deleted/changed so they no longer match cause a hard
+failure instead of silent loss:
+
+```python
+with WTGatewayClient() as client:
+    for batch in client.export_data_batches(
+        filter_query="dataset_type = 'RL' AND is_trainable = True",
+        batch_size=5000,
+        columns=["id", "job_id", "chosen_trace", "tags", "meta_json"],
+    ):
+        write_to_temporary_export(batch)
+
+    publish_completed_export()
+```
+
+Treat serving rows selected for an export as immutable until iteration completes,
+and publish a file only after the iterator is exhausted successfully. dldb does
+not expose one atomic snapshot across all physical HASH buckets, so this manifest
+and validation protocol provides a stable row set but cannot preserve pre-update
+field values if a selected row is modified during export.
 
 ### 3. Publish Enriched Data
 
@@ -224,14 +256,17 @@ serving_data.update(
     reward=1.0,
     step_reward=1.0,
     is_trainable=True,
+    search_text="benchmark task final successful response",
     tags=["trainable", "successful"],
 )
 serving_record = ServingRecord(**serving_data)
 
 with WTGatewayClient() as client:
     client.ingest_serving(serving_record)
-    matches = client.query_serving(
-        "job_id = 'evaluation-run-001' AND array_contains(tags, 'trainable')",
+    matches = client.search(
+        "successful",
+        dataset_type="RL",
+        tags=["trainable"],
         limit=20,
     )
 ```
@@ -254,18 +289,20 @@ enter existing indexes. Use `all_partitions=True` only for scheduled full-table
 maintenance. The context manager closes the dldb session and emits its final
 metrics summary when enabled.
 
-### Choosing a Read API
+### Choosing Among the Four Data Read APIs
 
-| Need | Recommended API | Why |
-| --- | --- | --- |
-| Reconstruct one trajectory | `query_landing(job_id + session_id)` | Ordered, HASH-pruned trajectory read |
-| Read one event with its job known | `query_landing(job_id + id)` | Precise and HASH-pruned |
-| Read one event when only its ID is known | `get_by_id(id)` | Convenient fallback across serving and landing |
-| Poll newly completed events | `pull_data()` + `extract_cursor()` | One checkpointed page at a time |
-| Export or backfill a job | `fetch_data()` | Iterates through DataFrame batches |
-| Inspect a consumer watermark | `get_max_created_at()` | Returns the latest matching record |
-| Count rows for one job | `count_landing(partition=job_id)` | Resolves and filters the correct HASH bucket |
-| Read enriched output | `query_serving()` | Uses the same query contract as landing against the serving table |
+| API | Accepted parameters | Return type | Pagination control | Default table | Best suited for |
+| --- | --- | --- | --- | --- | --- |
+| `query_data()` | `filter_query`, `limit`, `columns`, `partition`, `order_by`, `ascending`, `checkout_latest`, `as_dataframe`, `table` | One `List[LandingRecord/ServingRecord]`, or one DataFrame with `as_dataframe=True` | No cursor management; one query with optional `limit` | Landing | Interactive filtering, trajectory/detail lookup, Dashboard lists, small bounded result sets |
+| `pull_data()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `cursor`, `order_by`, `ascending`, `limit`, `checkout_latest`, `table` | One DataFrame page | Caller supplies, extracts, and persists the `created_at` cursor | Landing | Incremental consumers, polling, retryable processing, durable checkpoints |
+| `iter_data_batches()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `chunk_size`, `order_by`, `ascending`, `table` | Iterator yielding one DataFrame per batch | SDK advances the `created_at` cursor internally until exhausted | Landing | Convenient one-run scans, backfills, and offline processing where timestamp ties are acceptable |
+| `export_data_batches()` | `filter_query`, `batch_size`, `columns`, `table` | Iterator yielding one validated DataFrame per manifest batch | SDK first captures a complete unique-ID manifest, then fetches and verifies exact IDs | Serving | Formal offline exports requiring a fixed row set, duplicate-ID detection, and no timestamp-cursor gaps |
+
+The first three APIs accept `table=client.config.tables.serving_table` when the
+caller needs serving instead. `export_data_batches()` already defaults to serving;
+pass `table=client.config.tables.landing_table` only for an explicit landing export.
+Include `job_id` in the filter whenever possible for HASH bucket pruning. Use
+`search()` separately for Dashboard keyword search.
 
 ## Client Interface
 
@@ -275,18 +312,18 @@ metrics summary when enabled.
 | --- | --- |
 | ingest_landing(record) | Write one LandingRecord. |
 | ingest_landing_batch(records) | Write a list of records or LandingRecordBatch. |
-| query_landing(filter_query, ...) | Query landing records, or return a DataFrame with as_dataframe=True. |
+| query_data(filter_query, ..., table=None) | Query landing by default, or a named table; optionally return a DataFrame. |
 | update_landing(filter_query, updates, ...) | Update matching records. id, created_at, and job_id are protected. |
 | count_landing(partition=None) | Count rows, optionally in one raw job_id or hash bucket. |
 | delete_landing(filter_query) | Delete matching landing records. |
 
-query_landing() and update_landing() accept a raw partition="job-id" for compatibility. On HASH tables the SDK converts it to the bucket and adds a job_id predicate. Prefer putting job_id in filter_query explicitly.
+query_data() and update_landing() accept a raw partition="job-id" for compatibility. On HASH tables the SDK converts it to the bucket and adds a job_id predicate. Prefer putting job_id in filter_query explicitly.
 
 For an ordered or limited landing query, include job_id in filter_query. Cross-bucket order_by + limit is not a global merge sort in the current dldb partition model.
 
 ```python
 with WTGatewayClient() as client:
-    latest = client.query_landing(
+    latest = client.query_data(
         "job_id = 'job-001' AND session_id = 'session-001'",
         order_by="step_id",
         ascending=False,
@@ -305,18 +342,20 @@ update_landing() returns an execution acknowledgement. dldb does not yet return 
 | Method | Purpose |
 | --- | --- |
 | ingest_serving(record) / ingest_serving_batch(records) | Write processed serving records. |
-| query_serving(filter_query, ...) | Query serving with the same parameters and HASH pruning behavior as query_landing. |
+| query_data(filter_query, ..., table=serving_table) | Query serving with the same filtering and HASH pruning behavior as landing. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
-| search(query, ...) | Filter serving by tags/SQL, or search explicit scalar string fields. |
+| search(query, ...) | Search serving `search_text`, tags/SQL, or explicit scalar string fields. |
 | get_tags_distribution() | Return serving tag frequencies. |
-| get_by_id(record_id) | Check serving, then landing, for an ID. |
-| pull_data(...) / fetch_data(...) | Read landing data with cursor pagination or batches. |
+| get_by_id(record_id, table=None) | Query serving by default, or exactly one named table. |
+| pull_data(..., table=None) / iter_data_batches(..., table=None) | Read landing by default, or a named table, with manual-page or automatic-batch iteration. |
+| export_data_batches(filter_query="", ..., table=None) | Reliably export a fixed ID manifest from serving by default; validates each exact-ID batch. |
 | get_max_created_at(where_sql) / extract_cursor(df) | Build cursor-based readers. |
 
-Vector search is not currently exposed by dldb. Keyword search requires
-explicit scalar `search_fields`; nested traces are queried through normal SQL
-filters or tags. `stream=True` returns an iterator containing the current
-result frame.
+Vector search is not currently exposed by dldb. Keyword search defaults to
+`search_text`; pass explicit scalar `search_fields` to search other string
+columns. Nested traces are queried through the ETL-generated `search_text`,
+normal SQL filters, or tags. `stream=True` returns an iterator containing the
+current result frame.
 
 ### Index Maintenance
 
@@ -429,8 +468,9 @@ python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 10
 # Locate HASH buckets and candidate rows with unreadable nested fields
 python scripts/inspect/scan_landing_nested_decode.py --table landing_test
 
-# Inspect serving tags
+# Inspect serving tags and ETL-generated search text
 python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
+python scripts/inspect/check_search_text.py --table wind_tunnel_serving
 ```
 
 ### Cleanup and Indexes

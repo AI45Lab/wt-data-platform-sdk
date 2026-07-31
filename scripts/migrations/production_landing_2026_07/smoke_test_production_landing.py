@@ -62,7 +62,7 @@ def _load_source_records(
     """Find source rows through one HASH bucket at a time, avoiding a global scan."""
     buckets = [source_bucket] if source_bucket is not None else client._list_existing_partitions_for_table(SOURCE_TABLE)
     for bucket in buckets:
-        records = client.query_landing(
+        records = client.query_data(
             filter_query="job_id IS NOT NULL",
             partition=bucket,
             limit=sample_size,
@@ -99,7 +99,7 @@ def run_smoke_test(sample_size: int, source_bucket: int | None) -> None:
         print(f"Wrote {len(created_records)} records to {TARGET_TABLE}.")
 
         for record in created_records:
-            rows = target_client.query_landing(
+            rows = target_client.query_data(
                 filter_query=(
                     f"job_id = {_sql_string(record.job_id)} "
                     f"AND id = {_sql_string(record.id)}"

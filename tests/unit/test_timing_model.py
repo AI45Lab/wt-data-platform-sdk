@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +20,7 @@ class FakeSession:
         self.last_count_kwargs: Optional[Dict[str, Any]] = None
         self.last_delete_kwargs: Optional[Dict[str, Any]] = None
         self.last_update_kwargs: Optional[Dict[str, Any]] = None
+        self.filter_calls: List[Dict[str, Any]] = []
         self.created_indexes: List[Dict[str, Any]] = []
         self.optimized_partitions: List[Dict[str, Any]] = []
         self.indexes: Dict[tuple, set] = {}
@@ -57,7 +59,7 @@ class FakeSession:
         ascending: bool = True,
         checkout_latest: bool = False,
     ) -> pd.DataFrame:
-        _ = offset, partitions, partition_cond, checkout_latest
+        _ = partition_cond
         self.last_filter_kwargs = {
             "table_name": table_name,
             "query": query,
@@ -67,12 +69,22 @@ class FakeSession:
             "order_by": order_by,
             "ascending": ascending,
             "checkout_latest": checkout_latest,
+            "columns": columns,
+            "offset": offset,
         }
+        self.filter_calls.append(dict(self.last_filter_kwargs))
         df = pd.DataFrame(self.rows.get(table_name, []))
+        if not df.empty and partitions and "__partition" in df.columns:
+            df = df[df["__partition"].isin(partitions)]
         if not df.empty and query:
             for condition in query.split(" AND "):
                 condition = condition.strip().strip("()")
-                if " = '" in condition:
+                if " IN (" in condition:
+                    key, raw_values = condition.split(" IN ", 1)
+                    values = re.findall(r"'((?:''|[^'])*)'", raw_values)
+                    values = [value.replace("''", "'") for value in values]
+                    df = df[df[key.strip()].astype(str).isin(values)]
+                elif " = '" in condition:
                     key, raw_value = condition.split(" = ", 1)
                     value = raw_value.strip().strip("'")
                     df = df[df[key.strip()] == value]
@@ -85,6 +97,8 @@ class FakeSession:
 
         if order_by and not df.empty:
             df = df.sort_values(order_by, ascending=ascending)
+        if offset is not None:
+            df = df.iloc[offset:]
         if columns is not None and not df.empty:
             df = df[columns]
         if limit is not None:
@@ -361,7 +375,114 @@ def test_pull_data_prunes_job_id_partition_from_where_sql(monkeypatch):
     assert fake_session.last_filter_kwargs["partition_cond"] is None
 
 
-def test_query_landing_converts_job_id_partition_string_to_hash_bucket(monkeypatch):
+def test_pull_and_iter_data_batches_can_read_named_serving_table(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.rows["serving_test"] = [
+        {
+            "dataset_type": "RL",
+            "job_id": "job-123",
+            "created_at": 100,
+            "id": "serving-1",
+        }
+    ]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(
+        GatewayConfig(tables=TableConfig(landing_table="landing_test", serving_table="serving_test"))
+    )
+
+    page = client.pull_data(
+        "RL",
+        where_sql="job_id = 'job-123'",
+        table="serving_test",
+    )
+    assert list(page["id"]) == ["serving-1"]
+    assert fake_session.last_filter_kwargs["table_name"] == "serving_test"
+    assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
+
+    batches = list(
+        client.iter_data_batches(
+            "RL",
+            where_sql="job_id = 'job-123'",
+            chunk_size=10,
+            table="serving_test",
+        )
+    )
+    assert len(batches) == 1
+    assert list(batches[0]["id"]) == ["serving-1"]
+    assert fake_session.last_filter_kwargs["table_name"] == "serving_test"
+    assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
+
+
+def test_export_data_batches_builds_fixed_manifest_and_defaults_to_serving(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.rows["serving_test"] = [
+        {
+            "dataset_type": "RL",
+            "job_id": "job-a",
+            "created_at": 100,
+            "id": "serving-2",
+            "__partition": 2,
+        },
+        {
+            "dataset_type": "RL",
+            "job_id": "job-b",
+            "created_at": 100,
+            "id": "serving-1",
+            "__partition": 1,
+        },
+        {
+            "dataset_type": "SFT",
+            "job_id": "job-b",
+            "created_at": 101,
+            "id": "serving-ignored",
+            "__partition": 1,
+        },
+    ]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(
+        GatewayConfig(tables=TableConfig(landing_table="landing_test", serving_table="serving_test"))
+    )
+    monkeypatch.setattr(client, "_list_existing_partitions_for_table", lambda table_name: [1, 2])
+
+    batches = list(
+        client.export_data_batches(
+            filter_query="dataset_type = 'RL'",
+            batch_size=1,
+            columns=["created_at"],
+        )
+    )
+
+    assert [value for batch in batches for value in batch["created_at"].tolist()] == [100, 100]
+    assert all(list(batch.columns) == ["created_at"] for batch in batches)
+    assert all(batch.attrs["wt_export"]["table"] == "serving_test" for batch in batches)
+    assert [call["columns"] for call in fake_session.filter_calls[:2]] == [["id"], ["id"]]
+    assert all(call["checkout_latest"] is True for call in fake_session.filter_calls)
+    assert all(call["table_name"] == "serving_test" for call in fake_session.filter_calls)
+
+
+def test_export_data_batches_rejects_duplicate_ids_before_yielding(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.rows["serving_test"] = [
+        {"dataset_type": "RL", "id": "duplicate", "__partition": 1},
+        {"dataset_type": "RL", "id": "duplicate", "__partition": 2},
+    ]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+    monkeypatch.setattr(client, "_list_existing_partitions_for_table", lambda table_name: [1, 2])
+
+    with pytest.raises(RuntimeError, match="globally unique IDs"):
+        list(client.export_data_batches(filter_query="dataset_type = 'RL'", batch_size=1))
+
+    assert len(fake_session.filter_calls) == 2
+
+
+def test_query_data_converts_job_id_partition_string_to_hash_bucket(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     fake_session.rows["landing_test"] = [
@@ -377,7 +498,7 @@ def test_query_landing_converts_job_id_partition_string_to_hash_bucket(monkeypat
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
 
-    client.query_landing(
+    client.query_data(
         filter_query="job_id = 'job-123' AND session_id = 'session-1'",
         partition="job-123",
         as_dataframe=True,
@@ -386,7 +507,7 @@ def test_query_landing_converts_job_id_partition_string_to_hash_bucket(monkeypat
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
 
 
-def test_query_landing_adds_job_id_filter_when_partition_string_is_raw_job_id(monkeypatch):
+def test_query_data_adds_job_id_filter_when_partition_string_is_raw_job_id(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     fake_session.rows["landing_test"] = [
@@ -409,7 +530,7 @@ def test_query_landing_adds_job_id_filter_when_partition_string_is_raw_job_id(mo
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
 
-    client.query_landing(
+    client.query_data(
         filter_query="session_id = 'session-1'",
         partition="job-123",
         as_dataframe=True,
@@ -462,7 +583,7 @@ def test_count_serving_uses_the_same_job_id_hash_collision_filter(monkeypatch):
     assert fake_session.last_filter_kwargs["query"] == "job_id = 'job-123'"
 
 
-def test_query_serving_matches_landing_hash_query_contract(monkeypatch):
+def test_query_data_can_query_named_serving_table(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     fake_session.rows["serving_test"] = [
@@ -477,11 +598,12 @@ def test_query_serving_matches_landing_hash_query_contract(monkeypatch):
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
-    result = client.query_serving(
+    result = client.query_data(
         filter_query="session_id = 'session-1'",
         partition="job-123",
         order_by="created_at",
         as_dataframe=True,
+        table="serving_test",
     )
 
     assert len(result) == 1
@@ -490,18 +612,44 @@ def test_query_serving_matches_landing_hash_query_contract(monkeypatch):
     assert fake_session.last_filter_kwargs["order_by"] == "created_at"
 
 
-def test_keyword_search_requires_explicit_scalar_fields(monkeypatch):
+def test_keyword_search_defaults_to_search_text_and_rejects_nested_fields(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
 
-    with pytest.raises(ValueError, match="explicit scalar search_fields"):
-        client.search("example")
+    client.search("example")
+    assert fake_session.last_filter_kwargs["query"] == "(search_text LIKE '%example%')"
 
     with pytest.raises(ValueError, match="nested field 'chosen_trace'"):
         client.search("example", search_fields=["chosen_trace"])
+
+
+def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.rows["landing_test"] = [
+        {
+            "dataset_type": "RL",
+            "job_id": "job-123",
+            "created_at": 100,
+            "id": "landing-only",
+        }
+    ]
+    fake_session.rows["serving_test"] = []
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(
+        GatewayConfig(tables=TableConfig(landing_table="landing_test", serving_table="serving_test"))
+    )
+
+    assert client.get_by_id("landing-only") is None
+    assert fake_session.last_filter_kwargs["table_name"] == "serving_test"
+
+    record = client.get_by_id("landing-only", table="landing_test")
+    assert record["id"] == "landing-only"
+    assert fake_session.last_filter_kwargs["table_name"] == "landing_test"
 
 
 def test_landing_index_maintenance_tracks_dirty_bucket_and_optimizes(monkeypatch):

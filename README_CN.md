@@ -145,7 +145,7 @@ with WTGatewayClient() as client:
         {"reward": 1.0, "step_reward": 1.0, "is_trainable": True},
     )
 
-    trajectory = client.query_landing(
+    trajectory = client.query_data(
         scope,
         order_by="step_id",
         checkout_latest=True,
@@ -153,20 +153,22 @@ with WTGatewayClient() as client:
     job_row_count = client.count_landing(partition=job_id)
 
     # 同时知道 job_id 和 id 时，优先使用这种可剪枝查询。
-    exact_event = client.query_landing(
+    exact_event = client.query_data(
         f"job_id = '{job_id}' AND id = '{buffered[-1].id}'",
         limit=1,
     )
 
-    # 只知道全局唯一 id、不知道 job_id 时再使用。
-    fallback_event = client.get_by_id(buffered[-1].id)
+    # 不知道 job_id 时，显式指定要按全局唯一 ID 扫描的表。
+    landing_event = client.get_by_id(
+        buffered[-1].id,
+        table=client.config.tables.landing_table,
+    )
 ```
 
-`get_by_id()` 会先查询 serving，再查询 landing。单独一个 ID 无法定位 landing
-的 HASH bucket，因此它适合作为便捷的兜底接口，而不是高频查询首选。能够取得
-`job_id` 时，应使用同时包含 `job_id` 和 `id` 的 `query_landing()`，让 SDK
-执行物理分区剪枝。`task_id`、`group_id` 等尚无统一查询契约的字段放在
-`meta_json` 中。
+`get_by_id()` 默认查询 serving，也可以精确指定 `table`；它不会跨越内部/外部
+表边界自动兜底。单独一个 ID 无法定位 HASH bucket，因此高频查询应优先使用同时
+包含 `job_id` 和 `id` 的 `query_data()`。`task_id`、`group_id` 等尚无统一
+查询契约的字段放在 `meta_json` 中。
 
 ### 2. 消费已完成事件
 
@@ -195,18 +197,45 @@ with WTGatewayClient() as client:
     )
 ```
 
-离线导出或回填时，使用 `fetch_data()` 自动维护 `created_at` 游标并逐批返回
-DataFrame：
+一次性扫描或回填时，可以使用 `iter_data_batches()` 自动维护 `created_at` 游标，并
+惰性地逐批返回 DataFrame：
 
 ```python
 with WTGatewayClient() as client:
-    for batch in client.fetch_data(
+    for batch in client.iter_data_batches(
         dataset_type="RL",
         where_sql="job_id = 'evaluation-run-001'",
         chunk_size=1000,
     ):
         print(f"received {len(batch)} rows")
 ```
+
+`pull_data()` 和 `iter_data_batches()` 默认查询 landing。外部消费方
+传入 `table=client.config.tables.serving_table` 即可查询 serving，SAfactory 现有
+调用无需修改。这两个接口都使用 `created_at` 游标；当多条记录可能共享同一时间戳
+时，不应将它们作为正式离线导出的接口。
+
+正式离线导出请使用 `export_data_batches()`。它默认查询 serving，在返回第一批数据
+之前先生成完整的唯一 ID 清单，随后按精确 ID 取数并逐批校验。清单生成之后新增的
+记录不会混入本次导出；如果发现重复 ID，或者源记录被删除/修改后不再满足条件，
+接口会直接失败，不会静默漏数：
+
+```python
+with WTGatewayClient() as client:
+    for batch in client.export_data_batches(
+        filter_query="dataset_type = 'RL' AND is_trainable = True",
+        batch_size=5000,
+        columns=["id", "job_id", "chosen_trace", "tags", "meta_json"],
+    ):
+        write_to_temporary_export(batch)
+
+    publish_completed_export()
+```
+
+导出迭代结束前，应将选中的 serving 记录视为不可变数据；只有迭代完整成功后，才
+发布最终导出文件。dldb 目前不提供跨所有 HASH 物理 bucket 的单一原子快照，因此
+该清单与校验协议可以固定行集合，但如果选中记录在导出过程中被原地更新，无法保留
+更新前的字段值。
 
 ### 3. 发布增值数据
 
@@ -222,14 +251,17 @@ serving_data.update(
     reward=1.0,
     step_reward=1.0,
     is_trainable=True,
+    search_text="benchmark task final successful response",
     tags=["trainable", "successful"],
 )
 serving_record = ServingRecord(**serving_data)
 
 with WTGatewayClient() as client:
     client.ingest_serving(serving_record)
-    matches = client.query_serving(
-        "job_id = 'evaluation-run-001' AND array_contains(tags, 'trainable')",
+    matches = client.search(
+        "successful",
+        dataset_type="RL",
+        tags=["trainable"],
         limit=20,
     )
 ```
@@ -250,18 +282,19 @@ with WTGatewayClient() as client:
 `all_partitions=True` 只用于定期全表维护，不应在每次写入后调用。context
 manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇总。
 
-### 如何选择读取接口
+### 四种数据读取接口如何选择
 
-| 需求 | 推荐接口 | 原因 |
-| --- | --- | --- |
-| 还原一条完整轨迹 | `query_landing(job_id + session_id)` | 有序读取轨迹并执行 HASH 剪枝 |
-| 已知所属 job，读取一条事件 | `query_landing(job_id + id)` | 精确且可执行 HASH 剪枝 |
-| 只知道事件 ID | `get_by_id(id)` | 在 serving 和 landing 之间兜底查询 |
-| 持续轮询新增完成事件 | `pull_data()` + `extract_cursor()` | 每次拉取一页并保存 checkpoint |
-| 导出或回填一个 job | `fetch_data()` | 自动分批返回 DataFrame |
-| 查看消费者数据水位 | `get_max_created_at()` | 返回满足条件的最新记录 |
-| 统计一个 job 的数据量 | `count_landing(partition=job_id)` | 定位 bucket 后仍按原始 job 过滤 |
-| 读取增值后的结果 | `query_serving()` | 对 serving 使用与 landing 相同的查询约定 |
+| 接口 | 接收参数 | 返回方式 | 分页控制 | 默认表 | 适用场景 |
+| --- | --- | --- | --- | --- | --- |
+| `query_data()` | `filter_query`、`limit`、`columns`、`partition`、`order_by`、`ascending`、`checkout_latest`、`as_dataframe`、`table` | 一次返回 `List[LandingRecord/ServingRecord]`；设置 `as_dataframe=True` 时返回一个 DataFrame | 不维护游标；执行一次查询，可使用 `limit` | Landing | 交互式条件查询、轨迹/详情查询、Dashboard 列表、小规模有界结果集 |
+| `pull_data()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`cursor`、`order_by`、`ascending`、`limit`、`checkout_latest`、`table` | 一次返回一页 DataFrame | 调用方传入、提取并持久化 `created_at` 游标 | Landing | 增量消费、轮询、失败重试、需要可靠 checkpoint 的处理流程 |
+| `iter_data_batches()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`chunk_size`、`order_by`、`ascending`、`table` | 返回迭代器，每次 yield 一个 DataFrame batch | SDK 内部推进 `created_at` 游标，直到数据读完 | Landing | 允许时间戳并列的一次性扫描、回填和离线处理 |
+| `export_data_batches()` | `filter_query`、`batch_size`、`columns`、`table` | 返回迭代器，每次 yield 一个经过校验的 DataFrame manifest batch | SDK 先生成完整唯一 ID 清单，再按精确 ID 取数并校验 | Serving | 要求固定行集合、检测重复 ID、且不能因时间戳游标漏数的正式离线导出 |
+
+前三个接口可通过 `table=client.config.tables.serving_table` 查询 serving。
+`export_data_batches()` 已默认查询 serving；只有明确需要导出 landing 时才传
+`table=client.config.tables.landing_table`。查询条件中应尽量包含 `job_id`，以便
+执行 HASH bucket 剪枝。Dashboard 关键词搜索单独使用 `search()`。
 
 ## 客户端接口
 
@@ -271,18 +304,18 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 | --- | --- |
 | `ingest_landing(record)` | 写入一条 `LandingRecord`。 |
 | `ingest_landing_batch(records)` | 写入记录列表或 `LandingRecordBatch`。 |
-| `query_landing(filter_query, ...)` | 查询 landing 记录；设置 `as_dataframe=True` 时返回 DataFrame。 |
+| `query_data(filter_query, ..., table=None)` | 默认查询 landing，也可查询指定表；可返回 DataFrame。 |
 | `update_landing(filter_query, updates, ...)` | 更新匹配记录。`id`、`created_at` 和 `job_id` 为受保护字段。 |
 | `count_landing(partition=None)` | 统计行数，可选指定原始 `job_id` 或 hash bucket。 |
 | `delete_landing(filter_query)` | 删除匹配的 landing 记录。 |
 
-为兼容已有调用方式，`query_landing()` 和 `update_landing()` 接受原始的 `partition="job-id"`。在 HASH 表上，SDK 会将其转换为 bucket 并补充 `job_id` 条件。仍建议在 `filter_query` 中显式包含 `job_id`。
+为兼容已有调用方式，`query_data()` 和 `update_landing()` 接受原始的 `partition="job-id"`。在 HASH 表上，SDK 会将其转换为 bucket 并补充 `job_id` 条件。仍建议在 `filter_query` 中显式包含 `job_id`。
 
 执行带排序或 limit 的 landing 查询时，应在 `filter_query` 中包含 `job_id`。在当前 dldb 分区模型中，跨 bucket 的 `order_by + limit` 不是全局归并排序。
 
 ```python
 with WTGatewayClient() as client:
-    latest = client.query_landing(
+    latest = client.query_data(
         "job_id = 'job-001' AND session_id = 'session-001'",
         order_by="step_id",
         ascending=False,
@@ -301,17 +334,19 @@ with WTGatewayClient() as client:
 | 方法 | 用途 |
 | --- | --- |
 | `ingest_serving(record)` / `ingest_serving_batch(records)` | 写入处理后的 serving 记录。 |
-| `query_serving(filter_query, ...)` | 使用与 `query_landing()` 相同的参数和 HASH 剪枝行为查询 serving。 |
+| `query_data(filter_query, ..., table=serving_table)` | 使用相同的过滤和 HASH 剪枝行为查询 serving。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
-| `search(query, ...)` | 按 tags/SQL 过滤 serving，或检索显式指定的标量字符串字段。 |
+| `search(query, ...)` | 检索 serving 的 `search_text`、tags/SQL 或显式指定的标量字符串字段。 |
 | `get_tags_distribution()` | 返回 serving 标签频次。 |
-| `get_by_id(record_id)` | 先在 serving 表、再在 landing 表中查找 ID。 |
-| `pull_data(...)` / `fetch_data(...)` | 使用游标分页或分批读取 landing 数据。 |
+| `get_by_id(record_id, table=None)` | 默认查询 serving，或精确查询一个指定表。 |
+| `pull_data(..., table=None)` / `iter_data_batches(..., table=None)` | 默认读取 landing，或按指定表进行手动单页/自动分批读取。 |
+| `export_data_batches(filter_query="", ..., table=None)` | 默认从 serving 可靠导出固定 ID 清单，并校验每个精确 ID batch。 |
 | `get_max_created_at(where_sql)` / `extract_cursor(df)` | 构建基于游标的读取流程。 |
 
-dldb 当前尚未开放向量搜索。关键词检索必须显式传入标量
-`search_fields`；嵌套 trace 应通过普通 SQL 条件或 tags 查询。设置
-`stream=True` 时，会返回包含当前结果 DataFrame 的迭代器。
+dldb 当前尚未开放向量搜索。关键词检索默认查询 `search_text`；如需检索其他
+字符串列，可显式传入标量 `search_fields`。嵌套 trace 应通过 ETL 生成的
+`search_text`、普通 SQL 条件或 tags 查询。设置 `stream=True` 时，会返回包含
+当前结果 DataFrame 的迭代器。
 
 ### 索引维护
 
@@ -423,8 +458,9 @@ python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 10
 # 定位包含无法读取嵌套字段的 HASH bucket 和候选记录
 python scripts/inspect/scan_landing_nested_decode.py --table landing_test
 
-# 查看 serving 标签
+# 查看 serving 标签和 ETL 生成的搜索文本
 python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
+python scripts/inspect/check_search_text.py --table wind_tunnel_serving
 ```
 
 ### 数据清理与索引

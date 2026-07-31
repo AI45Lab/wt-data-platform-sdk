@@ -87,6 +87,7 @@ BASE_FIELDS = [
     # --- 答案与文本  ---
     pa.field('ground_truth_answer', pa.string()),
     pa.field('reference_answer', pa.string()),
+    pa.field('search_text', pa.string()),       # ETL 聚合的全文检索字段
 
     # --- Meta 信息  ---
     pa.field('agent_model', pa.string()),
@@ -157,3 +158,6 @@ SERVING_SCALAR_INDEXES = [
     ("env_name", "BTREE"),
     ("tags", "LABEL_LIST"),
 ]
+
+# search_text 使用包含匹配（LIKE '%keyword%'），普通 BTREE 无法有效加速。
+# 等 dldb 暴露 LanceDB FTS 后，再为该字段增加全文索引。

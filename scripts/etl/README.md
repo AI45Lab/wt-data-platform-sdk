@@ -313,7 +313,7 @@ Records without an `id` field (or with empty `id`) get auto-generated using **de
 client.delete_landing("meta_json LIKE '%\"s3_source_path\": \"wind-tunnel-landing/liuqihua/safety_image_ch/RL/20261218_v1\"%'")
 
 # Query records from a specific dataset
-results = client.query_landing("meta_json LIKE '%safety_image_ch%'")
+results = client.query_data("meta_json LIKE '%safety_image_ch%'")
 ```
 
 ## Error Handling

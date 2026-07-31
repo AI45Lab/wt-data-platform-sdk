@@ -39,6 +39,7 @@ class LandingRecord(BaseModel):
     # Answers
     ground_truth_answer: Optional[str] = None
     reference_answer: Optional[str] = None
+    search_text: Optional[str] = None
 
     # Meta Information
     agent_model: Optional[str] = None

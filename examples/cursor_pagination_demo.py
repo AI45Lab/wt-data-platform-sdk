@@ -165,9 +165,9 @@ def run_pagination_demo():
     else:
         print(f"\n    WARNING: Records not properly sorted")
 
-    # Test 3: fetch_data (auto-pagination)
+    # Test 3: iter_data_batches (auto-pagination)
     print("\n" + "=" * 70)
-    print("Test 3: fetch_data (auto-pagination)")
+    print("Test 3: iter_data_batches (auto-pagination)")
     print("=" * 70)
     print("\nHow it works:")
     print("  1. Automatically handles pagination internally")
@@ -181,7 +181,7 @@ def run_pagination_demo():
     all_fetch_records = []
     batch_num = 0
 
-    for batch in client.fetch_data(
+    for batch in client.iter_data_batches(
         dataset_type=TEST_DATASET_TYPE,
         chunk_size=CHUNK_SIZE,
     ):
@@ -199,7 +199,7 @@ def run_pagination_demo():
             break
 
     print("\n" + "=" * 70)
-    print("fetch_data Summary")
+    print("iter_data_batches Summary")
     print("=" * 70)
     print(f"    Total batches: {batch_num}")
     print(f"    Total records fetched: {len(all_fetch_records)}")
@@ -210,9 +210,9 @@ def run_pagination_demo():
 
     if len(fetch_ids) == len(set(fetch_ids)) and is_sorted:
         print(f"    ✓ No duplicates, correct ordering")
-        print(f"\n    SUCCESS: fetch_data works correctly!")
+        print(f"\n    SUCCESS: iter_data_batches works correctly!")
     else:
-        print(f"    ✗ Issues found in fetch_data results")
+        print(f"    ✗ Issues found in iter_data_batches results")
 
     # Cleanup
     print("\n[Cleanup] Deleting test data...")

@@ -65,7 +65,7 @@ def test_gateway_query_and_update_landing_interfaces():
             client.ingest_landing_batch(records)
             time.sleep(1)
 
-            full_traj = client.query_landing(
+            full_traj = client.query_data(
                 filter_query=f"job_id = '{job_id}' AND session_id = '{session_id}'",
                 order_by="step_id",
                 ascending=True,
@@ -73,7 +73,7 @@ def test_gateway_query_and_update_landing_interfaces():
             )
             assert [record.step_id for record in full_traj] == [1, 2, 3]
 
-            latest = client.query_landing(
+            latest = client.query_data(
                 filter_query=f"job_id = '{job_id}' AND session_id = '{session_id}'",
                 order_by="step_id",
                 ascending=False,
@@ -102,7 +102,7 @@ def test_gateway_query_and_update_landing_interfaces():
             assert update_result["updated"] is True
             assert update_result["partition"] is not None
 
-            updated = client.query_landing(
+            updated = client.query_data(
                 filter_query=(
                     f"job_id = '{job_id}' AND session_id = '{session_id}' AND step_id = 2"
                 ),
@@ -115,7 +115,7 @@ def test_gateway_query_and_update_landing_interfaces():
             assert updated[0].is_trainable is True
             assert json.loads(updated[0].meta_json)["env_state"]["weight_version"] == "1.0.1"
 
-            trainable_df = client.query_landing(
+            trainable_df = client.query_data(
                 filter_query=f"job_id = '{job_id}' AND is_trainable = true",
                 columns=["id", "session_id", "step_id", "is_trainable"],
                 order_by="step_id",

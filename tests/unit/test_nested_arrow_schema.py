@@ -52,6 +52,7 @@ def test_landing_arrow_preserves_null_nested_structs():
     assert table.column("response").null_count == 3
     assert table.column("chosen_trace").null_count == 3
     assert table.column("rejected_trace").null_count == 3
+    assert table.column("search_text").null_count == 3
     assert table.column("tags").null_count == 3
 
     dataframe = table.to_pandas(types_mapper=pd.ArrowDtype)
@@ -84,9 +85,9 @@ def test_landing_and_serving_use_the_same_schema_and_hash_partition():
     assert LANDING_SCHEMA.field("rejected_trace").type == pa.list_(message_type)
     assert LANDING_SCHEMA.field("meta_json").type == pa.json_(pa.string())
     assert LANDING_SCHEMA.field("tags").type == pa.list_(pa.string())
+    assert LANDING_SCHEMA.field("search_text").type == pa.string()
     assert "chosen_response" not in LANDING_SCHEMA.names
     assert "rejected_response" not in LANDING_SCHEMA.names
-    assert "search_text" not in LANDING_SCHEMA.names
     assert "instruction_vector" not in LANDING_SCHEMA.names
     assert "vector_file_path" not in LANDING_SCHEMA.names
 
@@ -122,6 +123,7 @@ def test_meta_json_stays_a_string_and_trace_is_a_message_list():
         created_at=1_700_000_000,
         job_id="job-trace",
         meta_json='{"group_id":"group-a"}',
+        search_text="question answer",
         chosen_trace=[
             ChatMessage(role="user", content=[ContentItem(type="text", text="question")]),
             ChatMessage(role="assistant", content=[ContentItem(type="text", text="answer")]),
@@ -133,6 +135,7 @@ def test_meta_json_stays_a_string_and_trace_is_a_message_list():
 
     assert isinstance(record.meta_json, str)
     assert table.column("meta_json")[0].as_py() == record.meta_json
+    assert table.column("search_text")[0].as_py() == record.search_text
     assert len(table.column("chosen_trace")[0].as_py()) == 2
     assert table.column("rejected_trace").null_count == 1
     assert table.column("tags").null_count == 1
