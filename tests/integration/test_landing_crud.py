@@ -107,11 +107,11 @@ def test_insert_query_delete():
 
         print(f"   Found {len(queried_records)} records:")
         for record in queried_records:
-            print(f"   - {record.id}:")
-            print(f"     dataset_type: {record.dataset_type}")
-            print(f"     messages: {len(record.messages)} messages")
-            if record.messages:
-                print(f"     first message: {record.messages[0].role}")
+            print(f"   - {record['id']}:")
+            print(f"     dataset_type: {record['dataset_type']}")
+            print(f"     messages: {len(record['messages'])} messages")
+            if record["messages"]:
+                print(f"     first message: {record['messages'][0]['role']}")
 
         # Verify we got all 3 records
         assert len(queried_records) == 3, f"Expected 3 records, got {len(queried_records)}"

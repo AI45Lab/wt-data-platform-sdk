@@ -62,12 +62,14 @@ def _load_source_records(
     """Find source rows through one HASH bucket at a time, avoiding a global scan."""
     buckets = [source_bucket] if source_bucket is not None else client._list_existing_partitions_for_table(SOURCE_TABLE)
     for bucket in buckets:
-        records = client.query_data(
+        rows = client.query_data(
             filter_query="job_id IS NOT NULL",
             partition=bucket,
             limit=sample_size,
             checkout_latest=True,
+            exclude_none=False,
         )
+        records = [LandingRecord.model_validate(row) for row in rows]
         usable_records = [record for record in records if record.job_id]
         if len(usable_records) >= sample_size:
             return usable_records[:sample_size]
@@ -107,7 +109,7 @@ def run_smoke_test(sample_size: int, source_bucket: int | None) -> None:
                 limit=1,
                 checkout_latest=True,
             )
-            if len(rows) != 1 or rows[0].id != record.id:
+            if len(rows) != 1 or rows[0]["id"] != record.id:
                 raise RuntimeError(
                     f"Readback verification failed for test record {record.id}"
                 )

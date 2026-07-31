@@ -501,7 +501,6 @@ def test_query_data_converts_job_id_partition_string_to_hash_bucket(monkeypatch)
     client.query_data(
         filter_query="job_id = 'job-123' AND session_id = 'session-1'",
         partition="job-123",
-        as_dataframe=True,
     )
 
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
@@ -533,7 +532,6 @@ def test_query_data_adds_job_id_filter_when_partition_string_is_raw_job_id(monke
     client.query_data(
         filter_query="session_id = 'session-1'",
         partition="job-123",
-        as_dataframe=True,
     )
 
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
@@ -593,6 +591,14 @@ def test_query_data_can_query_named_serving_table(monkeypatch):
             "session_id": "session-1",
             "created_at": 100,
             "id": "rec-1",
+            "tags": None,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello", "image_url": None}],
+                    "tool_calls": None,
+                }
+            ],
         }
     ]
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
@@ -602,11 +608,24 @@ def test_query_data_can_query_named_serving_table(monkeypatch):
         filter_query="session_id = 'session-1'",
         partition="job-123",
         order_by="created_at",
-        as_dataframe=True,
         table="serving_test",
     )
 
-    assert len(result) == 1
+    assert result == [
+        {
+            "dataset_type": "RL",
+            "job_id": "job-123",
+            "session_id": "session-1",
+            "created_at": 100,
+            "id": "rec-1",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}],
+                }
+            ],
+        }
+    ]
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
     assert "job_id = 'job-123'" in fake_session.last_filter_kwargs["query"]
     assert fake_session.last_filter_kwargs["order_by"] == "created_at"
@@ -653,6 +672,7 @@ def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):
             "job_id": "job-123",
             "created_at": 100,
             "id": "landing-only",
+            "tags": None,
         }
     ]
     fake_session.rows["serving_test"] = []
@@ -668,6 +688,13 @@ def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):
     record = client.get_by_id("landing-only", table="landing_test")
     assert record["id"] == "landing-only"
     assert fake_session.last_filter_kwargs["table_name"] == "landing_test"
+
+    record_with_nulls = client.get_by_id(
+        "landing-only",
+        table="landing_test",
+        exclude_none=False,
+    )
+    assert record_with_nulls["tags"] is None
 
 
 def test_landing_index_maintenance_tracks_dirty_bucket_and_optimizes(monkeypatch):

@@ -169,16 +169,31 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 order_by="created_at",
                 table=SERVING_TEST_TABLE,
             )
-            assert [record.id for record in landing_result] == [
+            assert [record["id"] for record in landing_result] == [
                 record.id for record in landing_records
             ]
-            assert [record.id for record in serving_result] == [
+            assert [record["id"] for record in serving_result] == [
                 record.id for record in serving_records
             ]
-            assert all(len(record.chosen_trace or []) == 2 for record in serving_result)
-            assert all(len(record.rejected_trace or []) == 2 for record in serving_result)
-            assert all(record.tags and tag in record.tags for record in serving_result)
-            assert [json.loads(record.meta_json)["index"] for record in serving_result] == [0, 1, 2]
+            assert all(len(record.get("chosen_trace", [])) == 2 for record in serving_result)
+            assert all(len(record.get("rejected_trace", [])) == 2 for record in serving_result)
+            assert all(tag in record.get("tags", []) for record in serving_result)
+            assert [json.loads(record["meta_json"])["index"] for record in serving_result] == [
+                0,
+                1,
+                2,
+            ]
+
+            assert "ground_truth_answer" not in landing_result[0]
+            assert "image_url" not in landing_result[0]["messages"][0]["content"][0]
+            landing_with_nulls = client.query_data(
+                filter_query=filter_query,
+                limit=1,
+                table=LANDING_TEST_TABLE,
+                exclude_none=False,
+            )
+            assert landing_with_nulls[0]["ground_truth_answer"] is None
+            assert landing_with_nulls[0]["messages"][0]["content"][0]["image_url"] is None
 
             first_landing_page = client.pull_data(
                 dataset_type=dataset_type,

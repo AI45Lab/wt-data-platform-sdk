@@ -34,6 +34,7 @@ from wt_sdk.utils import (
     landing_batch_to_dataframe,
     serving_record_to_dataframe,
     serving_batch_to_dataframe,
+    dataframe_to_dict_records,
     dataframe_to_landing_records,
     dataframe_to_serving_records,
 )
@@ -634,12 +635,13 @@ class WTGatewayClient:
         order_by: Optional[str] = None,
         ascending: bool = True,
         checkout_latest: bool = False,
-        as_dataframe: bool = False,
         table: Optional[str] = None,
-    ) -> Union[List[LandingRecord], List[ServingRecord], pd.DataFrame]:
-        """Query landing (default) or a named table and return records or a DataFrame.
+        exclude_none: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Query landing (default) or a named table.
 
-        Include job_id for HASH partition pruning, especially with order_by or limit.
+        Returns dictionaries with null object fields omitted recursively by default.
+        Include job_id for HASH pruning, especially with order_by or limit.
         """
         table_name = table or self.config.tables.landing_table
         effective_query = filter_query if filter_query and filter_query.strip() else "id IS NOT NULL"
@@ -677,13 +679,7 @@ class WTGatewayClient:
                 "api": "query_data",
             },
         )
-        if as_dataframe:
-            return df
-
-        if table_name == self.config.tables.serving_table:
-            records = dataframe_to_serving_records(df)
-        else:
-            records = dataframe_to_landing_records(df)
+        records = dataframe_to_dict_records(df, exclude_none=exclude_none)
         logger.info(f"Queried table {table_name}: {len(records)} results")
         return records
 
@@ -1226,8 +1222,9 @@ class WTGatewayClient:
         self,
         record_id: str,
         table: Optional[str] = None,
+        exclude_none: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        """Return one record by ID from serving (default) or a named table."""
+        """Return one dictionary by ID from serving (default) or a named table."""
         table_name = table or self.config.tables.serving_table
         filter_query = f"id = '{self._escape_sql_string(record_id)}'"
 
@@ -1240,7 +1237,10 @@ class WTGatewayClient:
 
         if len(results) > 0:
             logger.debug(f"Record {record_id} found in table {table_name}")
-            return results.iloc[0].to_dict()
+            return dataframe_to_dict_records(
+                results,
+                exclude_none=exclude_none,
+            )[0]
 
         logger.debug(f"Record {record_id} not found in table {table_name}")
         return None

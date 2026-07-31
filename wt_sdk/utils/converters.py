@@ -9,6 +9,59 @@ from wt_sdk.models import (
 )
 
 
+def _query_value_to_python(value: Any, *, exclude_none: bool) -> Any:
+    """Convert Arrow/Pandas nested values to plain Python query output."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="python", exclude_none=exclude_none)
+    elif hasattr(value, "as_py"):
+        value = value.as_py()
+    elif not isinstance(value, (str, bytes, bytearray, memoryview)) and hasattr(
+        value, "tolist"
+    ):
+        value = value.tolist()
+
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            converted = _query_value_to_python(item, exclude_none=exclude_none)
+            if exclude_none and converted is None:
+                continue
+            result[str(key)] = converted
+        return result
+
+    if isinstance(value, (list, tuple)):
+        # Preserve null list elements because their positions may carry meaning.
+        return [
+            _query_value_to_python(item, exclude_none=exclude_none)
+            for item in value
+        ]
+
+    if value is None:
+        return None
+
+    try:
+        is_null = pd.isna(value)
+        if not hasattr(is_null, "__len__") and bool(is_null):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    return value
+
+
+def dataframe_to_dict_records(
+    dataframe: pd.DataFrame,
+    *,
+    exclude_none: bool = True,
+) -> List[Dict[str, Any]]:
+    """Convert query results to dictionaries, optionally omitting null fields."""
+    records = []
+    for raw_record in dataframe.to_dict(orient="records"):
+        record = _query_value_to_python(raw_record, exclude_none=exclude_none)
+        records.append(record)
+    return records
+
+
 def pydantic_to_dict(model: Any) -> Dict:
     """
     Convert Pydantic model to dictionary, handling special types.

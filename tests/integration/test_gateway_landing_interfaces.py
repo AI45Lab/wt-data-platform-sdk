@@ -71,7 +71,7 @@ def test_gateway_query_and_update_landing_interfaces():
                 ascending=True,
                 checkout_latest=True,
             )
-            assert [record.step_id for record in full_traj] == [1, 2, 3]
+            assert [record["step_id"] for record in full_traj] == [1, 2, 3]
 
             latest = client.query_data(
                 filter_query=f"job_id = '{job_id}' AND session_id = '{session_id}'",
@@ -81,7 +81,7 @@ def test_gateway_query_and_update_landing_interfaces():
                 checkout_latest=True,
             )
             assert len(latest) == 1
-            assert latest[0].step_id == 3
+            assert latest[0]["step_id"] == 3
 
             update_result = client.update_landing(
                 filter_query=(
@@ -110,20 +110,19 @@ def test_gateway_query_and_update_landing_interfaces():
                 checkout_latest=True,
             )
             assert len(updated) == 1
-            assert updated[0].is_terminal is True
-            assert updated[0].is_session_completed is True
-            assert updated[0].is_trainable is True
-            assert json.loads(updated[0].meta_json)["env_state"]["weight_version"] == "1.0.1"
+            assert updated[0]["is_terminal"] is True
+            assert updated[0]["is_session_completed"] is True
+            assert updated[0]["is_trainable"] is True
+            assert json.loads(updated[0]["meta_json"])["env_state"]["weight_version"] == "1.0.1"
 
-            trainable_df = client.query_data(
+            trainable_rows = client.query_data(
                 filter_query=f"job_id = '{job_id}' AND is_trainable = true",
                 columns=["id", "session_id", "step_id", "is_trainable"],
                 order_by="step_id",
                 ascending=True,
                 checkout_latest=True,
-                as_dataframe=True,
             )
-            assert trainable_df["step_id"].tolist() == [1, 2, 3]
+            assert [row["step_id"] for row in trainable_rows] == [1, 2, 3]
 
         finally:
             client.delete_landing(f"job_id = '{job_id}' AND session_id = '{session_id}'")

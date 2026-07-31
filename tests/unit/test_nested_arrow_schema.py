@@ -15,9 +15,60 @@ from wt_sdk.core.schemas import (
 )
 from wt_sdk.models import LandingRecordBatch
 from wt_sdk.utils.converters import (
+    dataframe_to_dict_records,
     dataframe_to_landing_records,
     landing_batch_to_arrow,
 )
+
+
+def test_dataframe_query_dicts_recursively_exclude_none_fields():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "id": "record-1",
+                "reward": 0.0,
+                "is_terminal": False,
+                "optional": None,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "hello",
+                                "image_url": None,
+                            }
+                        ],
+                        "tool_calls": None,
+                    }
+                ],
+                "positions": ["first", None, "third"],
+                "empty_list": [],
+            }
+        ]
+    )
+
+    compact = dataframe_to_dict_records(dataframe)
+    assert compact == [
+        {
+            "id": "record-1",
+            "reward": 0.0,
+            "is_terminal": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}],
+                }
+            ],
+            "positions": ["first", None, "third"],
+            "empty_list": [],
+        }
+    ]
+
+    with_nulls = dataframe_to_dict_records(dataframe, exclude_none=False)
+    assert with_nulls[0]["optional"] is None
+    assert with_nulls[0]["messages"][0]["tool_calls"] is None
+    assert with_nulls[0]["messages"][0]["content"][0]["image_url"] is None
 
 
 def test_landing_arrow_preserves_null_nested_structs():
