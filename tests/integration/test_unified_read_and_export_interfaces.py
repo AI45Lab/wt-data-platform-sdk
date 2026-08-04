@@ -154,6 +154,21 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
             assert client.count_landing(partition=job_id) == 3
             assert client.count_serving(partition=job_id) == 3
 
+            raw_landing_result = client.query_data(
+                filter_query=filter_query,
+                limit=1,
+                table=LANDING_TEST_TABLE,
+                deserialize_json=False,
+            )[0]
+            for column in (
+                "messages",
+                "response",
+                "chosen_trace",
+                "rejected_trace",
+                "meta_json",
+            ):
+                assert isinstance(raw_landing_result[column], str)
+
             landing_result = client.query_data(
                 filter_query=filter_query,
                 order_by="created_at",
@@ -180,6 +195,11 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 1,
                 2,
             ]
+            assert isinstance(landing_result[0]["messages"], list)
+            assert isinstance(landing_result[0]["response"], dict)
+            assert isinstance(landing_result[0]["chosen_trace"], list)
+            assert isinstance(landing_result[0]["rejected_trace"], list)
+            assert isinstance(landing_result[0]["meta_json"], dict)
 
             assert "ground_truth_answer" not in landing_result[0]
             assert landing_result[0]["messages"][0]["role"] == "user"

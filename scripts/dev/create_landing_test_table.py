@@ -83,8 +83,8 @@ def init_landing_test_table():
     print(f"  After ingesting data, run the following to create indexes:")
     print(f"    # Check index status")
     print(f"    python scripts/inspect/show_table_indexes.py {TABLE_NAME}")
-    print(f"    # Add missing indexes")
-    print(f"    python scripts/ops/add_missing_indexes.py {TABLE_NAME}")
+    print(f"    # Add missing indexes and optimize existing buckets")
+    print(f"    python scripts/ops/maintain_table_indexes.py --table {TABLE_NAME} --all-partitions")
 
 
 if __name__ == "__main__":

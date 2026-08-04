@@ -10,6 +10,18 @@ the SDK's supported import API.
   the new provider-normalization ETL.
 - `migrations/`: completed, one-time migrations retained for operational history.
 
+Use the same maintenance entry point for the two production and two test
+tables. The exact table name selects the landing or serving index set; the
+script creates missing per-bucket indexes and runs dldb optimize so appended
+data enters existing indexes:
+
+```bash
+python scripts/ops/maintain_table_indexes.py \
+  --table wind_tunnel_landing --all-partitions
+python scripts/ops/maintain_table_indexes.py \
+  --table wind_tunnel_serving --all-partitions
+```
+
 Load the integrating service's environment configuration before invoking a
 script. For local development:
 

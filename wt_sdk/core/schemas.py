@@ -106,6 +106,7 @@ SERVING_SCALAR_INDEXES = [
     ("created_at", "BTREE"),
     ("dataset_type", "BITMAP"),
     ("is_terminal", "BITMAP"),
+    ("is_trainable", "BITMAP"),
     ("step_reward", "BTREE"),
     ("reward", "BTREE"),
     ("agent_model", "BTREE"),

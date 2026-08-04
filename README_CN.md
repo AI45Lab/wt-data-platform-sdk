@@ -318,7 +318,8 @@ with WTGatewayClient() as client:
 
 ```python
 with WTGatewayClient() as client:
-    summary = client.maintain_landing_indexes(
+    summary = client.maintain_table_indexes(
+        "wind_tunnel_landing",
         partitions=["evaluation-run-001"],
     )
 ```
@@ -401,10 +402,10 @@ dldb 当前尚未开放向量搜索。关键词检索默认查询 `search_text`�
 
 ### 索引维护
 
-Landing 标量索引配置在 `id`、`job_id`、`session_id`、`created_at`、
-`is_terminal` 和 `is_trainable` 字段上。`maintain_landing_indexes()` 接受原始
-`job_id`，自动映射到 HASH bucket，创建缺失索引，并可选执行 dldb optimize。
-推荐的后台调用方式见上面的端到端流程。
+`maintain_table_indexes()` 只接受两张生产表或两张测试表的精确表名，
+表名直接决定使用 landing 还是 serving 索引定义。调用方必须显式传入
+原始 `job_id`/HASH bucket，或使用 `all_partitions=True`；方法会创建缺失索引，
+并默认执行 dldb optimize。
 
 ## 时延与指标
 
@@ -529,11 +530,12 @@ python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
 
 # 创建缺失索引并 optimize 所有已有 landing bucket
-python scripts/ops/maintain_landing_indexes.py \
+python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_landing --all-partitions
 
-# 为逻辑表执行通用的缺失索引维护
-python scripts/ops/add_missing_indexes.py wind_tunnel_serving
+# 创建缺失索引并 optimize 所有已有 serving bucket
+python scripts/ops/maintain_table_indexes.py \
+  --table wind_tunnel_serving --all-partitions
 ```
 
 `scripts/dev` 包含可随时重建的测试表配置脚本。`scripts/migrations` 包含已经执行完成的历史迁移，不属于日常初始化流程。完整目录说明见 [scripts/README.md](scripts/README.md)。

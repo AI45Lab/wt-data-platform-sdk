@@ -1,13 +1,18 @@
 import re
 import sqlite3
-import threading
 import tempfile
 import time
 from typing import List, Optional, Union, Dict, Any, Iterator
 from loguru import logger
 import dldb
 import pandas as pd
-from wt_sdk.config import GatewayConfig
+from wt_sdk.config import (
+    DEFAULT_LANDING_TABLE,
+    DEFAULT_SERVING_TABLE,
+    TEST_LANDING_TABLE,
+    TEST_SERVING_TABLE,
+    GatewayConfig,
+)
 from wt_sdk.dldb_timing import (
     append_dldb_metrics_log,
     build_dldb_timing_payload,
@@ -22,6 +27,7 @@ from wt_sdk.core.schemas import (
     LANDING_PARTITION_COLUMN,
     LANDING_PARTITION_TYPE,
     SERVING_PARTITION_COLUMN,
+    SERVING_SCALAR_INDEXES,
 )
 from wt_sdk.models import (
     LandingRecord,
@@ -68,9 +74,6 @@ class WTGatewayClient:
 
         self.landing_uri = self.config.tables.landing_uri()
         self.serving_uri = self.config.tables.serving_uri()
-        self._dirty_landing_index_partitions = set()
-        self._dirty_landing_index_lock = threading.Lock()
-
         logger.info(f"WTGatewayClient initialized")
         logger.info(f"Landing table URI: {self.landing_uri}")
         logger.info(f"Serving table URI: {self.serving_uri}")
@@ -316,43 +319,6 @@ class WTGatewayClient:
             return []
         return sorted(table.list_partitions())
 
-    def _track_landing_index_partitions_from_df(self, table_name: str, df: pd.DataFrame) -> None:
-        """Remember HASH buckets touched by landing writes for later index maintenance."""
-        metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
-        if str(metadata.get("partition_type") or "").upper() != "HASH":
-            return
-
-        partition_key = metadata.get("partition_column") or self.LANDING_PARTITION_KEY
-        if partition_key not in df.columns:
-            return
-
-        partitions = set()
-        for raw_value in df[partition_key].dropna().unique():
-            partition = self._resolve_explicit_partition_for_table(
-                table_name,
-                raw_value,
-                self.LANDING_PARTITION_KEY,
-            )
-            if isinstance(partition, int):
-                partitions.add(partition)
-
-        if partitions:
-            with self._dirty_landing_index_lock:
-                self._dirty_landing_index_partitions.update(partitions)
-
-    def get_dirty_landing_index_partitions(self) -> List[int]:
-        """Return HASH buckets touched by landing writes since the last maintenance clear."""
-        with self._dirty_landing_index_lock:
-            return sorted(self._dirty_landing_index_partitions)
-
-    def clear_dirty_landing_index_partitions(self, partitions: Optional[List[int]] = None) -> None:
-        """Clear tracked landing HASH buckets after successful index maintenance."""
-        with self._dirty_landing_index_lock:
-            if partitions is None:
-                self._dirty_landing_index_partitions.clear()
-            else:
-                self._dirty_landing_index_partitions.difference_update(partitions)
-
     def _is_hash_partition_table(self, table_name: str, fallback_key: str) -> bool:
         metadata = self._get_partition_metadata_for_table(table_name, fallback_key)
         return str(metadata.get("partition_type") or "").upper() == "HASH"
@@ -451,8 +417,6 @@ class WTGatewayClient:
         # Convert Arrow table to DataFrame (preserves Arrow schema) and pass to DLDB
         df = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
         self.session.add(info["table_name"], df)
-        if table == "landing":
-            self._track_landing_index_partitions_from_df(info["table_name"], df)
         self._log_dldb_timing(
             "add",
             self._extract_dldb_last_call(),
@@ -1268,13 +1232,16 @@ class WTGatewayClient:
 
     # ==================== Index Management ====================
 
-    def _resolve_landing_index_partitions(
+    def _resolve_index_partitions(
         self,
         table_name: str,
+        fallback_key: str,
         partitions: Optional[Union[str, int, List[Union[str, int]]]],
         *,
         all_partitions: bool,
     ) -> List[int]:
+        if all_partitions and partitions is not None:
+            raise ValueError("Use either partitions or all_partitions=True, not both")
         if all_partitions:
             return [
                 int(partition)
@@ -1282,7 +1249,9 @@ class WTGatewayClient:
             ]
 
         if partitions is None:
-            return self.get_dirty_landing_index_partitions()
+            raise ValueError(
+                "Index maintenance requires explicit partitions or all_partitions=True"
+            )
 
         if isinstance(partitions, (str, int)):
             requested = [partitions]
@@ -1294,59 +1263,82 @@ class WTGatewayClient:
             bucket = self._resolve_explicit_partition_for_table(
                 table_name,
                 partition,
-                self.LANDING_PARTITION_KEY,
+                fallback_key,
             )
             if not isinstance(bucket, int):
                 raise ValueError(
-                    f"Landing index maintenance requires HASH bucket int, got {bucket!r}"
+                    f"Index maintenance requires HASH bucket int, got {bucket!r}"
                 )
             resolved.append(bucket)
 
         return sorted(set(resolved))
 
-    def maintain_landing_indexes(
+    def maintain_table_indexes(
         self,
+        table_name: str,
         partitions: Optional[Union[str, int, List[Union[str, int]]]] = None,
         *,
         all_partitions: bool = False,
         columns: Optional[List[str]] = None,
         create_missing: bool = True,
         optimize: bool = True,
-        clear_tracked: bool = True,
         cleanup_older_than=None,
         delete_unverified: bool = False,
         retrain: bool = False,
     ) -> Dict[str, Any]:
-        """Create missing landing indexes and optionally optimize HASH buckets.
+        """Maintain indexes for one of the four supported trajectory tables.
 
         Intended for explicit background or operations use, not the write path.
         """
-        info = self._get_table_info("landing")
-        table_name = info["table_name"]
-        metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
+        landing_tables = {DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE}
+        serving_tables = {DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE}
+        if table_name in landing_tables:
+            table_role = "landing"
+            fallback_key = self.LANDING_PARTITION_KEY
+            configured_indexes = LANDING_SCALAR_INDEXES
+        elif table_name in serving_tables:
+            table_role = "serving"
+            fallback_key = self.SERVING_PARTITION_KEY
+            configured_indexes = SERVING_SCALAR_INDEXES
+        else:
+            supported = sorted(landing_tables | serving_tables)
+            raise ValueError(
+                f"Unsupported index-maintenance table {table_name!r}; "
+                f"expected one of: {', '.join(supported)}"
+            )
+
+        metadata = self._get_partition_metadata_for_table(table_name, fallback_key)
         if str(metadata.get("partition_type") or "").upper() != "HASH":
             raise ValueError(
-                f"Landing index maintenance currently expects HASH partitioning, "
+                f"Table index maintenance currently expects HASH partitioning, "
                 f"got {metadata.get('partition_type')!r} for {table_name}"
             )
 
-        target_partitions = self._resolve_landing_index_partitions(
+        target_partitions = self._resolve_index_partitions(
             table_name,
+            fallback_key,
             partitions,
             all_partitions=all_partitions,
         )
 
-        index_type_by_column = dict(LANDING_SCALAR_INDEXES)
+        index_type_by_column = dict(configured_indexes)
         if columns is None:
-            index_specs = list(LANDING_SCALAR_INDEXES)
+            index_specs = list(configured_indexes)
         else:
+            unknown_columns = sorted(set(columns) - set(index_type_by_column))
+            if unknown_columns:
+                raise ValueError(
+                    f"Columns are not configured for {table_role} index maintenance: "
+                    f"{', '.join(unknown_columns)}"
+                )
             index_specs = [
-                (column, index_type_by_column.get(column, "BTREE"))
+                (column, index_type_by_column[column])
                 for column in columns
             ]
 
         summary: Dict[str, Any] = {
             "table_name": table_name,
+            "table_role": table_role,
             "partitions": target_partitions,
             "expected_indexes": [f"{column}_idx" for column, _ in index_specs],
             "indexes_created": [],
@@ -1355,12 +1347,10 @@ class WTGatewayClient:
         }
 
         if not target_partitions:
-            logger.info("No landing index partitions to maintain")
+            logger.info(f"No {table_role} index partitions to maintain")
             return summary
 
-        successful_partitions = []
         for partition in target_partitions:
-            partition_ok = True
             try:
                 existing_indexes = {
                     index["name"] if isinstance(index, dict) else index.name
@@ -1400,11 +1390,11 @@ class WTGatewayClient:
                                 "partition": partition,
                                 "column": column,
                                 "index_type": index_type,
-                                "api": "maintain_landing_indexes",
+                                "api": "maintain_table_indexes",
+                                "table_role": table_role,
                             },
                         )
                     except Exception as exc:
-                        partition_ok = False
                         error = {
                             "partition": partition,
                             "column": column,
@@ -1432,11 +1422,11 @@ class WTGatewayClient:
                         table_name=table_name,
                         extra={
                             "partition": partition,
-                            "api": "maintain_landing_indexes",
+                            "api": "maintain_table_indexes",
+                            "table_role": table_role,
                         },
                     )
                 except Exception as exc:
-                    partition_ok = False
                     error = {
                         "partition": partition,
                         "action": "optimize",
@@ -1445,14 +1435,8 @@ class WTGatewayClient:
                     summary["errors"].append(error)
                     logger.warning(f"Failed to optimize during maintenance: {error}")
 
-            if partition_ok:
-                successful_partitions.append(partition)
-
-        if clear_tracked and successful_partitions and partitions is None:
-            self.clear_dirty_landing_index_partitions(successful_partitions)
-
         logger.info(
-            f"Landing index maintenance complete: table={table_name}, "
+            f"Table index maintenance complete: role={table_role}, table={table_name}, "
             f"partitions={len(target_partitions)}, "
             f"indexes_created={len(summary['indexes_created'])}, "
             f"optimized={len(summary['optimized_partitions'])}, "

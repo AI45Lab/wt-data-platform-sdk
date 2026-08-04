@@ -236,6 +236,7 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("created_at", "BTREE"),
         ("dataset_type", "BITMAP"),
         ("is_terminal", "BITMAP"),
+        ("is_trainable", "BITMAP"),
         ("step_reward", "BTREE"),
         ("reward", "BTREE"),
         ("agent_model", "BTREE"),

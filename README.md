@@ -332,7 +332,8 @@ job:
 
 ```python
 with WTGatewayClient() as client:
-    summary = client.maintain_landing_indexes(
+    summary = client.maintain_table_indexes(
+        "wind_tunnel_landing",
         partitions=["evaluation-run-001"],
     )
 ```
@@ -418,11 +419,10 @@ current result frame.
 
 ### Index Maintenance
 
-Landing scalar indexes are configured for `id`, `job_id`, `session_id`,
-`created_at`, `is_terminal`, and `is_trainable`.
-`maintain_landing_indexes()` accepts raw job IDs, maps them to HASH buckets,
-creates missing indexes, and optionally runs dldb optimize. See the end-to-end
-workflow above for the recommended background usage.
+`maintain_table_indexes()` accepts one of the two production or two test table
+names. The exact table name selects the landing or serving index definitions.
+Callers must provide raw job IDs/HASH bucket integers or `all_partitions=True`;
+the method creates missing indexes and runs dldb optimize by default.
 
 ## Timing and Metrics
 
@@ -547,11 +547,12 @@ python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
 
 # Create missing indexes and optimize every existing landing bucket
-python scripts/ops/maintain_landing_indexes.py \
+python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_landing --all-partitions
 
-# General missing-index maintenance for a logical table
-python scripts/ops/add_missing_indexes.py wind_tunnel_serving
+# Create missing indexes and optimize every existing serving bucket
+python scripts/ops/maintain_table_indexes.py \
+  --table wind_tunnel_serving --all-partitions
 ```
 
 scripts/dev contains disposable test-table setup helpers. scripts/migrations contains completed historical migrations and is not routine setup. See [scripts/README.md](scripts/README.md) for the full layout.

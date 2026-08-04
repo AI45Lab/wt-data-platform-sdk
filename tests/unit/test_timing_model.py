@@ -790,7 +790,7 @@ def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):
     assert record_with_nulls["tags"] is None
 
 
-def test_landing_index_maintenance_tracks_dirty_bucket_and_optimizes(monkeypatch):
+def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
@@ -799,10 +799,15 @@ def test_landing_index_maintenance_tracks_dirty_bucket_and_optimizes(monkeypatch
     client.ingest_landing(_make_landing_record())
 
     bucket = stable_hash("job-123") % 128
-    assert client.get_dirty_landing_index_partitions() == [bucket]
+    assert len(fake_session.rows["landing_test"]) == 1
 
-    summary = client.maintain_landing_indexes()
+    summary = client.maintain_table_indexes(
+        "landing_test",
+        partitions=["job-123"],
+    )
 
+    assert summary["table_name"] == "landing_test"
+    assert summary["table_role"] == "landing"
     assert summary["partitions"] == [bucket]
     assert [item["column"] for item in summary["indexes_created"]] == [
         "id",
@@ -823,7 +828,73 @@ def test_landing_index_maintenance_tracks_dirty_bucket_and_optimizes(monkeypatch
             },
         }
     ]
-    assert client.get_dirty_landing_index_partitions() == []
+
+
+def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+    bucket = stable_hash("serving-job-123") % 128
+    monkeypatch.setattr(
+        client,
+        "_list_existing_partitions_for_table",
+        lambda table_name: [bucket],
+    )
+
+    summary = client.maintain_table_indexes("serving_test", all_partitions=True)
+
+    assert summary["table_name"] == "serving_test"
+    assert summary["table_role"] == "serving"
+    assert summary["partitions"] == [bucket]
+    assert [(item["column"], item["index_type"]) for item in summary["indexes_created"]] == [
+        ("id", "BTREE"),
+        ("job_id", "BTREE"),
+        ("session_id", "BTREE"),
+        ("created_at", "BTREE"),
+        ("dataset_type", "BITMAP"),
+        ("is_terminal", "BITMAP"),
+        ("is_trainable", "BITMAP"),
+        ("step_reward", "BTREE"),
+        ("reward", "BTREE"),
+        ("agent_model", "BTREE"),
+        ("env_name", "BTREE"),
+        ("tags", "LABEL_LIST"),
+    ]
+    assert fake_session.optimized_partitions == [
+        {
+            "table_name": "serving_test",
+            "partition": bucket,
+            "kwargs": {
+                "cleanup_older_than": None,
+                "delete_unverified": False,
+                "retrain": False,
+            },
+        }
+    ]
+
+
+def test_serving_index_maintenance_requires_explicit_partition_scope(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+
+    with pytest.raises(ValueError, match="explicit partitions or all_partitions=True"):
+        client.maintain_table_indexes("serving_test")
+
+
+def test_index_maintenance_rejects_custom_table(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient()
+
+    with pytest.raises(ValueError, match="Unsupported index-maintenance table"):
+        client.maintain_table_indexes("custom_trajectory_table", all_partitions=True)
 
 
 def test_get_max_created_at_prunes_landing_hash_partition(monkeypatch):
