@@ -62,6 +62,15 @@ import pandas as pd
 from wt_sdk.config import default_config
 
 
+JSON_COLUMNS = {
+    "messages",
+    "response",
+    "chosen_trace",
+    "rejected_trace",
+    "meta_json",
+}
+
+
 def _pin_exact_dldb_table(session, table_name: str) -> None:
     """Open the exact logical table by dldb metadata, avoiding prefix collisions."""
     try:
@@ -174,6 +183,11 @@ def _format_field_value(val, col_name, no_truncate=False):
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return "None"
 
+    if col_name in JSON_COLUMNS and isinstance(val, str):
+        parsed = _parse_embedded_json(val)
+        if parsed is not val:
+            val = parsed
+
     # Handle ChatMessage-like structs (dict with 'role' and 'content' keys)
     if isinstance(val, dict) and 'role' in val:
         return f"ChatMessage({_format_chat_message(val, indent=2, truncate=truncate)})"
@@ -240,7 +254,7 @@ def _to_json_compatible(value):
 
 
 def _parse_embedded_json(value):
-    """Expand JSON strings inside meta_json for easier inspection."""
+    """Expand embedded JSON strings for easier inspection."""
     if isinstance(value, dict):
         return {key: _parse_embedded_json(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -260,8 +274,9 @@ def _dataframe_to_json_records(frame: pd.DataFrame):
             str(key): _to_json_compatible(value)
             for key, value in raw_record.items()
         }
-        if isinstance(record.get("meta_json"), str):
-            record["meta_json"] = _parse_embedded_json(record["meta_json"])
+        for column in JSON_COLUMNS:
+            if isinstance(record.get(column), str):
+                record[column] = _parse_embedded_json(record[column])
         records.append(record)
     return records
 
@@ -425,9 +440,12 @@ def main():
         print(f"\nFound {len(result)} rows:\n")
 
         if args.show_nested:
-            # Show full data with nested structures
+            # Decode JSON extension columns for readable nested display.
+            display_result = result.copy()
+            for column in JSON_COLUMNS.intersection(display_result.columns):
+                display_result[column] = display_result[column].map(_parse_embedded_json)
             with pd.option_context('display.max_colwidth', None, 'display.max_columns', None):
-                print(result.to_string())
+                print(display_result.to_string())
         else:
             # Simplified view - format nested structs for readability
             for idx, row in result.iterrows():

@@ -2,24 +2,18 @@ import json
 import time
 import uuid
 
-from wt_sdk import ContentItem, GatewayConfig, LandingRecord, ChatMessage, TableConfig, WTGatewayClient
+from wt_sdk import GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
 
 
 TEST_TABLE_CONFIG = GatewayConfig(tables=TableConfig(landing_table="landing_test"))
 
 
-def _message(text: str) -> ChatMessage:
-    return ChatMessage(
-        role="user",
-        content=[ContentItem(type="text", text=text)],
-    )
+def _message(text: str) -> dict:
+    return {"role": "user", "content": text}
 
 
-def _response(text: str) -> ChatMessage:
-    return ChatMessage(
-        role="assistant",
-        content=[ContentItem(type="text", text=text)],
-    )
+def _response(text: str) -> dict:
+    return {"role": "assistant", "content": text}
 
 
 def _make_gateway_record(job_id: str, session_id: str, step_id: int, trainable: bool) -> LandingRecord:
@@ -36,8 +30,8 @@ def _make_gateway_record(job_id: str, session_id: str, step_id: int, trainable: 
         is_truncated=False,
         step_reward=float(step_id),
         reward=float(step_id),
-        messages=[_message(f"step {step_id}")],
-        response=_response(f"response {step_id}"),
+        messages=json.dumps([_message(f"step {step_id}")]),
+        response=json.dumps(_response(f"response {step_id}")),
         agent_model="test-model",
         env_name="test-env",
         is_session_completed=False,

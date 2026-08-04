@@ -2,10 +2,11 @@
 Pydantic models for Landing Table.
 Maps 1:1 to LANDING_SCHEMA in wt_sdk.core.schemas.
 """
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field, field_validator, model_validator
+import json
+from typing import Any, List, Optional
+
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
-from .common import ChatMessage, BlobManifest
 
 
 class LandingRecord(BaseModel):
@@ -31,10 +32,12 @@ class LandingRecord(BaseModel):
     reward: Optional[float] = None
 
     # Content Payload
-    messages: List[ChatMessage] = Field(default_factory=list)
-    response: Optional[ChatMessage] = None
-    chosen_trace: Optional[List[ChatMessage]] = None
-    rejected_trace: Optional[List[ChatMessage]] = None
+    # Arrow JSON logical types. The SDK stores the supplied JSON strings as-is
+    # and intentionally does not validate their provider/message structure.
+    messages: Optional[str] = None
+    response: Optional[str] = None
+    chosen_trace: Optional[str] = None
+    rejected_trace: Optional[str] = None
 
     # Answers
     ground_truth_answer: Optional[str] = None
@@ -57,14 +60,6 @@ class LandingRecord(BaseModel):
     # Asset Management
     blob_manifest: List[str] = Field(default_factory=list)
 
-    @field_validator("messages", mode="before")
-    @classmethod
-    def normalize_messages(cls, v):
-        """Ensure messages is always a list."""
-        if v is None:
-            return []
-        return v
-
     @model_validator(mode='after')
     def auto_derive_fields(self):
         """
@@ -82,8 +77,14 @@ class LandingRecord(BaseModel):
 
         # Auto-extract blob_manifest if empty and content exists
         if not self.blob_manifest:
-            # Extract all S3 URLs from multimodal content
-            blobs = self._extract_multimodal_blobs()
+            # blob_manifest is an optional optimization. No failure in its
+            # derivation may prevent an otherwise valid record from being stored.
+            try:
+                blobs = self._extract_multimodal_blobs()
+            except Exception:
+                blobs = []
+            if not isinstance(blobs, list):
+                blobs = []
             # Set blob_manifest to the extracted list
             # Note: We need to use object.__setattr__ because this is a frozen validation state
             object.__setattr__(self, 'blob_manifest', blobs)
@@ -92,7 +93,7 @@ class LandingRecord(BaseModel):
 
     def _extract_multimodal_blobs(self) -> List[str]:
         """
-        Extract all multimodal blob URLs from content fields.
+        Best-effort extraction of multimodal blob URLs from JSON payloads.
 
         Recursively extracts S3 URLs from:
         - messages
@@ -105,55 +106,31 @@ class LandingRecord(BaseModel):
         """
         blobs = []
 
-        def extract_from_content_items(items):
-            """Recursively extract URLs from ContentItem objects."""
-            if items is None:
-                return
-            for item in items:
-                # Handle both ContentItem objects and raw dicts (for backward compatibility)
-                if hasattr(item, 'image_url'):
-                    # It's a ContentItem object - access attributes directly
-                    if item.image_url and hasattr(item.image_url, 'url'):
-                        url = item.image_url.url
-                        if url and url.startswith('s3://'):
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key in {"image_url", "input_audio"} and isinstance(item, dict):
+                        url = item.get("url")
+                        if isinstance(url, str) and url.startswith("s3://"):
                             blobs.append(url)
-                elif isinstance(item, dict) and 'image_url' in item and item['image_url']:
-                    # It's a dict - access as dictionary (backward compatibility)
-                    url_data = item['image_url']
-                    if isinstance(url_data, dict) and 'url' in url_data:
-                        url = url_data['url']
-                        if url and url.startswith('s3://'):
-                            blobs.append(url)
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
 
-                # Check for input_audio (both object and dict formats)
-                if hasattr(item, 'input_audio'):
-                    # It's a ContentItem object - access attributes directly
-                    if item.input_audio and hasattr(item.input_audio, 'url'):
-                        url = item.input_audio.url
-                        if url and url.startswith('s3://'):
-                            blobs.append(url)
-                elif isinstance(item, dict) and 'input_audio' in item and item['input_audio']:
-                    # It's a dict - access as dictionary (backward compatibility)
-                    url_data = item['input_audio']
-                    if isinstance(url_data, dict) and 'url' in url_data:
-                        url = url_data['url']
-                        if url and url.startswith('s3://'):
-                            blobs.append(url)
-
-        # Extract from messages
-        for msg in self.messages:
-            if msg and hasattr(msg, 'content') and msg.content:
-                extract_from_content_items(msg.content)
-
-        # Extract from response
-        if self.response and hasattr(self.response, 'content') and self.response.content:
-            extract_from_content_items(self.response.content)
-
-        # Extract from chosen/rejected traces
-        for trace in (self.chosen_trace, self.rejected_trace):
-            for msg in trace or []:
-                if msg and hasattr(msg, 'content') and msg.content:
-                    extract_from_content_items(msg.content)
+        for payload in (
+            self.messages,
+            self.response,
+            self.chosen_trace,
+            self.rejected_trace,
+        ):
+            if not payload:
+                continue
+            try:
+                visit(json.loads(payload))
+            except (TypeError, ValueError):
+                # JSON payload validity and shape are deliberately not enforced here.
+                continue
 
         # Return unique blobs (preserve order)
         seen = set()

@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 import pyarrow as pa
 from typing import List, Any, Dict
@@ -7,6 +9,35 @@ from wt_sdk.models import (
     LandingRecordBatch,
     ServingRecordBatch,
 )
+
+
+JSON_COLUMN_NAMES = (
+    "messages",
+    "response",
+    "chosen_trace",
+    "rejected_trace",
+    "meta_json",
+)
+
+
+def _deserialize_json_value(value: Any) -> Any:
+    """Deserialize one JSON string without making reads fail on malformed data."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def deserialize_json_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Return a frame whose present JSON columns contain Python values."""
+    result = dataframe.copy()
+    for column in JSON_COLUMN_NAMES:
+        if column in result.columns:
+            values = [_deserialize_json_value(value) for value in result[column].tolist()]
+            result[column] = pd.Series(values, index=result.index, dtype=object)
+    return result
 
 
 def _query_value_to_python(value: Any, *, exclude_none: bool) -> Any:
@@ -53,25 +84,24 @@ def dataframe_to_dict_records(
     dataframe: pd.DataFrame,
     *,
     exclude_none: bool = True,
+    deserialize_json: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Convert query results to dictionaries, optionally omitting null fields."""
+    """Convert query results to dictionaries with optional JSON deserialization."""
     records = []
     for raw_record in dataframe.to_dict(orient="records"):
         record = _query_value_to_python(raw_record, exclude_none=exclude_none)
+        if deserialize_json:
+            for column in JSON_COLUMN_NAMES:
+                if column in record:
+                    record[column] = _deserialize_json_value(record[column])
         records.append(record)
     return records
 
 
 def pydantic_to_dict(model: Any) -> Dict:
-    """
-    Convert Pydantic model to dictionary, handling special types.
-
-    NOTE: For nested structures (ChatMessage, ContentItem, etc.), we keep all fields
-    even if None to match LanceDB Arrow schema requirements. Arrow structs expect
-    all fields to be present, even when null.
-    """
+    """Convert a Pydantic model to a storage dictionary."""
     if hasattr(model, 'model_dump'):
-        # Use exclude_none=False to preserve all struct fields for Arrow compatibility
+        # Preserve None so every Arrow schema column receives one value per row.
         return _serialize_with_schema(model)
     elif hasattr(model, 'dict'):
         return _serialize_with_schema(model)
@@ -80,13 +110,7 @@ def pydantic_to_dict(model: Any) -> Dict:
 
 
 def _serialize_with_schema(model: Any) -> Dict:
-    """
-    Serialize Pydantic model ensuring all struct fields are present for Arrow schema.
-
-    This recursively processes nested models to ensure:
-    1. All struct fields are present (even if None) for Arrow compatibility
-    2. Proper handling of lists and nested objects
-    """
+    """Serialize a model recursively while preserving nullable columns."""
     if not hasattr(model, 'model_dump') and not hasattr(model, 'dict'):
         return model
 
@@ -131,18 +155,13 @@ def _serialize_with_schema(model: Any) -> Dict:
 
 
 def landing_record_to_dataframe(record: LandingRecord) -> pd.DataFrame:
-    """
-    Convert a single LandingRecord to a one-row DataFrame.
-
-    NOTE: Uses object dtype for struct fields to ensure LanceDB can properly
-    infer the nested Arrow schema from the dictionaries.
-    """
+    """Convert a single LandingRecord to a one-row DataFrame."""
     data = pydantic_to_dict(record)
     df = pd.DataFrame([data])
 
-    # Ensure struct columns are object type for Arrow compatibility
-    struct_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace']
-    for col in struct_columns:
+    # JSON extension columns use Python strings at the DataFrame boundary.
+    json_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace', 'meta_json']
+    for col in json_columns:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
@@ -150,18 +169,12 @@ def landing_record_to_dataframe(record: LandingRecord) -> pd.DataFrame:
 
 
 def landing_batch_to_dataframe(batch: LandingRecordBatch) -> pd.DataFrame:
-    """
-    Convert a batch of LandingRecords to a DataFrame.
-
-    NOTE: Uses object dtype for struct fields to ensure LanceDB can properly
-    infer the nested Arrow schema from the dictionaries.
-    """
+    """Convert a batch of LandingRecords to a DataFrame."""
     records_data = [pydantic_to_dict(record) for record in batch.records]
     df = pd.DataFrame(records_data)
 
-    # Ensure struct columns are object type for Arrow compatibility
-    struct_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace']
-    for col in struct_columns:
+    json_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace', 'meta_json']
+    for col in json_columns:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
@@ -169,18 +182,12 @@ def landing_batch_to_dataframe(batch: LandingRecordBatch) -> pd.DataFrame:
 
 
 def serving_record_to_dataframe(record: ServingRecord) -> pd.DataFrame:
-    """
-    Convert a single ServingRecord to a one-row DataFrame.
-
-    NOTE: Uses object dtype for struct fields to ensure LanceDB can properly
-    infer the nested Arrow schema from the dictionaries.
-    """
+    """Convert a single ServingRecord to a one-row DataFrame."""
     data = pydantic_to_dict(record)
     df = pd.DataFrame([data])
 
-    # Ensure struct columns are object type for Arrow compatibility
-    struct_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace']
-    for col in struct_columns:
+    json_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace', 'meta_json']
+    for col in json_columns:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
@@ -188,18 +195,12 @@ def serving_record_to_dataframe(record: ServingRecord) -> pd.DataFrame:
 
 
 def serving_batch_to_dataframe(batch: ServingRecordBatch) -> pd.DataFrame:
-    """
-    Convert a batch of ServingRecords to a DataFrame.
-
-    NOTE: Uses object dtype for struct fields to ensure LanceDB can properly
-    infer the nested Arrow schema from the dictionaries.
-    """
+    """Convert a batch of ServingRecords to a DataFrame."""
     records_data = [pydantic_to_dict(record) for record in batch.records]
     df = pd.DataFrame(records_data)
 
-    # Ensure struct columns are object type for Arrow compatibility
-    struct_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace']
-    for col in struct_columns:
+    json_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace', 'meta_json']
+    for col in json_columns:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
@@ -211,9 +212,8 @@ def dataframe_to_landing_records(df: pd.DataFrame) -> List[LandingRecord]:
     Convert a DataFrame to a list of LandingRecords.
 
     Uses model_construct to bypass validation for Arrow-returned data.
-    Converts PyArrow arrays to Python lists and recursively converts nested dicts to Pydantic models.
+    JSON extension columns remain JSON strings and are not parsed or validated.
     """
-    from wt_sdk.models.common import ChatMessage, ContentItem, ImageUrl, InputAudio, ToolCall, Function
     records = []
     for _, row in df.iterrows():
         # Convert row to dict, handling NaN/null values
@@ -242,9 +242,6 @@ def dataframe_to_landing_records(df: pd.DataFrame) -> List[LandingRecord]:
             else:
                 # Regular scalar value
                 row_dict[col] = val
-
-        # Recursively convert nested dicts to Pydantic models
-        row_dict = _convert_dict_to_pydantic(row_dict)
 
         # Use model_construct to bypass validation
         # Arrow data is already validated by schema, so we don't need Pydantic validation
@@ -257,9 +254,8 @@ def dataframe_to_serving_records(df: pd.DataFrame) -> List[ServingRecord]:
     Convert a DataFrame to a list of ServingRecords.
 
     Uses model_construct to bypass validation for Arrow-returned data.
-    Converts PyArrow arrays to Python lists and recursively converts nested dicts to Pydantic models.
+    JSON extension columns remain JSON strings and are not parsed or validated.
     """
-    from wt_sdk.models.common import ChatMessage, ContentItem, ImageUrl, InputAudio, ToolCall, Function
     records = []
     for _, row in df.iterrows():
         # Convert row to dict, handling NaN/null values
@@ -289,166 +285,10 @@ def dataframe_to_serving_records(df: pd.DataFrame) -> List[ServingRecord]:
                 # Regular scalar value
                 row_dict[col] = val
 
-        # Recursively convert nested dicts to Pydantic models
-        row_dict = _convert_dict_to_pydantic(row_dict)
-
         # Use model_construct to bypass validation
         # Arrow data is already validated by schema, so we don't need Pydantic validation
         records.append(ServingRecord.model_construct(**row_dict))
     return records
-
-
-def _convert_dict_to_pydantic(data: Any) -> Any:
-    """
-    Recursively convert dictionaries to Pydantic models based on field types.
-
-    NOTE: Also handles numpy arrays which may be returned from Arrow/Pandas conversions.
-    """
-    import numpy as np
-
-    if isinstance(data, dict):
-        # Try to identify what Pydantic model this should be
-        # For LandingRecord/ServingRecord messages field
-        if 'role' in data and 'content' in data:
-            # This is a ChatMessage
-            from wt_sdk.models.common import ChatMessage, ContentItem, ImageUrl, InputAudio, ToolCall, Function
-
-            # Recursively convert content list (may be numpy array or list)
-            if 'content' in data and data['content'] is not None:
-                if isinstance(data['content'], np.ndarray):
-                    # Convert numpy array to list and process each item
-                    data['content'] = [_convert_dict_to_pydantic(item) for item in data['content']]
-                elif isinstance(data['content'], list):
-                    data['content'] = [_convert_dict_to_pydantic(item) for item in data['content']]
-
-            # Recursively convert tool_calls (may be numpy array or list)
-            if 'tool_calls' in data and data['tool_calls'] is not None:
-                if isinstance(data['tool_calls'], np.ndarray):
-                    # Handle numpy array - filter out empty items
-                    items = [_convert_dict_to_pydantic(item) for item in data['tool_calls']]
-                    data['tool_calls'] = [i for i in items if i is not None]
-                elif isinstance(data['tool_calls'], list):
-                    data['tool_calls'] = [_convert_dict_to_pydantic(item) for item in data['tool_calls']]
-
-            return ChatMessage.model_construct(**data)
-
-        elif 'type' in data and 'text' in data:
-            # This is a ContentItem
-            from wt_sdk.models.common import ContentItem, ImageUrl, InputAudio
-
-            # Convert nested ImageUrl if present
-            image_url = data.get('image_url')
-            if isinstance(image_url, dict) and image_url.get('url'):
-                data['image_url'] = ImageUrl.model_construct(**image_url)
-            elif image_url is None or isinstance(image_url, dict):
-                # Null or empty ImageUrl - set to None
-                data['image_url'] = None
-
-            # Convert nested InputAudio if present
-            input_audio = data.get('input_audio')
-            if isinstance(input_audio, dict) and input_audio.get('url'):
-                data['input_audio'] = InputAudio.model_construct(**input_audio)
-            elif input_audio is None or isinstance(input_audio, dict):
-                # Null or empty InputAudio - set to None
-                data['input_audio'] = None
-
-            return ContentItem.model_construct(**data)
-
-        elif 'url' in data and 'detail' in data:
-            # This is an ImageUrl
-            from wt_sdk.models.common import ImageUrl
-            return ImageUrl.model_construct(**data)
-
-        elif 'url' in data and 'format' in data:
-            # This is an InputAudio
-            from wt_sdk.models.common import InputAudio
-            return InputAudio.model_construct(**data)
-
-        elif 'id' in data and 'type' in data and 'function' in data:
-            # This is a ToolCall
-            from wt_sdk.models.common import ToolCall, Function
-            if 'function' in data and isinstance(data['function'], dict):
-                data['function'] = Function.model_construct(**data['function'])
-            return ToolCall.model_construct(**data)
-
-        elif 'name' in data and 'arguments' in data:
-            # This is a Function
-            from wt_sdk.models.common import Function
-            return Function.model_construct(**data)
-
-        else:
-            # Unknown dict type - recursively convert values
-            return {k: _convert_dict_to_pydantic(v) for k, v in data.items()}
-
-    elif isinstance(data, list):
-        # Recursively convert list items
-        return [_convert_dict_to_pydantic(item) for item in data]
-
-    elif isinstance(data, np.ndarray):
-        # Handle numpy arrays (from Arrow/Pandas conversion)
-        # Convert to list and process each item
-        return [_convert_dict_to_pydantic(item) for item in data]
-
-    else:
-        # Primitive value - return as-is
-        return data
-
-
-def _clean_array_value(value: Any) -> Any:
-    """
-    Clean array/list values by removing empty structs.
-
-    For Pydantic models with optional nested structs, Arrow stores the struct
-    with all None values, but Pydantic expects the field to be None entirely.
-    """
-    if not isinstance(value, (list, tuple)):
-        return value
-
-    cleaned_list = []
-    for item in value:
-        if isinstance(item, dict):
-            # Check if this is an empty struct (all values are None)
-            if all(v is None for v in item.values()):
-                # Empty struct - replace with None
-                continue
-            else:
-                # Recursively clean nested dicts
-                cleaned_list.append(_clean_dict_value(item))
-        elif isinstance(item, (list, tuple)):
-            # Nested list - recursively clean
-            cleaned_list.append(_clean_array_value(item))
-        else:
-            # Primitive value
-            cleaned_list.append(item)
-
-    return cleaned_list
-
-
-def _clean_dict_value(d: Dict) -> Any:
-    """
-    Clean dict values by removing None-only nested dicts.
-    """
-    if not isinstance(d, dict):
-        return d
-
-    cleaned = {}
-    for key, value in d.items():
-        if isinstance(value, dict):
-            # Check if this is an empty struct (all values are None)
-            if all(v is None for v in value.values()):
-                # Empty struct - skip it (Pydantic will treat as None)
-                continue
-            else:
-                # Recursively clean
-                cleaned[key] = _clean_dict_value(value)
-        elif isinstance(value, (list, tuple)):
-            # Recursively clean list
-            cleaned[key] = _clean_array_value(value)
-        elif value is not None:
-            # Keep non-None values
-            cleaned[key] = value
-
-    return cleaned
 
 
 def dict_to_pyarrow_schema(
@@ -668,7 +508,6 @@ def landing_batch_to_arrow(batch: LandingRecordBatch, schema: pa.Schema) -> pa.T
 
     return dict_to_pyarrow_schema(columns, schema, columnar=True)
 
-
 def serving_record_to_arrow(record: ServingRecord, schema: pa.Schema) -> pa.Table:
     """
     Convert a single ServingRecord to a PyArrow Table with explicit schema.
@@ -691,39 +530,3 @@ def serving_batch_to_arrow(batch: ServingRecordBatch, schema: pa.Schema) -> pa.T
             columns[key].append(value)
 
     return dict_to_pyarrow_schema(columns, schema, columnar=True)
-
-
-def normalize_content_field(record: Dict) -> Dict:
-    """
-    Normalize content field to ensure it's always a list of ContentItem.
-    This is important for LanceDB schema compatibility.
-    """
-    from wt_sdk.models.common import ContentItem
-
-    # Handle messages field
-    if "messages" in record and record["messages"]:
-        normalized_messages = []
-        for msg in record["messages"]:
-            if isinstance(msg, dict):
-                # Ensure content is normalized
-                if "content" in msg and isinstance(msg["content"], str):
-                    msg["content"] = [ContentItem(type="text", text=msg["content"])]
-            normalized_messages.append(msg)
-        record["messages"] = normalized_messages
-
-    # Handle response
-    for field in ["response"]:
-        if field in record and record[field]:
-            if isinstance(record[field], dict):
-                if "content" in record[field] and isinstance(record[field]["content"], str):
-                    record[field]["content"] = [
-                        ContentItem(type="text", text=record[field]["content"])
-                    ]
-
-    # Handle chosen/rejected trace message lists
-    for field in ["chosen_trace", "rejected_trace"]:
-        for message in record.get(field) or []:
-            if isinstance(message, dict) and isinstance(message.get("content"), str):
-                message["content"] = [ContentItem(type="text", text=message["content"])]
-
-    return record

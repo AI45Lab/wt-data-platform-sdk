@@ -1,6 +1,7 @@
+import json
 import time
 from wt_sdk import WTGatewayClient
-from wt_sdk.models import LandingRecord, ChatMessage, ContentItem
+from wt_sdk.models import LandingRecord
 from wt_sdk.config import GatewayConfig, TableConfig
 
 
@@ -24,15 +25,11 @@ def create_test_records(count: int) -> list:
             is_terminal=(i == count - 1),
             step_reward=0.1 * i,
             reward=0.5,
-            messages=[
-                ChatMessage(
-                    role="user",
-                    content=[ContentItem(type="text", text=f"Test message {i}")]
-                )
-            ],
-            response=ChatMessage(
-                role="assistant",
-                content=[ContentItem(type="text", text=f"Response {i}")]
+            messages=json.dumps(
+                [{"role": "user", "content": f"Test message {i}"}]
+            ),
+            response=json.dumps(
+                {"role": "assistant", "content": f"Response {i}"}
             ),
             agent_model="demo-model",
             env_name="demo-env",

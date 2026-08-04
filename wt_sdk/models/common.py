@@ -23,8 +23,10 @@ class InputAudio(BaseModel):
 
 class ContentItem(BaseModel):
     """
-    Multimodal content unit supporting text, image, and audio.
-    Corresponds to content_item_type in Arrow schema.
+    Legacy convenience model for constructing OpenAI-compatible JSON payloads.
+
+    LandingRecord and ServingRecord no longer validate payloads through this
+    model; callers must serialize payloads to JSON strings before ingestion.
     """
     type: str = Field(..., description="text, image_url, or input_audio")
     text: Optional[str] = None
@@ -49,8 +51,10 @@ class ToolCall(BaseModel):
 
 class ChatMessage(BaseModel):
     """
-    Chat message aligned with OpenAI ChatCompletionMessageParam.
-    Corresponds to message_type in Arrow schema.
+    Legacy convenience model for constructing OpenAI-compatible JSON payloads.
+
+    It is not the storage schema. Trajectory payload fields are opaque JSON
+    strings at the SDK boundary.
     """
     role: str
     content: Optional[List[ContentItem]] = None  # Always list after normalization

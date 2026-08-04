@@ -1,8 +1,11 @@
-import pyarrow as pa
-import pandas as pd
+import json
 
-from wt_sdk import ChatMessage, ContentItem, LandingRecord, ServingRecord
+import pandas as pd
+import pyarrow as pa
+
+from wt_sdk import LandingRecord, ServingRecord
 from wt_sdk.core.schemas import (
+    JSON_TYPE,
     LANDING_PARTITION_COLUMN,
     LANDING_PARTITION_TYPE,
     LANDING_SCALAR_INDEXES,
@@ -11,12 +14,12 @@ from wt_sdk.core.schemas import (
     SERVING_PARTITION_TYPE,
     SERVING_SCALAR_INDEXES,
     SERVING_SCHEMA,
-    message_type,
 )
 from wt_sdk.models import LandingRecordBatch
 from wt_sdk.utils.converters import (
     dataframe_to_dict_records,
     dataframe_to_landing_records,
+    deserialize_json_columns,
     landing_batch_to_arrow,
 )
 
@@ -29,19 +32,7 @@ def test_dataframe_query_dicts_recursively_exclude_none_fields():
                 "reward": 0.0,
                 "is_terminal": False,
                 "optional": None,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "hello",
-                                "image_url": None,
-                            }
-                        ],
-                        "tool_calls": None,
-                    }
-                ],
+                "nested": {"value": "hello", "optional": None},
                 "positions": ["first", None, "third"],
                 "empty_list": [],
             }
@@ -54,12 +45,7 @@ def test_dataframe_query_dicts_recursively_exclude_none_fields():
             "id": "record-1",
             "reward": 0.0,
             "is_terminal": False,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "hello"}],
-                }
-            ],
+            "nested": {"value": "hello"},
             "positions": ["first", None, "third"],
             "empty_list": [],
         }
@@ -67,63 +53,148 @@ def test_dataframe_query_dicts_recursively_exclude_none_fields():
 
     with_nulls = dataframe_to_dict_records(dataframe, exclude_none=False)
     assert with_nulls[0]["optional"] is None
-    assert with_nulls[0]["messages"][0]["tool_calls"] is None
-    assert with_nulls[0]["messages"][0]["content"][0]["image_url"] is None
+    assert with_nulls[0]["nested"]["optional"] is None
 
 
-def test_landing_arrow_preserves_null_nested_structs():
-    records = [
-        LandingRecord(
-            dataset_type="test",
-            id=f"record-{index}",
-            session_id="session-1",
-            created_at=1_700_000_000 + index,
-            job_id="job-1",
-            messages=[
-                ChatMessage(role="user", content=[ContentItem(type="text", text="question")]),
-                ChatMessage(role="assistant", content=[ContentItem(type="text", text="answer")]),
-            ],
-        )
-        for index in range(3)
-    ]
+def test_trajectory_payloads_round_trip_as_opaque_json_strings():
+    messages = json.dumps(
+        [
+            {"role": "user", "content": "question"},
+            {
+                "role": "assistant",
+                "content": "answer",
+                "future_openai_field": {"any": ["shape", None]},
+            },
+        ]
+    )
+    response = json.dumps(
+        {
+            "role": "assistant",
+            "content": "answer",
+            "provider_extension": {"unvalidated": True},
+        }
+    )
+    chosen_trace = json.dumps([{"role": "assistant", "content": "chosen"}])
+    rejected_trace = json.dumps([{"role": "assistant", "content": "rejected"}])
 
-    table = landing_batch_to_arrow(LandingRecordBatch(records=records), LANDING_SCHEMA)
+    record = LandingRecord(
+        dataset_type="test",
+        id="record-json",
+        created_at=1_700_000_000,
+        job_id="job-json",
+        messages=messages,
+        response=response,
+        chosen_trace=chosen_trace,
+        rejected_trace=rejected_trace,
+        meta_json=json.dumps({"provider": "anthropic", "raw_response": {"thinking": "..."}}),
+    )
+
+    table = landing_batch_to_arrow(LandingRecordBatch(records=[record]), LANDING_SCHEMA)
     table.validate(full=True)
 
-    messages = table.column("messages").combine_chunks()
-    content_items = messages.values.field("content").values
-    image_url = content_items.field("image_url")
-    input_audio = content_items.field("input_audio")
-    tool_calls = messages.values.field("tool_calls")
-
-    assert len(content_items) == 6
-    assert image_url.null_count == 6
-    assert input_audio.null_count == 6
-    assert tool_calls.null_count == 6
-    assert table.column("response").null_count == 3
-    assert table.column("chosen_trace").null_count == 3
-    assert table.column("rejected_trace").null_count == 3
-    assert table.column("search_text").null_count == 3
-    assert table.column("tags").null_count == 3
+    for field_name in (
+        "messages",
+        "response",
+        "chosen_trace",
+        "rejected_trace",
+        "meta_json",
+    ):
+        assert table.schema.field(field_name).type == JSON_TYPE
+        assert table.column(field_name)[0].as_py() == getattr(record, field_name)
 
     dataframe = table.to_pandas(types_mapper=pd.ArrowDtype)
-    round_tripped = pa.Table.from_pandas(dataframe, schema=LANDING_SCHEMA, preserve_index=False)
-    round_tripped.validate(full=True)
-    round_trip_items = round_tripped.column("messages").combine_chunks().values.field("content").values
-    assert round_trip_items.field("image_url").null_count == 6
-    assert round_trip_items.field("input_audio").null_count == 6
-    round_trip_messages = round_tripped.column("messages").combine_chunks().values
-    assert round_trip_messages.field("tool_calls").null_count == 6
+    restored = dataframe_to_landing_records(dataframe)[0]
+    decoded = deserialize_json_columns(dataframe).iloc[0]
+    assert restored.messages == messages
+    assert restored.response == response
+    assert restored.chosen_trace == chosen_trace
+    assert restored.rejected_trace == rejected_trace
+    assert decoded["messages"] == json.loads(messages)
+    assert decoded["response"] == json.loads(response)
 
-    restored_records = dataframe_to_landing_records(dataframe)
-    assert len(restored_records) == 3
-    for record in restored_records:
-        assert len(record.messages) == 2
-        for message in record.messages:
-            assert message.tool_calls is None
-            assert len(message.content) == 1
-            assert message.content[0].image_url is None
-            assert message.content[0].input_audio is None
+
+def test_json_payload_shape_is_not_validated_by_landing_model():
+    payload = json.dumps(
+        {
+            "not": "an OpenAI message",
+            "arbitrary_nested_provider_data": [{"type": "thinking", "signature": "opaque"}],
+        }
+    )
+    record = LandingRecord(
+        dataset_type="test",
+        id="record-unvalidated",
+        created_at=1_700_000_000,
+        messages=payload,
+        response=payload,
+    )
+
+    assert record.messages == payload
+    assert record.response == payload
+
+
+def test_deserialize_json_preserves_nested_nulls_and_original_strings():
+    messages = '[{"role":"assistant","content":null,"tool_calls":null}]'
+    dataframe = pd.DataFrame(
+        [{"id": "record-1", "messages": messages, "response": "not-json", "optional": None}]
+    )
+
+    records = dataframe_to_dict_records(
+        dataframe,
+        exclude_none=True,
+        deserialize_json=True,
+    )
+    decoded_frame = deserialize_json_columns(dataframe)
+
+    assert records == [
+        {
+            "id": "record-1",
+            "messages": [{"role": "assistant", "content": None, "tool_calls": None}],
+            "response": "not-json",
+        }
+    ]
+    assert decoded_frame.iloc[0]["messages"] == records[0]["messages"]
+    assert decoded_frame.iloc[0]["response"] == "not-json"
+    assert dataframe.iloc[0]["messages"] == messages
+
+
+def test_blob_manifest_is_derived_best_effort_from_json_payloads():
+    record = LandingRecord(
+        dataset_type="test",
+        id="record-blobs",
+        created_at=1_700_000_000,
+        messages=json.dumps(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "s3://bucket/image.png"}},
+                        {"type": "input_audio", "input_audio": {"url": "s3://bucket/audio.wav"}},
+                    ],
+                }
+            ]
+        ),
+        chosen_trace="not parsed by the model",
+    )
+
+    assert record.blob_manifest == ["s3://bucket/image.png", "s3://bucket/audio.wav"]
+
+
+def test_blob_manifest_derivation_failure_never_blocks_record_creation(monkeypatch):
+    def fail_derivation(_self):
+        raise RuntimeError("unexpected blob parser failure")
+
+    monkeypatch.setattr(LandingRecord, "_extract_multimodal_blobs", fail_derivation)
+
+    record = LandingRecord(
+        dataset_type="test",
+        id="record-blob-failure",
+        created_at=1_700_000_000,
+        messages='[{"role":"user","content":"still storable"}]',
+    )
+    table = landing_batch_to_arrow(LandingRecordBatch(records=[record]), LANDING_SCHEMA)
+
+    assert record.blob_manifest == []
+    assert table.column("blob_manifest")[0].as_py() == []
 
 
 def test_landing_and_serving_use_the_same_schema_and_hash_partition():
@@ -132,9 +203,15 @@ def test_landing_and_serving_use_the_same_schema_and_hash_partition():
     assert LANDING_PARTITION_TYPE == SERVING_PARTITION_TYPE == "HASH"
     assert LandingRecord.model_fields.keys() == ServingRecord.model_fields.keys()
 
-    assert LANDING_SCHEMA.field("chosen_trace").type == pa.list_(message_type)
-    assert LANDING_SCHEMA.field("rejected_trace").type == pa.list_(message_type)
-    assert LANDING_SCHEMA.field("meta_json").type == pa.json_(pa.string())
+    for field_name in (
+        "messages",
+        "response",
+        "chosen_trace",
+        "rejected_trace",
+        "meta_json",
+    ):
+        assert LANDING_SCHEMA.field(field_name).type == pa.json_(pa.string())
+
     assert LANDING_SCHEMA.field("tags").type == pa.list_(pa.string())
     assert LANDING_SCHEMA.field("search_text").type == pa.string()
     assert "chosen_response" not in LANDING_SCHEMA.names
@@ -165,28 +242,3 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("env_name", "BTREE"),
         ("tags", "LABEL_LIST"),
     ]
-
-
-def test_meta_json_stays_a_string_and_trace_is_a_message_list():
-    record = LandingRecord(
-        dataset_type="test",
-        id="record-trace",
-        created_at=1_700_000_000,
-        job_id="job-trace",
-        meta_json='{"group_id":"group-a"}',
-        search_text="question answer",
-        chosen_trace=[
-            ChatMessage(role="user", content=[ContentItem(type="text", text="question")]),
-            ChatMessage(role="assistant", content=[ContentItem(type="text", text="answer")]),
-        ],
-    )
-
-    table = landing_batch_to_arrow(LandingRecordBatch(records=[record]), LANDING_SCHEMA)
-    table.validate(full=True)
-
-    assert isinstance(record.meta_json, str)
-    assert table.column("meta_json")[0].as_py() == record.meta_json
-    assert table.column("search_text")[0].as_py() == record.search_text
-    assert len(table.column("chosen_trace")[0].as_py()) == 2
-    assert table.column("rejected_trace").null_count == 1
-    assert table.column("tags").null_count == 1

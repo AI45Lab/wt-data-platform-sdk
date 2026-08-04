@@ -101,11 +101,11 @@ import json
 import time
 import uuid
 
-from wt_sdk import ChatMessage, ContentItem, LandingRecord, WTGatewayClient
+from wt_sdk import LandingRecord, WTGatewayClient
 
 
-def message(role: str, text: str) -> ChatMessage:
-    return ChatMessage(role=role, content=[ContentItem(type="text", text=text)])
+def message(role: str, text: str) -> dict:
+    return {"role": role, "content": text}
 
 
 job_id = "evaluation-run-001"       # 一次评测运行，也是 HASH 分区键
@@ -123,8 +123,9 @@ def make_record(step_id: int, terminal: bool = False) -> LandingRecord:
         created_at=created_at + step_id,
         is_terminal=terminal,
         is_session_completed=terminal,
-        messages=[message("user", f"task input for step {step_id}")],
-        response=message("assistant", f"result for step {step_id}"),
+        # 轨迹 payload 列在 SDK 边界使用不透明 JSON 字符串。
+        messages=json.dumps([message("user", f"task input for step {step_id}")]),
+        response=json.dumps(message("assistant", f"result for step {step_id}")),
         meta_json=json.dumps(
             {"task_id": "benchmark-task-42", "group_id": "group-a"}
         ),
@@ -149,7 +150,8 @@ with WTGatewayClient() as client:
         scope,
         order_by="step_id",
         checkout_latest=True,
-        exclude_none=True,  # 默认递归省略对象中的 null 字段。
+        exclude_none=True,  # 默认省略每条结果中值为 null 的表列。
+        deserialize_json=True,  # 将 JSON 列返回为 dict/list。
     )
     first_step_id = trajectory[0]["step_id"]  # query_data() 返回 List[dict]。
     job_row_count = client.count_landing(partition=job_id)
@@ -161,8 +163,17 @@ with WTGatewayClient() as client:
     )
 ```
 
-`query_data()` 返回普通字典，并默认省略对象中的 null 字段；需要完整 schema
-形状时传入 `exclude_none=False`。
+`query_data()` 返回普通字典，并默认省略值为 null 的表列；需要完整
+schema 形状时传入 `exclude_none=False`。JSON 列默认保持为字符串，
+`exclude_none` 不会修改其内容；传入 `deserialize_json=True` 可返回 Python
+`dict/list`，且不会删除 JSON 内部的 null。
+
+landing 和 serving 的 `messages`、`response`、`chosen_trace`、
+`rejected_trace` 和 `meta_json` 都使用 Arrow `json<string>`。调用方写入前需用
+`json.dumps()` 序列化完整 JSON 文档。trace 是编码在一个字符串中的 JSON
+数组，不再是 Arrow `list<struct>`。SDK 暂不校验 OpenAI 或其他 provider 的
+内部结构；landing 可将 provider 原始数据保留在 `meta_json`，ETL 再向 serving
+写入归一化的 OpenAI 风格 payload JSON。
 
 ### 2. 消费已完成事件
 
@@ -185,6 +196,7 @@ with WTGatewayClient() as client:
             cursor=stored_cursor,
             limit=page_size,
             checkout_latest=True,
+            deserialize_json=True,
         )
         if page.empty:
             break
@@ -216,14 +228,16 @@ with WTGatewayClient() as client:
         dataset_type="RL",
         where_sql="job_id = 'evaluation-run-001'",
         chunk_size=1000,
+        deserialize_json=True,
     ):
         print(f"received {len(batch)} rows")
 ```
 
-`pull_data()` 和 `iter_data_batches()` 默认查询 landing。外部消费方
-传入 `table=client.config.tables.serving_table` 即可查询 serving，SAfactory 现有
-调用无需修改。这两个接口都使用 `created_at` 游标；当多条记录可能共享同一时间戳
-时，不应将它们作为正式离线导出的接口。
+`pull_data()` 和 `iter_data_batches()` 默认查询 landing。外部消费方可传入
+`table=client.config.tables.serving_table` 查询 serving。需要 Python payload 对象时
+还应传入 `deserialize_json=True`，并按普通 `dict/list` 处理，不再依赖旧的
+Arrow 嵌套容器。这两个接口都使用 `created_at` 游标；当多条记录可能共享
+同一时间戳时，不应将它们作为正式离线导出的接口。
 
 ### 3. 发布增值数据
 
@@ -246,7 +260,11 @@ serving_record = ServingRecord(**serving_data)
 
 with WTGatewayClient() as client:
     client.ingest_serving(serving_record)
-    published = client.get_by_id(serving_record.id, exclude_none=True)
+    published = client.get_by_id(
+        serving_record.id,
+        exclude_none=True,
+        deserialize_json=True,
+    )
     assert published and published["id"] == serving_record.id
 
     matches = client.search(
@@ -254,18 +272,22 @@ with WTGatewayClient() as client:
         dataset_type="RL",
         tags=["trainable"],
         limit=20,
+        deserialize_json=True,
     )
 ```
 
 `get_by_id()` 默认查询 serving，也可以精确指定 `table`；它不会跨越内部/外部表边界
 自动兜底。单独一个 ID 无法定位 HASH bucket，因此 landing 高频查询应优先使用同时
 包含 `job_id` 和 `id` 的 `query_data()`。和 `query_data()` 一样，它返回普通字典，
-并默认递归省略对象中的 null 字段。
+默认省略 null 表列，但不会修改 JSON 字符串内容。
 
 serving 数据发布完成后，正式离线导出请使用 `export_data_batches()`。它默认查询
 serving，在返回第一批数据之前先生成完整的唯一 ID 清单，随后按精确 ID 取数并逐批
 校验。清单生成之后新增的记录不会混入本次导出；如果发现重复 ID，或者源记录被
 删除/修改后不再满足条件，接口会直接失败，不会静默漏数：
+
+`export_data_batches()` 要求 Python 运行时带有标准库 `sqlite3`
+支持；无需安装额外的 SQLite 服务或 pip 依赖。
 
 ```python
 with WTGatewayClient() as client:
@@ -304,21 +326,22 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 
 | 接口 | 接收参数 | 返回方式 | 分页控制 | 默认表 | 适用场景 |
 | --- | --- | --- | --- | --- | --- |
-| `query_data()` | `filter_query`、`limit`、`columns`、`partition`、`order_by`、`ascending`、`checkout_latest`、`table`、`exclude_none` | 一次返回 `List[dict]` | 不维护游标；执行一次查询，可使用 `limit` | Landing | 交互式条件查询、轨迹/详情查询、Dashboard 列表、小规模有界结果集 |
-| `get_by_id()` | `record_id`、`table`、`exclude_none` | 返回一个 `dict` 或 `None` | 不分页；仅凭 ID 无法定位 HASH bucket，因此扫描所选表 | Serving | 只知道全局唯一 ID 时的低频单条查询 |
-| `pull_data()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`cursor`、`order_by`、`ascending`、`limit`、`checkout_latest`、`table` | 一次返回一页 DataFrame | 调用方传入、提取并持久化 `created_at` 游标 | Landing | 增量消费、轮询、失败重试、需要可靠 checkpoint 的处理流程 |
-| `iter_data_batches()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`chunk_size`、`order_by`、`ascending`、`table` | 返回迭代器，每次 yield 一个 DataFrame batch | SDK 内部推进 `created_at` 游标，直到数据读完 | Landing | 允许时间戳并列的一次性扫描、回填和离线处理 |
-| `export_data_batches()` | `filter_query`、`batch_size`、`columns`、`table` | 返回迭代器，每次 yield 一个经过校验的 DataFrame manifest batch | SDK 先生成完整唯一 ID 清单，再按精确 ID 取数并校验 | Serving | 要求固定行集合、检测重复 ID、且不能因时间戳游标漏数的正式离线导出 |
-| `search()` | `query`、`limit`、`tags`、`where_sql`、`dataset_type`、`stream`、`table`、`search_fields` | 返回一个 DataFrame；`stream=True` 时返回单个 DataFrame 的迭代器 | 一次有界搜索 | Serving | Dashboard 对 `search_text`、tags 和标量条件的关键词搜索 |
+| `query_data()` | `filter_query`、`limit`、`columns`、`partition`、`order_by`、`ascending`、`checkout_latest`、`table`、`exclude_none`、`deserialize_json` | 一次返回 `List[dict]` | 不维护游标；执行一次查询，可使用 `limit` | Landing | 交互式条件查询、轨迹/详情查询、Dashboard 列表、小规模有界结果集 |
+| `get_by_id()` | `record_id`、`table`、`exclude_none`、`deserialize_json` | 返回一个 `dict` 或 `None` | 不分页；仅凭 ID 无法定位 HASH bucket，因此扫描所选表 | Serving | 只知道全局唯一 ID 时的低频单条查询 |
+| `pull_data()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`cursor`、`order_by`、`ascending`、`limit`、`checkout_latest`、`table`、`deserialize_json` | 一次返回一页 DataFrame | 调用方传入、提取并持久化 `created_at` 游标 | Landing | 增量消费、轮询、失败重试、需要可靠 checkpoint 的处理流程 |
+| `iter_data_batches()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`chunk_size`、`order_by`、`ascending`、`table`、`deserialize_json` | 返回迭代器，每次 yield 一个 DataFrame batch | SDK 内部推进 `created_at` 游标，直到数据读完 | Landing | 允许时间戳并列的一次性扫描、回填和离线处理 |
+| `export_data_batches()` | `filter_query`、`batch_size`、`columns`、`table`、`deserialize_json` | 返回迭代器，每次 yield 一个经过校验的 DataFrame manifest batch | SDK 先生成完整唯一 ID 清单，再按精确 ID 取数并校验 | Serving | 要求固定行集合、检测重复 ID、且不能因时间戳游标漏数的正式离线导出 |
+| `search()` | `query`、`limit`、`tags`、`where_sql`、`dataset_type`、`stream`、`table`、`search_fields`、`deserialize_json` | 返回一个 DataFrame；`stream=True` 时返回单个 DataFrame 的迭代器 | 一次有界搜索 | Serving | Dashboard 对 `search_text`、tags 和标量条件的关键词搜索 |
 
 `query_data()`、`pull_data()` 和 `iter_data_batches()` 默认查询 landing，也可传入
 `table=client.config.tables.serving_table`。`get_by_id()`、`search()` 和
 `export_data_batches()` 默认查询 serving。查询条件中应尽量包含 `job_id`，以便
 执行 HASH bucket 剪枝。
 
-`query_data()` 和 `get_by_id()` 默认递归省略字典对象中的 null 字段；传入
-`exclude_none=False` 可以保留。空列表、空字符串、数字 0、false 以及 list 中的
-null 元素不会被删除。
+`query_data()` 和 `get_by_id()` 默认省略 null 表列；传入 `exclude_none=False`
+可以保留。所有返回完整记录的读取接口默认保留 JSON 字符串；
+`deserialize_json=True` 返回 Python 值且保留 JSON 内部 null。无法解析的 JSON
+会保持为字符串，不会因展示选项让整行读取失败。
 
 ## 客户端接口
 
@@ -328,7 +351,7 @@ null 元素不会被删除。
 | --- | --- |
 | `ingest_landing(record)` | 写入一条 `LandingRecord`。 |
 | `ingest_landing_batch(records)` | 写入记录列表或 `LandingRecordBatch`。 |
-| `query_data(filter_query, ..., table=None, exclude_none=True)` | 默认查询 landing，也可查询指定表；始终返回 `List[dict]`。 |
+| `query_data(filter_query, ..., table=None, exclude_none=True, deserialize_json=False)` | 默认查询 landing，也可查询指定表；始终返回 `List[dict]`。 |
 | `update_landing(filter_query, updates, ...)` | 更新匹配记录。`id`、`created_at` 和 `job_id` 为受保护字段。 |
 | `count_landing(partition=None)` | 统计行数，可选指定原始 `job_id` 或 hash bucket。 |
 | `delete_landing(filter_query)` | 删除匹配的 landing 记录。 |
@@ -358,16 +381,16 @@ with WTGatewayClient() as client:
 | 方法 | 用途 |
 | --- | --- |
 | `ingest_serving(record)` / `ingest_serving_batch(records)` | 写入处理后的 serving 记录。 |
-| `query_data(filter_query, ..., table=serving_table, exclude_none=True)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
+| `query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
-| `search(query, ...)` | 检索 serving 的 `search_text`、tags/SQL 或显式指定的标量字符串字段。 |
+| `search(query, ..., deserialize_json=False)` | 检索 serving 的 `search_text`、tags/SQL 或显式指定的标量字符串字段。 |
 | `get_tags_distribution()` | 返回 serving 标签频次。 |
-| `get_by_id(record_id, table=None, exclude_none=True)` | 默认从 serving 返回一个精简字典，或精确查询一个指定表。 |
-| `pull_data(..., table=None)` / `iter_data_batches(..., table=None)` | 默认读取 landing，或按指定表进行手动单页/自动分批读取。 |
-| `export_data_batches(filter_query="", ..., table=None)` | 默认从 serving 可靠导出固定 ID 清单，并校验每个精确 ID batch。 |
+| `get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False)` | 默认从 serving 返回一个精简字典，或精确查询一个指定表。 |
+| `pull_data(..., table=None, deserialize_json=False)` / `iter_data_batches(..., table=None, deserialize_json=False)` | 默认读取 landing，或按指定表进行手动单页/自动分批读取。 |
+| `export_data_batches(filter_query="", ..., table=None, deserialize_json=False)` | 默认从 serving 可靠导出固定 ID 清单，并校验每个精确 ID batch。 |
 
 dldb 当前尚未开放向量搜索。关键词检索默认查询 `search_text`；如需检索其他
-字符串列，可显式传入标量 `search_fields`。嵌套 trace 应通过 ETL 生成的
+字符串列，可显式传入标量 `search_fields`。不透明 JSON trace 应通过 ETL 生成的
 `search_text`、普通 SQL 条件或 tags 查询。设置 `stream=True` 时，会返回包含
 当前结果 DataFrame 的迭代器。
 
@@ -467,11 +490,11 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing --count
 python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
-# 查看嵌套字段并关闭显示截断
+# 解码并查看 JSON payload 列，同时关闭显示截断
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
-# 将完整嵌套结果写为 pretty JSON，避免控制台刷屏
+# 将结果写为 pretty JSON，并展开 JSON payload 列
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --output ./artifacts/landing_sample.json
 
@@ -481,7 +504,7 @@ python scripts/inspect/show_table_indexes.py landing_test
 # 扫描逻辑表中的重复 ID
 python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 100
 
-# 定位包含无法读取嵌套字段的 HASH bucket 和候选记录
+# 旧 schema 数据的 payload 解码失败诊断工具
 python scripts/inspect/scan_landing_nested_decode.py --table landing_test
 
 # 查看 serving 标签和 ETL 生成的搜索文本

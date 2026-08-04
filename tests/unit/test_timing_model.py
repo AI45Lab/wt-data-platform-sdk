@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from dldb.utils import stable_hash
 
-from wt_sdk import ChatMessage, ContentItem, EnvConfigManager, GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
+from wt_sdk import EnvConfigManager, GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
 import wt_sdk.client as client_module
 import wt_sdk.env_config_client as env_manager_module
 
@@ -222,16 +222,8 @@ def _make_landing_record(record_id: str = "rec-1") -> LandingRecord:
         session_id="session-1",
         created_at=1736640000,
         job_id="job-123",
-        messages=[
-            ChatMessage(
-                role="user",
-                content=[ContentItem(type="text", text="hello")],
-            )
-        ],
-        response=ChatMessage(
-            role="assistant",
-            content=[ContentItem(type="text", text="world")],
-        ),
+        messages='[{"role":"user","content":"hello"}]',
+        response='{"role":"assistant","content":"world"}',
     )
 
 
@@ -592,13 +584,7 @@ def test_query_data_can_query_named_serving_table(monkeypatch):
             "created_at": 100,
             "id": "rec-1",
             "tags": None,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "hello", "image_url": None}],
-                    "tool_calls": None,
-                }
-            ],
+            "messages": '[{"role":"user","content":"hello"}]',
         }
     ]
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
@@ -618,12 +604,7 @@ def test_query_data_can_query_named_serving_table(monkeypatch):
             "session_id": "session-1",
             "created_at": 100,
             "id": "rec-1",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "hello"}],
-                }
-            ],
+            "messages": '[{"role":"user","content":"hello"}]',
         }
     ]
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
@@ -644,8 +625,92 @@ def test_keyword_search_defaults_to_search_text_and_rejects_nested_fields(monkey
     client.search("")
     assert fake_session.last_filter_kwargs["query"] == "id IS NOT NULL"
 
-    with pytest.raises(ValueError, match="nested field 'chosen_trace'"):
+    with pytest.raises(ValueError, match="opaque JSON/list field 'chosen_trace'"):
         client.search("example", search_fields=["chosen_trace"])
+
+
+def test_public_row_read_apis_can_deserialize_json_columns(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    bucket = stable_hash("job-json") % 128
+    row = {
+        "dataset_type": "RL",
+        "job_id": "job-json",
+        "session_id": "session-json",
+        "created_at": 100,
+        "id": "record-json",
+        "search_text": "json payload",
+        "messages": '[{"role":"user","content":null}]',
+        "response": '{"role":"assistant","content":"answer"}',
+        "chosen_trace": '[{"role":"assistant","content":"chosen"}]',
+        "rejected_trace": None,
+        "meta_json": '{"provider":"openai","optional":null}',
+        "__partition": bucket,
+    }
+    fake_session.rows["landing_test"] = [dict(row)]
+    fake_session.rows["serving_test"] = [dict(row)]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(
+        GatewayConfig(tables=TableConfig(landing_table="landing_test", serving_table="serving_test"))
+    )
+
+    query_result = client.query_data(
+        "job_id = 'job-json'",
+        deserialize_json=True,
+    )[0]
+    pull_result = client.pull_data(
+        "RL",
+        where_sql="job_id = 'job-json'",
+        deserialize_json=True,
+    ).iloc[0]
+    iter_result = list(
+        client.iter_data_batches(
+            "RL",
+            where_sql="job_id = 'job-json'",
+            deserialize_json=True,
+        )
+    )[0].iloc[0]
+    search_result = client.search(
+        "json",
+        where_sql="job_id = 'job-json'",
+        table="landing_test",
+        deserialize_json=True,
+    ).iloc[0]
+    by_id_result = client.get_by_id(
+        "record-json",
+        deserialize_json=True,
+    )
+    max_result = client.get_max_created_at(
+        "dataset_type = 'RL' AND job_id = 'job-json'",
+        deserialize_json=True,
+    )
+
+    monkeypatch.setattr(client, "_list_existing_partitions_for_table", lambda table_name: [bucket])
+    export_result = list(
+        client.export_data_batches(
+            filter_query="job_id = 'job-json'",
+            batch_size=1,
+            columns=["id", "messages", "meta_json"],
+            deserialize_json=True,
+        )
+    )[0].iloc[0]
+
+    for result in (
+        query_result,
+        pull_result,
+        iter_result,
+        search_result,
+        by_id_result,
+        max_result,
+        export_result,
+    ):
+        assert result["messages"] == [{"role": "user", "content": None}]
+        assert result["meta_json"] == {"provider": "openai", "optional": None}
+
+    # deserialize_json changes only the presentation boundary; stored source rows stay strings.
+    assert isinstance(fake_session.rows["landing_test"][0]["messages"], str)
+    assert isinstance(fake_session.rows["serving_test"][0]["meta_json"], str)
 
 
 def test_get_tags_distribution_uses_non_empty_filter(monkeypatch):

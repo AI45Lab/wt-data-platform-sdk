@@ -10,8 +10,6 @@ import uuid
 from typing import List, Type
 
 from wt_sdk import (
-    ChatMessage,
-    ContentItem,
     GatewayConfig,
     LandingRecord,
     ServingRecord,
@@ -30,11 +28,8 @@ TEST_TABLE_CONFIG = GatewayConfig(
 )
 
 
-def _message(role: str, text: str) -> ChatMessage:
-    return ChatMessage(
-        role=role,
-        content=[ContentItem(type="text", text=text)],
-    )
+def _message(role: str, text: str) -> dict:
+    return {"role": role, "content": text}
 
 
 def _make_records(
@@ -66,10 +61,10 @@ def _make_records(
                 is_truncated=False,
                 step_reward=float(index),
                 reward=float(index),
-                messages=[question],
-                response=answer,
-                chosen_trace=[question, answer],
-                rejected_trace=[question, rejected],
+                messages=json.dumps([question]),
+                response=json.dumps(answer),
+                chosen_trace=json.dumps([question, answer]),
+                rejected_trace=json.dumps([question, rejected]),
                 search_text=f"{search_text} item {index}",
                 agent_model="integration-test-model",
                 env_name="integration-test-env",
@@ -163,11 +158,13 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 filter_query=filter_query,
                 order_by="created_at",
                 table=LANDING_TEST_TABLE,
+                deserialize_json=True,
             )
             serving_result = client.query_data(
                 filter_query=filter_query,
                 order_by="created_at",
                 table=SERVING_TEST_TABLE,
+                deserialize_json=True,
             )
             assert [record["id"] for record in landing_result] == [
                 record.id for record in landing_records
@@ -175,30 +172,32 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
             assert [record["id"] for record in serving_result] == [
                 record.id for record in serving_records
             ]
-            assert all(len(record.get("chosen_trace", [])) == 2 for record in serving_result)
-            assert all(len(record.get("rejected_trace", [])) == 2 for record in serving_result)
+            assert all(len(record["chosen_trace"]) == 2 for record in serving_result)
+            assert all(len(record["rejected_trace"]) == 2 for record in serving_result)
             assert all(tag in record.get("tags", []) for record in serving_result)
-            assert [json.loads(record["meta_json"])["index"] for record in serving_result] == [
+            assert [record["meta_json"]["index"] for record in serving_result] == [
                 0,
                 1,
                 2,
             ]
 
             assert "ground_truth_answer" not in landing_result[0]
-            assert "image_url" not in landing_result[0]["messages"][0]["content"][0]
+            assert landing_result[0]["messages"][0]["role"] == "user"
             landing_with_nulls = client.query_data(
                 filter_query=filter_query,
                 limit=1,
                 table=LANDING_TEST_TABLE,
                 exclude_none=False,
+                deserialize_json=True,
             )
             assert landing_with_nulls[0]["ground_truth_answer"] is None
-            assert landing_with_nulls[0]["messages"][0]["content"][0]["image_url"] is None
+            assert isinstance(landing_with_nulls[0]["messages"], list)
 
             first_landing_page = client.pull_data(
                 dataset_type=dataset_type,
                 where_sql=filter_query,
                 limit=2,
+                deserialize_json=True,
             )
             assert first_landing_page["id"].tolist() == [
                 landing_records[0].id,
@@ -211,6 +210,7 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 where_sql=filter_query,
                 cursor=cursor,
                 limit=2,
+                deserialize_json=True,
             )
             assert second_landing_page["id"].tolist() == [landing_records[2].id]
 
@@ -219,6 +219,7 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 where_sql=filter_query,
                 table=SERVING_TEST_TABLE,
                 limit=3,
+                deserialize_json=True,
             )
             assert serving_page["id"].tolist() == [record.id for record in serving_records]
 
@@ -227,6 +228,7 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                     dataset_type=dataset_type,
                     where_sql=filter_query,
                     chunk_size=2,
+                    deserialize_json=True,
                 )
             )
             serving_batches = list(
@@ -235,6 +237,7 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                     where_sql=filter_query,
                     chunk_size=2,
                     table=SERVING_TEST_TABLE,
+                    deserialize_json=True,
                 )
             )
             assert [len(batch) for batch in landing_batches] == [2, 1]
@@ -245,10 +248,14 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 for record_id in batch["id"].tolist()
             ] == [record.id for record in serving_records]
 
-            default_serving_by_id = client.get_by_id(serving_records[1].id)
+            default_serving_by_id = client.get_by_id(
+                serving_records[1].id,
+                deserialize_json=True,
+            )
             named_landing_by_id = client.get_by_id(
                 landing_records[1].id,
                 table=LANDING_TEST_TABLE,
+                deserialize_json=True,
             )
             assert default_serving_by_id and default_serving_by_id["id"] == serving_records[1].id
             assert named_landing_by_id and named_landing_by_id["id"] == landing_records[1].id
@@ -259,6 +266,7 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 where_sql=filter_query,
                 dataset_type=dataset_type,
                 limit=10,
+                deserialize_json=True,
             )
             assert set(search_result["id"].tolist()) == {
                 record.id for record in serving_records
@@ -297,6 +305,7 @@ def test_export_data_batches_from_serving_test_and_cleanup():
                     filter_query=filter_query,
                     batch_size=2,
                     columns=["id", "created_at", "tags", "meta_json"],
+                    deserialize_json=True,
                 )
             )
 
@@ -308,7 +317,7 @@ def test_export_data_batches_from_serving_test_and_cleanup():
 
             exported_rows = [row for batch in batches for row in batch.to_dict("records")]
             assert {row["id"] for row in exported_rows} == {record.id for record in records}
-            assert {json.loads(row["meta_json"])["job_id"] for row in exported_rows} == {job_id}
+            assert {row["meta_json"]["job_id"] for row in exported_rows} == {job_id}
             assert all(tag in row["tags"] for row in exported_rows)
         finally:
             _cleanup_and_verify(client, job_id, tables=(SERVING_TEST_TABLE,))

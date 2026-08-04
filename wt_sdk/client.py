@@ -35,6 +35,7 @@ from wt_sdk.utils import (
     serving_record_to_dataframe,
     serving_batch_to_dataframe,
     dataframe_to_dict_records,
+    deserialize_json_columns,
     dataframe_to_landing_records,
     dataframe_to_serving_records,
 )
@@ -637,10 +638,12 @@ class WTGatewayClient:
         checkout_latest: bool = False,
         table: Optional[str] = None,
         exclude_none: bool = True,
+        deserialize_json: bool = False,
     ) -> List[Dict[str, Any]]:
         """Query landing (default) or a named table.
 
-        Returns dictionaries with null object fields omitted recursively by default.
+        Returns dictionaries with null table columns omitted by default. Opaque
+        JSON strings are returned unchanged unless deserialize_json=True.
         Include job_id for HASH pruning, especially with order_by or limit.
         """
         table_name = table or self.config.tables.landing_table
@@ -679,7 +682,11 @@ class WTGatewayClient:
                 "api": "query_data",
             },
         )
-        records = dataframe_to_dict_records(df, exclude_none=exclude_none)
+        records = dataframe_to_dict_records(
+            df,
+            exclude_none=exclude_none,
+            deserialize_json=deserialize_json,
+        )
         logger.info(f"Queried table {table_name}: {len(records)} results")
         return records
 
@@ -809,8 +816,9 @@ class WTGatewayClient:
         order_by: str = "created_at",
         ascending: bool = True,
         table: Optional[str] = None,
+        deserialize_json: bool = False,
     ) -> Iterator[pd.DataFrame]:
-        """Iterate over DataFrame batches from landing (default) or a named table."""
+        """Iterate over DataFrame batches, optionally decoding JSON columns."""
         table_name = table or self.config.tables.landing_table
         partition_metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
         partition_key = partition_metadata["partition_column"]
@@ -866,7 +874,8 @@ class WTGatewayClient:
             if df is None or len(df) == 0:
                 break
 
-            yield df
+            output_df = deserialize_json_columns(df) if deserialize_json else df
+            yield output_df
             logger.debug(f"Yielded batch: {len(df)} rows")
 
             cursor = int(df["created_at"].iloc[-1])
@@ -880,11 +889,12 @@ class WTGatewayClient:
         batch_size: int = 10000,
         columns: Optional[List[str]] = None,
         table: Optional[str] = None,
+        deserialize_json: bool = False,
     ) -> Iterator[pd.DataFrame]:
         """Export a fixed set of matching rows in verified batches.
 
         Defaults to serving. Keep matching rows unchanged until iteration finishes;
-        otherwise the export fails instead of returning incomplete data.
+        otherwise the export fails. JSON columns are decoded only when requested.
         """
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
@@ -1025,6 +1035,8 @@ class WTGatewayClient:
 
                         if columns is not None:
                             frame = frame.loc[:, columns]
+                        if deserialize_json:
+                            frame = deserialize_json_columns(frame)
                         frame.attrs["wt_export"] = {
                             "table": table_name,
                             "partition": partition,
@@ -1046,8 +1058,9 @@ class WTGatewayClient:
         limit: int = 10000,
         checkout_latest: bool = False,
         table: Optional[str] = None,
+        deserialize_json: bool = False,
     ) -> pd.DataFrame:
-        """Return one cursor page from landing (default) or a named table."""
+        """Return one cursor page, optionally decoding JSON columns."""
         table_name = table or self.config.tables.landing_table
         partition_metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
         partition_key = partition_metadata["partition_column"]
@@ -1096,7 +1109,7 @@ class WTGatewayClient:
             checkout_latest=checkout_latest,
         )
 
-        return df
+        return deserialize_json_columns(df) if deserialize_json else df
 
     def extract_cursor(self, df: pd.DataFrame) -> Optional[int]:
         """Return the final row's created_at cursor, or None for an empty frame."""
@@ -1111,9 +1124,10 @@ class WTGatewayClient:
     def get_max_created_at(
         self,
         where_sql: str,
-        table: Optional[str] = None
+        table: Optional[str] = None,
+        deserialize_json: bool = False,
     ) -> Optional[dict]:
-        """Return the latest matching row by created_at, or None."""
+        """Return the latest matching row, optionally decoding JSON columns."""
         table_name = table or self.config.tables.landing_table
         partitions = self._resolve_landing_query_partitions(table_name, where_sql)
 
@@ -1133,6 +1147,8 @@ class WTGatewayClient:
             logger.info("No matching records found")
             return None
 
+        if deserialize_json:
+            df = deserialize_json_columns(df)
         record = df.iloc[0].to_dict()
         logger.info(f"Max record: id={record.get('id')}, created_at={record.get('created_at')}")
 
@@ -1147,12 +1163,13 @@ class WTGatewayClient:
         dataset_type: str = None,
         stream: bool = False,
         table: Optional[str] = None,
-        search_fields: List[str] = None
+        search_fields: List[str] = None,
+        deserialize_json: bool = False,
     ) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
         """Filter/search rows and return a DataFrame or one-frame iterator.
 
         Vector search is unsupported. Keyword search defaults to search_text;
-        callers may provide explicit scalar string search_fields instead.
+        callers may provide scalar search_fields and optionally decode JSON.
         """
         table_name = table or self.config.tables.serving_table
         if isinstance(query, list):
@@ -1177,7 +1194,7 @@ class WTGatewayClient:
         if isinstance(query, str) and query.strip():
             fields_to_search = search_fields or ["search_text"]
             search_conditions = []
-            nested_fields = {
+            opaque_fields = {
                 "messages",
                 "response",
                 "chosen_trace",
@@ -1186,9 +1203,9 @@ class WTGatewayClient:
                 "blob_manifest",
             }
             for field in fields_to_search:
-                if field in nested_fields:
+                if field in opaque_fields:
                     raise ValueError(
-                        f"Keyword search does not support nested field {field!r}; "
+                        f"Keyword search does not support opaque JSON/list field {field!r}; "
                         "use tags= for tag filtering or choose a scalar string field."
                     )
                 escaped_query = self._escape_sql_string(query)
@@ -1211,6 +1228,8 @@ class WTGatewayClient:
             partition_cond=None,
             extra={"stream": stream, "dataset_type": dataset_type, "api": "search"},
         )
+        if deserialize_json:
+            df = deserialize_json_columns(df)
 
         if stream:
             def result_iterator():
@@ -1223,8 +1242,9 @@ class WTGatewayClient:
         record_id: str,
         table: Optional[str] = None,
         exclude_none: bool = True,
+        deserialize_json: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """Return one dictionary by ID from serving (default) or a named table."""
+        """Return one row by ID, optionally decoding JSON columns."""
         table_name = table or self.config.tables.serving_table
         filter_query = f"id = '{self._escape_sql_string(record_id)}'"
 
@@ -1240,6 +1260,7 @@ class WTGatewayClient:
             return dataframe_to_dict_records(
                 results,
                 exclude_none=exclude_none,
+                deserialize_json=deserialize_json,
             )[0]
 
         logger.debug(f"Record {record_id} not found in table {table_name}")

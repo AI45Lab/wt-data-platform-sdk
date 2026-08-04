@@ -2,7 +2,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 
@@ -17,15 +16,14 @@ def test_dataframe_to_json_records_preserves_nested_values():
         [
             {
                 "id": "event-1",
-                "messages": np.array(
-                    [{"role": "user", "content": np.array([{"type": "text", "text": "hello"}])}],
-                    dtype=object,
+                "messages": json.dumps(
+                    [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
                 ),
                 "meta_json": json.dumps(
                     {"task_id": "task-1", "env_state": json.dumps({"step": 3})}
                 ),
-                "reward": np.float64(1.0),
-                "optional": np.nan,
+                "reward": 1.0,
+                "optional": float("nan"),
             }
         ]
     )

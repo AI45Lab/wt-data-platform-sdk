@@ -1,54 +1,8 @@
 import pyarrow as pa
 
-# ==============================================================================
-# 1. 公共子结构定义
-#    保证 Landing 和 Serving 对复杂对象的定义一致
-# ==============================================================================
-
-# --- 1.1 多模态内容单元 ---
-# 包含文本、S3引用(图片/音频)以及直接存储的小二进制数据
-content_item_type = pa.struct([
-    pa.field('type', pa.string()),          # 枚举: text, image_url, input_audio
-    pa.field('text', pa.string()),          # 文本内容
-    
-    # 图片引用 (OpenAI Compatible)
-    pa.field('image_url', pa.struct([
-        pa.field('url', pa.string()),       # s3://...
-        pa.field('detail', pa.string())     # auto, low, high
-    ])),
-    
-    # 音频引用 (OpenAI Compatible)
-    pa.field('input_audio', pa.struct([
-        pa.field('url', pa.string()),       # s3://...
-        pa.field('format', pa.string())     # wav, mp3
-    ])),
-    
-    # 直接存储的小文件 (保留字段)
-    pa.field('media_type', pa.string()),    # e.g., image/png
-    pa.field('image_bytes', pa.binary())    # 存 icon 或 embedding bytes
-])
-
-# --- 1.2 工具调用 ---
-# OpenAI Function Calling 标准结构
-tool_call_type = pa.struct([
-    pa.field('id', pa.string()),
-    pa.field('type', pa.string()),          # usually 'function'
-    pa.field('function', pa.struct([        # 嵌套 struct
-        pa.field('name', pa.string()),
-        pa.field('arguments', pa.string())  # JSON string
-    ]))
-])
-
-# --- 1.3 消息体 ---
-# 聊天记录的核心单元
-message_type = pa.struct([
-    pa.field('role', pa.string()),
-    pa.field('content', pa.list_(content_item_type)), # 核心内容列表
-    pa.field('name', pa.string()),
-    pa.field('refusal', pa.string()),                 # 拒答内容
-    pa.field('tool_calls', pa.list_(tool_call_type)), # 工具调用列表
-    pa.field('tool_call_id', pa.string())             # Tool 回传 ID
-])
+# JSON extension columns use UTF-8 strings at the Python/Pandas boundary.
+# Their document shape is intentionally not validated by the SDK.
+JSON_TYPE = pa.json_(pa.string())
 
 # ==============================================================================
 # 2. 基础字段集
@@ -79,10 +33,10 @@ BASE_FIELDS = [
     pa.field('reward', pa.float32()),
 
     # --- Payload  ---
-    pa.field('messages', pa.list_(message_type)),
-    pa.field('response', message_type),
-    pa.field('chosen_trace', pa.list_(message_type)),
-    pa.field('rejected_trace', pa.list_(message_type)),
+    pa.field('messages', JSON_TYPE),
+    pa.field('response', JSON_TYPE),
+    pa.field('chosen_trace', JSON_TYPE),
+    pa.field('rejected_trace', JSON_TYPE),
     
     # --- 答案与文本  ---
     pa.field('ground_truth_answer', pa.string()),
@@ -94,7 +48,7 @@ BASE_FIELDS = [
     pa.field('env_name', pa.string()),
     pa.field('is_session_completed', pa.bool_()),
     pa.field('is_trainable', pa.bool_()),
-    pa.field('meta_json', pa.json_(pa.string())), # 兜底，Python API 仍使用 JSON 字符串
+    pa.field('meta_json', JSON_TYPE), # 兜底，Python API 仍使用 JSON 字符串
     pa.field('tags', pa.list_(pa.string())),
 
     # --- 资产清单  ---

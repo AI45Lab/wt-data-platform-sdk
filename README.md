@@ -104,11 +104,11 @@ import json
 import time
 import uuid
 
-from wt_sdk import ChatMessage, ContentItem, LandingRecord, WTGatewayClient
+from wt_sdk import LandingRecord, WTGatewayClient
 
 
-def message(role: str, text: str) -> ChatMessage:
-    return ChatMessage(role=role, content=[ContentItem(type="text", text=text)])
+def message(role: str, text: str) -> dict:
+    return {"role": role, "content": text}
 
 
 job_id = "evaluation-run-001"       # One evaluation run and HASH partition key
@@ -126,8 +126,9 @@ def make_record(step_id: int, terminal: bool = False) -> LandingRecord:
         created_at=created_at + step_id,
         is_terminal=terminal,
         is_session_completed=terminal,
-        messages=[message("user", f"task input for step {step_id}")],
-        response=message("assistant", f"result for step {step_id}"),
+        # Trajectory payload columns are opaque JSON strings at the SDK boundary.
+        messages=json.dumps([message("user", f"task input for step {step_id}")]),
+        response=json.dumps(message("assistant", f"result for step {step_id}")),
         meta_json=json.dumps(
             {"task_id": "benchmark-task-42", "group_id": "group-a"}
         ),
@@ -152,7 +153,8 @@ with WTGatewayClient() as client:
         scope,
         order_by="step_id",
         checkout_latest=True,
-        exclude_none=True,  # Default: recursively omit null object fields.
+        exclude_none=True,  # Default: omit null table columns from each result.
+        deserialize_json=True,  # Return JSON columns as dict/list values.
     )
     first_step_id = trajectory[0]["step_id"]  # query_data() returns List[dict].
     job_row_count = client.count_landing(partition=job_id)
@@ -164,9 +166,19 @@ with WTGatewayClient() as client:
     )
 ```
 
-`query_data()` returns plain dictionaries and omits null object fields by
+`query_data()` returns plain dictionaries and omits null table columns by
 default; pass `exclude_none=False` when a complete schema-shaped payload is
-required.
+required. JSON columns remain JSON strings by default and are never modified by
+`exclude_none`; pass `deserialize_json=True` to return their documents as Python
+`dict`/`list` values. Deserialization does not remove nulls inside JSON.
+
+`messages`, `response`, `chosen_trace`, `rejected_trace`, and `meta_json` use
+Arrow `json<string>` in both landing and serving. Callers serialize the entire
+JSON document with `json.dumps()` before ingestion. A trace is therefore a JSON
+array encoded as one string, not an Arrow `list<struct>`. The SDK deliberately
+does not enforce an OpenAI or provider-specific document shape; landing may keep
+provider-native raw data in `meta_json`, while ETL writes normalized OpenAI-style
+payload JSON into serving.
 
 ### 2. Consume Completed Events
 
@@ -190,6 +202,7 @@ with WTGatewayClient() as client:
             cursor=stored_cursor,
             limit=page_size,
             checkout_latest=True,
+            deserialize_json=True,
         )
         if page.empty:
             break
@@ -222,14 +235,17 @@ with WTGatewayClient() as client:
         dataset_type="RL",
         where_sql="job_id = 'evaluation-run-001'",
         chunk_size=1000,
+        deserialize_json=True,
     ):
         print(f"received {len(batch)} rows")
 ```
 
-`pull_data()` and `iter_data_batches()` keep landing as their default. External consumers can pass
-`table=client.config.tables.serving_table` without changing SAfactory's existing
-calls. Both APIs use a `created_at` cursor, so they are not the formal export path
-when multiple rows can share a timestamp.
+`pull_data()` and `iter_data_batches()` keep landing as their default. External
+consumers can pass `table=client.config.tables.serving_table`. Consumers that
+need Python payload objects should also pass `deserialize_json=True` and handle
+ordinary `dict/list` values rather than the former Arrow nested containers. Both
+APIs use a `created_at` cursor, so they are not the formal export path when
+multiple rows can share a timestamp.
 
 ### 3. Publish Enriched Data
 
@@ -252,7 +268,11 @@ serving_record = ServingRecord(**serving_data)
 
 with WTGatewayClient() as client:
     client.ingest_serving(serving_record)
-    published = client.get_by_id(serving_record.id, exclude_none=True)
+    published = client.get_by_id(
+        serving_record.id,
+        exclude_none=True,
+        deserialize_json=True,
+    )
     assert published and published["id"] == serving_record.id
 
     matches = client.search(
@@ -260,6 +280,7 @@ with WTGatewayClient() as client:
         dataset_type="RL",
         tags=["trainable"],
         limit=20,
+        deserialize_json=True,
     )
 ```
 
@@ -267,7 +288,7 @@ with WTGatewayClient() as client:
 not fall back across the internal/external table boundary. Because an ID alone
 cannot identify a HASH bucket, prefer `query_data()` with both `job_id` and `id`
 on hot landing paths. Like `query_data()`, it returns a plain dictionary and
-recursively omits null object fields by default.
+omits null table columns by default without modifying JSON strings.
 
 For a formal offline export after serving data has been published, use
 `export_data_batches()`. It defaults to serving, captures a complete unique-ID
@@ -275,6 +296,10 @@ manifest before yielding the first batch, and then validates every exact-ID
 batch. Rows appended after manifest capture are excluded; duplicate IDs or source
 rows deleted/changed so they no longer match cause a hard failure instead of
 silent loss:
+
+`export_data_batches()` requires a Python runtime built with standard-library
+`sqlite3` support. No external SQLite service or additional pip package is
+required.
 
 ```python
 with WTGatewayClient() as client:
@@ -316,21 +341,23 @@ metrics summary when enabled.
 
 | API | Accepted parameters | Return type | Pagination control | Default table | Best suited for |
 | --- | --- | --- | --- | --- | --- |
-| `query_data()` | `filter_query`, `limit`, `columns`, `partition`, `order_by`, `ascending`, `checkout_latest`, `table`, `exclude_none` | One `List[dict]` | No cursor management; one query with optional `limit` | Landing | Interactive filtering, trajectory/detail lookup, Dashboard lists, small bounded result sets |
-| `get_by_id()` | `record_id`, `table`, `exclude_none` | One `dict`, or `None` | None; scans the selected table because ID cannot locate a HASH bucket | Serving | Occasional lookup when only a globally unique ID is known |
-| `pull_data()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `cursor`, `order_by`, `ascending`, `limit`, `checkout_latest`, `table` | One DataFrame page | Caller supplies, extracts, and persists the `created_at` cursor | Landing | Incremental consumers, polling, retryable processing, durable checkpoints |
-| `iter_data_batches()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `chunk_size`, `order_by`, `ascending`, `table` | Iterator yielding one DataFrame per batch | SDK advances the `created_at` cursor internally until exhausted | Landing | Convenient one-run scans, backfills, and offline processing where timestamp ties are acceptable |
-| `export_data_batches()` | `filter_query`, `batch_size`, `columns`, `table` | Iterator yielding one validated DataFrame per manifest batch | SDK first captures a complete unique-ID manifest, then fetches and verifies exact IDs | Serving | Formal offline exports requiring a fixed row set, duplicate-ID detection, and no timestamp-cursor gaps |
-| `search()` | `query`, `limit`, `tags`, `where_sql`, `dataset_type`, `stream`, `table`, `search_fields` | One DataFrame, or a one-frame iterator with `stream=True` | One bounded search | Serving | Dashboard keyword search over `search_text`, tags, and scalar filters |
+| `query_data()` | `filter_query`, `limit`, `columns`, `partition`, `order_by`, `ascending`, `checkout_latest`, `table`, `exclude_none`, `deserialize_json` | One `List[dict]` | No cursor management; one query with optional `limit` | Landing | Interactive filtering, trajectory/detail lookup, Dashboard lists, small bounded result sets |
+| `get_by_id()` | `record_id`, `table`, `exclude_none`, `deserialize_json` | One `dict`, or `None` | None; scans the selected table because ID cannot locate a HASH bucket | Serving | Occasional lookup when only a globally unique ID is known |
+| `pull_data()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `cursor`, `order_by`, `ascending`, `limit`, `checkout_latest`, `table`, `deserialize_json` | One DataFrame page | Caller supplies, extracts, and persists the `created_at` cursor | Landing | Incremental consumers, polling, retryable processing, durable checkpoints |
+| `iter_data_batches()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `chunk_size`, `order_by`, `ascending`, `table`, `deserialize_json` | Iterator yielding one DataFrame per batch | SDK advances the `created_at` cursor internally until exhausted | Landing | Convenient one-run scans, backfills, and offline processing where timestamp ties are acceptable |
+| `export_data_batches()` | `filter_query`, `batch_size`, `columns`, `table`, `deserialize_json` | Iterator yielding one validated DataFrame per manifest batch | SDK first captures a complete unique-ID manifest, then fetches and verifies exact IDs | Serving | Formal offline exports requiring a fixed row set, duplicate-ID detection, and no timestamp-cursor gaps |
+| `search()` | `query`, `limit`, `tags`, `where_sql`, `dataset_type`, `stream`, `table`, `search_fields`, `deserialize_json` | One DataFrame, or a one-frame iterator with `stream=True` | One bounded search | Serving | Dashboard keyword search over `search_text`, tags, and scalar filters |
 
 `query_data()`, `pull_data()`, and `iter_data_batches()` default to landing and
 accept `table=client.config.tables.serving_table`. `get_by_id()`, `search()`, and
 `export_data_batches()` default to serving. Include `job_id` in filters whenever
 possible for HASH bucket pruning.
 
-`query_data()` and `get_by_id()` return dictionaries with null object fields
-recursively omitted by default. Pass `exclude_none=False` to retain them. Empty
-lists, empty strings, zero, false, and null list elements are preserved.
+`query_data()` and `get_by_id()` omit null table columns by default. Pass
+`exclude_none=False` to retain them. All row-returning read APIs keep JSON as
+strings by default; `deserialize_json=True` returns Python values while
+preserving JSON-internal nulls. Malformed JSON remains unchanged as a string so
+a presentation option cannot make an otherwise readable row fail.
 
 ## Client Interface
 
@@ -340,7 +367,7 @@ lists, empty strings, zero, false, and null list elements are preserved.
 | --- | --- |
 | ingest_landing(record) | Write one LandingRecord. |
 | ingest_landing_batch(records) | Write a list of records or LandingRecordBatch. |
-| query_data(filter_query, ..., table=None, exclude_none=True) | Query landing by default, or a named table; always return `List[dict]`. |
+| query_data(filter_query, ..., table=None, exclude_none=True, deserialize_json=False) | Query landing by default, or a named table; always return `List[dict]`. |
 | update_landing(filter_query, updates, ...) | Update matching records. id, created_at, and job_id are protected. |
 | count_landing(partition=None) | Count rows, optionally in one raw job_id or hash bucket. |
 | delete_landing(filter_query) | Delete matching landing records. |
@@ -370,17 +397,17 @@ update_landing() returns an execution acknowledgement. dldb does not yet return 
 | Method | Purpose |
 | --- | --- |
 | ingest_serving(record) / ingest_serving_batch(records) | Write processed serving records. |
-| query_data(filter_query, ..., table=serving_table, exclude_none=True) | Query serving with the same filtering and HASH pruning behavior; always return `List[dict]`. |
+| query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False) | Query serving with the same filtering and HASH pruning behavior; always return `List[dict]`. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
-| search(query, ...) | Search serving `search_text`, tags/SQL, or explicit scalar string fields. |
+| search(query, ..., deserialize_json=False) | Search serving `search_text`, tags/SQL, or explicit scalar string fields. |
 | get_tags_distribution() | Return serving tag frequencies. |
-| get_by_id(record_id, table=None, exclude_none=True) | Return one compact dictionary from serving by default, or exactly one named table. |
-| pull_data(..., table=None) / iter_data_batches(..., table=None) | Read landing by default, or a named table, with manual-page or automatic-batch iteration. |
-| export_data_batches(filter_query="", ..., table=None) | Reliably export a fixed ID manifest from serving by default; validates each exact-ID batch. |
+| get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False) | Return one compact dictionary from serving by default, or exactly one named table. |
+| pull_data(..., table=None, deserialize_json=False) / iter_data_batches(..., table=None, deserialize_json=False) | Read landing by default, or a named table, with manual-page or automatic-batch iteration. |
+| export_data_batches(filter_query="", ..., table=None, deserialize_json=False) | Reliably export a fixed ID manifest from serving by default; validates each exact-ID batch. |
 
 Vector search is not currently exposed by dldb. Keyword search defaults to
 `search_text`; pass explicit scalar `search_fields` to search other string
-columns. Nested traces are queried through the ETL-generated `search_text`,
+columns. Opaque JSON traces are queried through the ETL-generated `search_text`,
 normal SQL filters, or tags. `stream=True` returns an iterator containing the
 current result frame.
 
@@ -481,11 +508,11 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing --count
 python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
-# Inspect nested values without display truncation
+# Decode and inspect JSON payload columns without display truncation
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
-# Write full nested results as pretty JSON without flooding the console
+# Write results as pretty JSON, expanding JSON payload columns
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --output ./artifacts/landing_sample.json
 
@@ -495,7 +522,7 @@ python scripts/inspect/show_table_indexes.py landing_test
 # Scan a logical table for duplicate IDs
 python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 100
 
-# Locate HASH buckets and candidate rows with unreadable nested fields
+# Legacy diagnostic for payload decode failures in pre-JSON-schema data
 python scripts/inspect/scan_landing_nested_decode.py --table landing_test
 
 # Inspect serving tags and ETL-generated search text

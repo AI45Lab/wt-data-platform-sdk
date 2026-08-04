@@ -6,7 +6,8 @@ the SDK's supported import API.
 - `ops/`: table initialization, cleanup, index maintenance, and table management.
 - `inspect/`: read-only inspection helpers for data, schemas, indexes, tags, and duplicate IDs.
 - `dev/`: helpers for initializing disposable test tables.
-- `etl/`: supported ETL entry points and their documentation.
+- `existing_data_etl/`: historical ETL code retained for reference; it is not
+  the new provider-normalization ETL.
 - `migrations/`: completed, one-time migrations retained for operational history.
 
 Load the integrating service's environment configuration before invoking a

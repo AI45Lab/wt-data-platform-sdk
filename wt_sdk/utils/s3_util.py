@@ -16,17 +16,13 @@ Example (upload):
     # Use url in LandingRecord
     record = LandingRecord(
         ...,
-        messages=[
-            ChatMessage(
-                role="user",
-                content=[
-                    ContentItem(
-                        type="image_url",
-                        image_url={"url": url, "detail": "high"}
-                    )
-                ]
-            )
-        ]
+        messages=json.dumps([{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": {"url": url, "detail": "high"}
+            }]
+        }])
     )
 
 Example (download):
@@ -185,16 +181,13 @@ class S3Uploader:
             >>> url = uploader.upload_file("/tmp/image.jpg", key="training/images/image_001.jpg")
             >>> # Use in LandingRecord
             >>> record = LandingRecord(
-            ...     messages=[
-            ...         ChatMessage(
-            ...             content=[
-            ...                 ContentItem(
-            ...                     type="image_url",
-            ...                     image_url={"url": url, "detail": "high"}
-            ...                 )
-            ...             ]
-            ...         )
-            ...     ]
+            ...     messages=json.dumps([{
+            ...         "role": "user",
+            ...         "content": [{
+            ...             "type": "image_url",
+            ...             "image_url": {"url": url, "detail": "high"}
+            ...         }]
+            ...     }])
             ... )
 
         Args:

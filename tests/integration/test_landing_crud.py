@@ -9,10 +9,11 @@ This test demonstrates:
 Each query and delete includes `job_id` so the test also covers HASH(job_id)
 partition pruning through the SDK.
 """
+import json
 import time
 import uuid
 from contextlib import contextmanager
-from wt_sdk import GatewayConfig, LandingRecord, ChatMessage, ContentItem, TableConfig, WTGatewayClient
+from wt_sdk import GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
 
 
 TEST_TABLE_CONFIG = GatewayConfig(tables=TableConfig(landing_table="landing_test"))
@@ -42,20 +43,12 @@ def create_test_record(index: int, session_id: str) -> LandingRecord:
         session_id=session_id,
         created_at=int(time.time()),
         job_id=f"job_{session_id}",
-        messages=[
-            ChatMessage(
-                role="user",
-                content=[
-                    ContentItem(type="text", text=f"Test message {index}")
-                ]
-            ),
-            ChatMessage(
-                role="assistant",
-                content=[
-                    ContentItem(type="text", text=f"Test response {index}")
-                ]
-            )
-        ],
+        messages=json.dumps(
+            [
+                {"role": "user", "content": f"Test message {index}"},
+                {"role": "assistant", "content": f"Test response {index}"},
+            ]
+        ),
         agent_model="test-model",
         env_name="test-env",
         is_session_completed=False,
@@ -109,9 +102,10 @@ def test_insert_query_delete():
         for record in queried_records:
             print(f"   - {record['id']}:")
             print(f"     dataset_type: {record['dataset_type']}")
-            print(f"     messages: {len(record['messages'])} messages")
-            if record["messages"]:
-                print(f"     first message: {record['messages'][0]['role']}")
+            messages = json.loads(record["messages"])
+            print(f"     messages: {len(messages)} messages")
+            if messages:
+                print(f"     first message: {messages[0]['role']}")
 
         # Verify we got all 3 records
         assert len(queried_records) == 3, f"Expected 3 records, got {len(queried_records)}"

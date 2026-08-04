@@ -1,18 +1,19 @@
 """
-Initialize serving_test table with sample data for testing.
+Populate the existing serving_test table with sample data for testing.
 
-This script creates the serving_test table and populates it with test records
-that include various tags for testing the get_tags_distribution() method.
+Use create_serving_test_table.py first when the logical table does not exist.
+The records include various tags for testing get_tags_distribution().
 
 Usage:
-    python tests/init_serving_test_table.py
+    python scripts/dev/init_serving_test_table.py
 """
+import json
 import time
 from typing import List
 from loguru import logger
 
 from wt_sdk import GatewayConfig, TableConfig, WTGatewayClient
-from wt_sdk.models import ServingRecord, ChatMessage, ContentItem
+from wt_sdk.models import ServingRecord
 
 
 TEST_SERVING_CONFIG = GatewayConfig(
@@ -82,25 +83,14 @@ def create_test_serving_records(count: int = 20) -> List[ServingRecord]:
             is_terminal=(i == count - 1),
             step_reward=0.1 * (i % 10),
             reward=0.5 + 0.05 * (i % 10),
-            messages=[
-                ChatMessage(
-                    role="user",
-                    content=[
-                        ContentItem(type="text", text=f"Test message {i} with tags: {', '.join(tags)}")
-                    ]
-                ),
-                ChatMessage(
-                    role="assistant",
-                    content=[
-                        ContentItem(type="text", text=f"Test response {i}")
-                    ]
-                )
-            ],
-            response=ChatMessage(
-                role="assistant",
-                content=[
-                    ContentItem(type="text", text=f"Final response {i}")
+            messages=json.dumps(
+                [
+                    {"role": "user", "content": f"Test message {i} with tags: {', '.join(tags)}"},
+                    {"role": "assistant", "content": f"Test response {i}"},
                 ]
+            ),
+            response=json.dumps(
+                {"role": "assistant", "content": f"Final response {i}"}
             ),
             ground_truth_answer=f"Answer_{i}",
             search_text=f"Test message {i} Test response {i} Final response {i}",
