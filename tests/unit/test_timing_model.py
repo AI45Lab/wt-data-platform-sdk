@@ -498,6 +498,34 @@ def test_query_data_converts_job_id_partition_string_to_hash_bucket(monkeypatch)
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
 
 
+def test_query_data_supports_production_job_id_with_hash_separators(monkeypatch):
+    job_id = "dataset#harness#model#task-type#20260804#owner#integration-run"
+    bucket = stable_hash(job_id) % 128
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.rows["landing_test"] = [
+        {
+            "dataset_type": "RL",
+            "job_id": job_id,
+            "session_id": "session-production-job-id",
+            "created_at": 100,
+            "id": "rec-production-job-id",
+            "__partition": bucket,
+        }
+    ]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    result = client.query_data(
+        filter_query=f"job_id = '{job_id}' AND session_id = 'session-production-job-id'",
+        partition=job_id,
+    )
+
+    assert [record["id"] for record in result] == ["rec-production-job-id"]
+    assert fake_session.last_filter_kwargs["partitions"] == [bucket]
+    assert f"job_id = '{job_id}'" in fake_session.last_filter_kwargs["query"]
+
+
 def test_query_data_adds_job_id_filter_when_partition_string_is_raw_job_id(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)

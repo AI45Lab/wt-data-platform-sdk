@@ -117,7 +117,7 @@ def _cleanup_and_verify(
 
 def test_unified_read_interfaces_on_landing_and_serving_test_tables():
     suffix = uuid.uuid4().hex
-    job_id = f"unified_read_job_{suffix}"
+    job_id = f"integration-dataset#test-harness#test-model#unified-read#20260804#codex#{suffix}"
     dataset_type = f"UNIFIED_READ_{suffix}"
     tag = f"unified-read-tag-{suffix}"
     search_text = f"unique dashboard phrase {suffix}"
@@ -280,7 +280,7 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
 
 def test_export_data_batches_from_serving_test_and_cleanup():
     suffix = uuid.uuid4().hex
-    job_id = f"export_job_{suffix}"
+    job_id = f"integration-dataset#test-harness#test-model#offline-export#20260804#codex#{suffix}"
     dataset_type = f"EXPORT_{suffix}"
     tag = f"export-tag-{suffix}"
     filter_query = f"job_id = '{job_id}'"

@@ -172,6 +172,11 @@ required. JSON columns remain JSON strings by default and are never modified by
 `exclude_none`; pass `deserialize_json=True` to return their documents as Python
 `dict`/`list` values. Deserialization does not remove nulls inside JSON.
 
+```python
+deserialize_json=False  # LanceDB-native output: JSON strings (default).
+deserialize_json=True   # SDK applies json.loads(): Python dict/list values.
+```
+
 `messages`, `response`, `chosen_trace`, `rejected_trace`, and `meta_json` use
 Arrow `json<string>` in both landing and serving. Callers serialize the entire
 JSON document with `json.dumps()` before ingestion. A trace is therefore a JSON

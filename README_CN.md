@@ -168,6 +168,11 @@ schema 形状时传入 `exclude_none=False`。JSON 列默认保持为字符串�
 `exclude_none` 不会修改其内容；传入 `deserialize_json=True` 可返回 Python
 `dict/list`，且不会删除 JSON 内部的 null。
 
+```python
+deserialize_json=False  # LanceDB 原生返回：JSON 字符串（默认）。
+deserialize_json=True   # SDK 调用 json.loads()：返回 Python dict/list。
+```
+
 landing 和 serving 的 `messages`、`response`、`chosen_trace`、
 `rejected_trace` 和 `meta_json` 都使用 Arrow `json<string>`。调用方写入前需用
 `json.dumps()` 序列化完整 JSON 文档。trace 是编码在一个字符串中的 JSON
