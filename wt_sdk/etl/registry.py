@@ -5,7 +5,7 @@ from collections.abc import Callable
 from .exceptions import PipelineConfigurationError
 from .models import PipelineMode
 from .pipeline import PipelineDefinition
-from .stage import ETLStage, Record, StageContext
+from .stage import ETLStage
 from .stages import BuildChosenTraceStage, DeriveJobTagsStage
 
 
@@ -64,16 +64,11 @@ def build_serving_publish_pipeline(
         stages.append(normalization_stage)
     stages.extend((BuildChosenTraceStage(), DeriveJobTagsStage()))
 
-    def select_trainable(record: Record, context: StageContext) -> bool:
-        _ = context
-        return record.get("is_trainable") is True
-
     return PipelineDefinition(
         name=name,
         version=version,
         mode=PipelineMode.SERVING,
         stages=tuple(stages),
-        record_selector=select_trainable,
     )
 
 

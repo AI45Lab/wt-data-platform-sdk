@@ -19,8 +19,6 @@ from .models import LandingRowPatch, PipelineMode, RecordFailure, SessionResult
 from .stage import ETLStage, Record, SessionKey, StageContext
 
 
-RecordSelector = Callable[[Record, StageContext], bool]
-
 IMMUTABLE_ETL_FIELDS = {
     "id",
     "job_id",
@@ -31,12 +29,6 @@ IMMUTABLE_ETL_FIELDS = {
 }
 ETL_SCHEMA_FIELDS = frozenset(LANDING_SCHEMA.names)
 
-
-def _select_all(record: Record, context: StageContext) -> bool:
-    _ = record, context
-    return True
-
-
 @dataclass(frozen=True)
 class PipelineDefinition:
     """A validated, ordered set of stages and one persistence mode."""
@@ -45,7 +37,6 @@ class PipelineDefinition:
     version: str
     mode: PipelineMode
     stages: tuple[ETLStage, ...]
-    record_selector: RecordSelector = field(default=_select_all, repr=False)
     _ordered_stages: tuple[ETLStage, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -58,8 +49,6 @@ class PipelineDefinition:
             raise PipelineConfigurationError("pipeline name and version are required")
         if not isinstance(self.mode, PipelineMode):
             raise PipelineConfigurationError("pipeline mode must be a PipelineMode")
-        if not callable(self.record_selector):
-            raise PipelineConfigurationError("pipeline record_selector must be callable")
         object.__setattr__(self, "_ordered_stages", self.validate_dag(self.stages))
 
     @staticmethod
@@ -129,18 +118,11 @@ class PipelineDefinition:
 
         for source_row in ordered_rows:
             original = dict(source_row)
-            failure_stage = "__selector__"
+            failure_stage = "__stage_selection__"
             try:
-                if not _evaluate_predicate(
-                    self.record_selector,
-                    original,
-                    context,
-                    label=f"pipeline '{self.name}' selector",
-                ):
-                    continue
-                selected_rows += 1
                 working = dict(original)
                 executed_stages: set[str] = set()
+                row_selected = False
 
                 for stage in self.ordered_stages:
                     failure_stage = stage.name
@@ -151,6 +133,9 @@ class PipelineDefinition:
                         label=f"stage '{stage.name}' applies",
                     ):
                         continue
+                    if not row_selected:
+                        selected_rows += 1
+                        row_selected = True
                     skipped_dependencies = set(stage.dependencies) - executed_stages
                     if skipped_dependencies:
                         raise StageTransformError(
@@ -178,6 +163,8 @@ class PipelineDefinition:
                     working.update(patch)
                     executed_stages.add(stage.name)
 
+                if not row_selected:
+                    continue
                 failure_stage = "__output_validation__"
                 if self.mode is PipelineMode.LANDING:
                     changed = {

@@ -61,7 +61,10 @@ class NormalizeClaudeMessagesStage(ETLStage):
 
     def applies(self, record, context: StageContext) -> bool:
         del context
-        return "claude" in str(record.get("agent_model") or "").lower()
+        return (
+            record.get("is_trainable") is True
+            and "claude" in str(record.get("agent_model") or "").lower()
+        )
 
     def transform(self, record, context: StageContext):
         del record, context
@@ -80,6 +83,20 @@ class SetTrainableStage(ETLStage):
     def transform(self, record, context):
         del record, context
         return {"is_trainable": True}
+
+
+class ProcessNonTrainableStage(ETLStage):
+    name = "process_non_trainable"
+    required_fields = ("is_trainable",)
+    output_fields = ("search_text",)
+
+    def applies(self, record, context):
+        del context
+        return record.get("is_trainable") is False
+
+    def transform(self, record, context):
+        del record, context
+        return {"search_text": "non-trainable-stage-output"}
 
 
 def test_canonical_serving_pipeline_applies_claude_then_trace_then_tags():
@@ -201,13 +218,53 @@ def test_describe_dag_returns_machine_readable_stage_inventory():
     assert description["stages"][1]["output_fields"] == ["chosen_trace"]
 
 
-def test_canonical_serving_pipeline_requires_trainable():
+def test_canonical_serving_pipeline_skips_row_when_no_stage_applies():
     pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
 
     result = pipeline.process_session([_row(is_trainable=False)])
 
     assert result.selected_rows == 0
     assert result.serving_records == ()
+
+
+def test_serving_pipeline_can_publish_non_trainable_row_from_an_independent_stage():
+    pipeline = PipelineDefinition(
+        name="mixed_trigger_serving_pipeline",
+        version="1",
+        mode=PipelineMode.SERVING,
+        stages=(
+            BuildChosenTraceStage(),
+            DeriveJobTagsStage(),
+            ProcessNonTrainableStage(),
+        ),
+    )
+
+    result = pipeline.process_session([_row(is_trainable=False)])
+
+    assert result.selected_rows == 1
+    assert result.successful_rows == 1
+    assert len(result.serving_records) == 1
+    assert result.serving_records[0].search_text == "non-trainable-stage-output"
+    assert result.serving_records[0].chosen_trace is None
+    assert result.serving_records[0].tags is None
+
+
+def test_landing_pipeline_also_uses_each_stage_applicability_without_shared_filter():
+    pipeline = PipelineDefinition(
+        name="mixed_trigger_landing_pipeline",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(ProcessNonTrainableStage(),),
+    )
+
+    result = pipeline.process_session([_row(is_trainable=False)])
+
+    assert result.selected_rows == 1
+    assert result.successful_rows == 1
+    assert len(result.landing_patches) == 1
+    assert result.landing_patches[0].updates == {
+        "search_text": "non-trainable-stage-output"
+    }
 
 
 def test_optional_normalizer_can_skip_opencode_without_blocking_trace():

@@ -16,6 +16,10 @@
 不要因为新增一个 stage 就新建 pipeline；只有整条处理流程具有独立的数据范围、执行模式或
 checkpoint 语义时，才需要和 pipeline owner 讨论新增 pipeline。
 
+pipeline 不定义共享的业务触发条件。每个 stage 必须在自己的 `applies()` 中完整表达触发
+条件；一条记录只有在至少一个 stage 适用时才会被该 pipeline 持久化。因此，未来要处理
+`is_trainable=False` 或其他条件时，只需新增相应 stage，不需要修改 pipeline 级过滤器。
+
 ## Stage必须遵守的contract
 
 每个stage必须继承 `ETLStage`，声明以下class attributes，并实现两个方法：

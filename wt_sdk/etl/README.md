@@ -22,8 +22,8 @@ stage 把依赖加入核心 SDK dependencies。ETL tests 由 setuptools 明确�
 以下对象不要混为一谈：
 
 - **Stage**：一个纯业务转换规则，例如生成 `chosen_trace`。
-- **`PipelineDefinition`**：某条逻辑 pipeline 的静态定义，包含名称、版本、模式、入口
-  selector、stage 集合和 DAG；创建时会立即做静态校验，但不会读写数据。
+- **`PipelineDefinition`**：某条逻辑 pipeline 的静态定义，包含名称、版本、模式、stage
+  集合和 DAG；创建时会立即做静态校验，但不会读写数据。
 - **Pipeline factory**：无参数函数，每次调用返回一个 `PipelineDefinition`。它不是正在
   运行的 ETL 实例，也不持有 client、checkpoint 或运行状态。
 - **`ETLEngine`**：真正执行 pipeline 的运行时对象，负责扫描、加载 session、调用 stage、
@@ -163,7 +163,7 @@ serving pipeline 之前，同一次 run 不能包含重复 pipeline identity。
 | --- | --- | --- | --- | --- |
 | `--validate-only` | 否 | 否 | 否 | 快速检查 stage 元数据、字段所有权、依赖 DAG 和 pipeline 顺序。 |
 | `--list-stages` | 否 | 否 | 否 | 在静态校验通过后展示实际 stage 清单和 DAG。 |
-| `--dry-run` | 是，会扫描真实 source | 是 | 否 | 用真实数据检查 selector、stage runtime、JSON、session 和输出 model。 |
+| `--dry-run` | 是，会扫描真实 source | 是 | 否 | 用真实数据检查 stage 的 `applies/transform`、JSON、session 和输出 model。 |
 
 `--validate-only` 适合快速确认 pipeline 定义可以加载；`--dry-run` 会进一步使用真实 source
 检查运行期行为，但成本更高且依赖 test 环境。stage 开发所需的测试和评审要求统一见
@@ -203,7 +203,7 @@ cutoff = run_started_at - settle_delay
 | 场景 | 参数示例 | 结果 |
 | --- | --- | --- |
 | 第一次启动持续增量 ETL | `--start-from 2026-08-01T00:00:00Z` | 从该时间 bootstrap；成功后保存/推进每个 bucket checkpoint。 |
-| 后续持续增量 ETL | 不传三种手动 selector，也通常不再传 `--start-from` | 从已有 watermark 追到本次固定 cutoff。 |
+| 后续持续增量 ETL | 不传三种手动入口，也通常不再传 `--start-from` | 从已有 watermark 追到本次固定 cutoff。 |
 | 一次性补某段历史 | `--start-time 2026-08-01T00:00:00Z --end-time 2026-08-02T00:00:00Z` | 处理包含边界的时间范围，不读写全局 checkpoint。 |
 | 从某时刻手动补到稳定 cutoff | `--start-time 2026-08-01T00:00:00Z` | 结束时间取本次 `now - settle delay`，不读写 checkpoint。 |
 
@@ -223,7 +223,8 @@ session 时使用可重复的 `--session JOB_ID SESSION_ID`，避免依赖不全
 直接 HASH pruning。`--source-filter` 不替代这些参数，只用于它们不能自然表达的临时筛选；
 它接收 WHERE 条件表达式而不是完整 `SELECT`，会扫描所有现有 landing HASH buckets，且不写
 checkpoint。条件命中的行只用于发现 session；一旦某行命中，引擎仍加载完整 session，并让
-pipeline selector 决定其中每一行是否处理。三类入口 `--job-id`、`--start-time`、
+每个 stage 自己的 `applies()` 决定是否处理其中每一行。pipeline 不设置共享的业务触发条件；
+只要至少一个 stage 适用，该行才会进入输出与持久化流程。三类入口 `--job-id`、`--start-time`、
 `--source-filter` 互斥。
 
 所有模式都要求 stage 和 serving upsert 幂等。手动模式适合补历史遗漏、刚完成数据的即时
@@ -239,7 +240,7 @@ v1 不新增持久化 failure 表，但每条 pipeline 的每次实际执行都�
 ```
 
 该完整文件名前缀也是 `pipeline_run_id`。可通过 `--report-dir` 改目录。report 使用临时文件
-加原子 rename 落盘，避免把半个 JSON 当成完整审计结果。可归因到记录的 selector、stage、
+加原子 rename 落盘，避免把半个 JSON 当成完整审计结果。可归因到记录的 stage applicability、transform、
 输出 model、landing sink 和 serving sink 错误会收集为：
 
 ```json
@@ -257,8 +258,8 @@ v1 不新增持久化 failure 表，但每条 pipeline 的每次实际执行都�
 
 - `discovery_rows_read`：增量/时间范围 discovery 读取的轻量行数；定向 session 模式可能为 0。
 - `source_rows_read`：加载完整 session 后实际送入 pipeline 的 source 行数。
-- `rows_selected`：通过 pipeline selector、进入 stage 流程的行数。
-- `rows_succeeded`：通过 selector，且 stage、输出校验和实际 sink 均成功的行数；dry-run 时表示
+- `rows_selected`：至少有一个 stage 的 `applies()` 返回 `True`、进入处理流程的行数。
+- `rows_succeeded`：至少有一个 stage 适用，且 stage、输出校验和实际 sink 均成功的行数；dry-run 时表示
   stage/output 成功，不包含真实 sink 写入。
 - `rows_failed`：失败记录数。
 - `landing_rows_updated` / `serving_rows_upserted`：成功产生的实际写入数；dry-run 时表示计划
@@ -301,7 +302,7 @@ run 结构化查询、告警、重试次数和保留周期，再增加单独的 
 | `--session JOB_ID SESSION_ID` | 可选，可重复 | 精确指定来自任意多个 job 的 job/session pair。不能与 `--job-id/--session-id` 混用。 | `--session job-a s1 --session job-b s2` |
 | `--source-filter` | 可选 | 高级手动 dldb WHERE 表达式；扫描所有 landing HASH buckets，发现后加载完整 session，不使用 checkpoint。与 job/time 模式互斥。 | `--source-filter "is_trainable = true AND agent_model = 'opencode'"` |
 | `--force-unsettled` | 可选，默认关闭 | 将本次隐式 cutoff 的 settle delay 设为 0；显式接受仍可能变化的数据。定向 job/session 本来就立即执行。 | `--force-unsettled` |
-| `--dry-run` | 可选，默认关闭 | 读取真实 source 并执行 selector/stage/output 校验，但不写 landing、serving 或 checkpoint。 | `--dry-run` |
+| `--dry-run` | 可选，默认关闭 | 读取真实 source 并执行 stage `applies/transform` 与 output 校验，但不写 landing、serving 或 checkpoint。 | `--dry-run` |
 | `--confirm-production` | production 写入必需 | 非 dry-run production 执行的二次安全确认。 | `--confirm-production` |
 | `--state-db-uri` | 默认增量模式必需，可用环境变量 | ETL 控制表所在独立 dldb database；也可设置 `WT_SDK_ETL_STATE_DB_URI`。普通 SDK 和手动定向 ETL 不需要。 | `--state-db-uri s3://wind-tunnel-etl` |
 | `--checkpoint-table` | 可选，按 profile | 覆盖 checkpoint 表名；默认 test=`etl_checkpoints_test`，production=`wind_tunnel_etl_checkpoints`。 | `--checkpoint-table custom_checkpoints` |
