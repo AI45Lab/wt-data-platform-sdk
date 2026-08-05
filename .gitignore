@@ -80,6 +80,9 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Local ETL audit reports (runtime artifacts)
+/etl_reports/
+
 # IPython
 profile_default/
 ipython_config.py

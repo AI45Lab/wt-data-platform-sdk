@@ -17,16 +17,16 @@ DLDB is used instead of native LanceDB because:
 
 Usage:
     # Add new columns to production table
-    python scripts/etl/add_new_columns_for_landing.py
+    python scripts/migrations/landing_schema_2026_06/add_new_columns_for_landing.py
 
     # Dry run to see what would be done
-    python scripts/etl/add_new_columns_for_landing.py --dry-run
+    python scripts/migrations/landing_schema_2026_06/add_new_columns_for_landing.py --dry-run
 
     # Add to test table instead
-    python scripts/etl/add_new_columns_for_landing.py --table landing_test
+    python scripts/migrations/landing_schema_2026_06/add_new_columns_for_landing.py --table landing_test
 
     # Add to a custom table
-    python scripts/etl/add_new_columns_for_landing.py --table my_custom_table
+    python scripts/migrations/landing_schema_2026_06/add_new_columns_for_landing.py --table my_custom_table
 """
 import argparse
 import sys
@@ -176,16 +176,16 @@ def main():
         epilog="""
 Examples:
   # Add new columns to production table
-  python scripts/etl/add_new_columns_for_landing.py
+  python scripts/migrations/landing_schema_2026_06/add_new_columns_for_landing.py
 
   # Dry run to see what would be done
-  python scripts/etl/add_new_columns_for_landing.py --dry-run
+  python scripts/migrations/landing_schema_2026_06/add_new_columns_for_landing.py --dry-run
 
   # Add to test table
-  python scripts/etl/add_new_columns_for_landing.py --table landing_test
+  python scripts/migrations/landing_schema_2026_06/add_new_columns_for_landing.py --table landing_test
 
   # Add to custom database
-  python scripts/etl/add_new_columns_for_landing.py --db-uri s3://custom-bucket
+  python scripts/migrations/landing_schema_2026_06/add_new_columns_for_landing.py --db-uri s3://custom-bucket
         """
     )
 

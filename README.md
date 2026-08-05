@@ -15,8 +15,15 @@ declared in `pyproject.toml`. The supported Python versions are 3.10 through
 
 ```bash
 python -m pip install -e .
-python -m pip install -e ".[dev]"  # Development and test dependencies
+python -m pip install -e ".[etl]"      # Core SDK plus ETL-only dependencies
+python -m pip install -e ".[dev,etl]"  # Full repository development
 ```
+
+The ETL subsystem is isolated under `wt_sdk/etl/`. Core SDK imports never load
+it. Install ETL-specific dependencies only when needed:
+
+ETL v1 currently adds no third-party packages beyond the core SDK stack; the
+extra is the required boundary for future ETL-only dependencies.
 
 ## Configure Before Integrating
 
@@ -35,7 +42,7 @@ WT_SDK_S3_ALLOW_HTTP=true
 AWS_ACCESS_KEY_ID=replace-with-your-access-key
 AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 AWS_EC2_METADATA_DISABLED=true
-WT_SDK_PROFILE=production
+WT_SDK_PROFILE=test
 ```
 
 Load it before starting the application:
@@ -57,7 +64,7 @@ export WT_SDK_S3_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=replace-with-your-access-key
 export AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 export AWS_EC2_METADATA_DISABLED=true
-export WT_SDK_PROFILE=production
+export WT_SDK_PROFILE=test
 python your_service.py
 ```
 
@@ -72,14 +79,24 @@ services:
 
 ### Table Profiles
 
-WT_SDK_PROFILE selects default logical tables. Explicit GatewayConfig values and method arguments such as search(table="...") take precedence.
+`WT_SDK_PROFILE` selects default logical tables. Explicit `GatewayConfig`
+values and method arguments such as `search(table="...")` take precedence.
 
-| Profile | Landing table | Serving table |
-| --- | --- | --- |
-| production or omitted | wind_tunnel_landing | wind_tunnel_serving |
-| test | landing_test | serving_test |
+| Profile | Landing table | Serving table | ETL checkpoint table (only when ETL runs) |
+| --- | --- | --- | --- |
+| `test` or omitted | `landing_test` | `serving_test` | `etl_checkpoints_test` |
+| `production` or `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `wind_tunnel_etl_checkpoints` |
 
-Set WT_SDK_PROFILE=test to use test tables without changing application code.
+Omitting `WT_SDK_PROFILE` safely defaults to `test`. Production access must be
+selected explicitly with `production` or `prod`.
+
+The checkpoint table is stored in a separate ETL database. Only checkpoint
+initialization and default incremental ETL require either
+`WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-etl` or the ETL command's
+`--state-db-uri` option. Ordinary SDK clients, upstream writers, and targeted
+manual ETL by job/session/time/filter do not require or read this setting.
+Missing it does not affect `WT_SDK_PROFILE` resolution. When the ETL state
+database is used, the same profile selects the checkpoint table shown above.
 
 `EnvConfigManager` uses the separate `WT_SDK_ENV_CONFIG_DB_URI` database for
 `evaluation_env_config`; it is not affected by `WT_SDK_PROFILE`. The endpoint
@@ -320,6 +337,19 @@ keep IDs globally unique and must never move an existing ID to another
 `job_id`. The append/add `ingest_serving(_batch)` methods remain available and
 also stamp `serving_updated_at`.
 
+The repository now includes the ETL v1 engine, durable per-bucket checkpoints,
+manual backfill modes, and the built-in chosen-trace/tag stages. Contributors
+must follow the stage contract and integration guide in
+[`wt_sdk/etl/README_STAGE_DEVELOPMENT.md`](wt_sdk/etl/README_STAGE_DEVELOPMENT.md);
+runtime and operational guidance remains in
+[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md).
+
+List the registered pipelines without connecting to any database:
+
+```bash
+python -m wt_sdk.etl.cli.run --list-pipelines
+```
+
 For a formal offline export after serving data has been published, use
 `export_data_batches()`. It defaults to serving, captures a complete unique-ID
 manifest before yielding the first batch, and then validates every exact-ID
@@ -492,6 +522,9 @@ chooses the database. Both tables must use the current `HASH(job_id)` schema.
 ```bash
 set -a && source .env && set +a
 WT_SDK_RUN_INTEGRATION=1 python -m pytest -q tests/integration
+
+# ETL-only real integration tests
+WT_SDK_RUN_INTEGRATION=1 python -m pytest -q wt_sdk/etl/tests/integration
 ```
 
 WT_SDK_RUN_INTEGRATION=1 is a pytest safety switch, not an SDK runtime setting.
@@ -596,6 +629,7 @@ scripts/dev contains disposable test-table setup helpers. scripts/migrations con
 
 ```text
 wt_sdk/                 Public SDK package
+wt_sdk/etl/             Optional ETL runtime, CLI, tools, docs, and tests
 scripts/ops/            Operational commands
 scripts/inspect/        Read-only diagnostics
 scripts/dev/            Disposable test-table setup

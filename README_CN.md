@@ -14,8 +14,15 @@ dldb 当前通过 `pyproject.toml` 中声明的公开仓库
 
 ```bash
 python -m pip install -e .
-python -m pip install -e ".[dev]"  # 开发和测试依赖
+python -m pip install -e ".[etl]"      # 核心 SDK 加 ETL 专属依赖
+python -m pip install -e ".[dev,etl]"  # 完整仓库开发环境
 ```
+
+ETL 子系统统一放在 `wt_sdk/etl/`，核心 SDK 的 import 不会加载它。只有需要 ETL 时才安装
+ETL 专属依赖：
+
+ETL v1 目前没有在核心 SDK 依赖之外新增第三方包；以后新增的 ETL 专属依赖必须只放进该
+extra，不能加入核心依赖列表。
 
 ## 集成前配置
 
@@ -34,7 +41,7 @@ WT_SDK_S3_ALLOW_HTTP=true
 AWS_ACCESS_KEY_ID=replace-with-your-access-key
 AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 AWS_EC2_METADATA_DISABLED=true
-WT_SDK_PROFILE=production
+WT_SDK_PROFILE=test
 ```
 
 启动应用前加载配置：
@@ -56,7 +63,7 @@ export WT_SDK_S3_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=replace-with-your-access-key
 export AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 export AWS_EC2_METADATA_DISABLED=true
-export WT_SDK_PROFILE=production
+export WT_SDK_PROFILE=test
 python your_service.py
 ```
 
@@ -73,12 +80,19 @@ services:
 
 `WT_SDK_PROFILE` 用于选择默认逻辑表。显式传入的 `GatewayConfig` 配置以及 `search(table="...")` 等方法参数具有更高优先级。
 
-| Profile | Landing 表 | Serving 表 |
-| --- | --- | --- |
-| `production` 或未配置 | `wind_tunnel_landing` | `wind_tunnel_serving` |
-| `test` | `landing_test` | `serving_test` |
+| Profile | Landing 表 | Serving 表 | ETL checkpoint 表（仅运行 ETL 时使用） |
+| --- | --- | --- | --- |
+| `test` 或未配置 | `landing_test` | `serving_test` | `etl_checkpoints_test` |
+| `production` 或 `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `wind_tunnel_etl_checkpoints` |
 
-设置 `WT_SDK_PROFILE=test` 即可在不修改应用代码的情况下使用测试表。
+未配置 `WT_SDK_PROFILE` 时会安全地默认使用 `test`；访问生产表必须显式配置
+`production` 或 `prod`。
+
+checkpoint 表位于独立的 ETL database 中。只有初始化 checkpoint 表和运行默认增量
+ETL 时，才必须配置 `WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-etl`，或向 ETL 命令传入
+`--state-db-uri`。普通 SDK client、上游写入服务以及按 job/session/时间/filter 定向执行的
+手动 ETL 都不要求、也不会读取该配置；缺少它不会影响 `WT_SDK_PROFILE` 的解析。只有实际
+使用 ETL 状态库时，同一个 profile 才会选择上表中的 checkpoint 表。
 
 `EnvConfigManager` 使用独立的 `WT_SDK_ENV_CONFIG_DB_URI` 数据库访问
 `evaluation_env_config`，不受 `WT_SDK_PROFILE` 影响。上面的 endpoint 和 AWS
@@ -307,6 +321,18 @@ ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_upda
 全局唯一，且已有 ID 不能迁移到另一个 `job_id`。保留 append/add 语义的
 `ingest_serving(_batch)` 仍可使用，也会刷新 `serving_updated_at`。
 
+仓库现已包含 ETL v1 引擎、按 HASH bucket 持久化的 checkpoint、手动 backfill 模式，
+以及内置的 chosen-trace/tags stage。贡献者必须遵守
+[`wt_sdk/etl/README_STAGE_DEVELOPMENT.md`](wt_sdk/etl/README_STAGE_DEVELOPMENT.md) 中的
+stage contract 与接入规范；运行与运维说明见
+[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md)。
+
+无需连接数据库即可列出当前已注册的 pipeline：
+
+```bash
+python -m wt_sdk.etl.cli.run --list-pipelines
+```
+
 serving 数据发布完成后，正式离线导出请使用 `export_data_batches()`。它默认查询
 serving，在返回第一批数据之前先生成完整的唯一 ID 清单，随后按精确 ID 取数并逐批
 校验。清单生成之后新增的记录不会混入本次导出；如果发现重复 ID，或者源记录被
@@ -469,6 +495,9 @@ pytest -q
 ```bash
 set -a && source .env && set +a
 WT_SDK_RUN_INTEGRATION=1 python -m pytest -q tests/integration
+
+# 仅运行 ETL 的真实集成测试
+WT_SDK_RUN_INTEGRATION=1 python -m pytest -q wt_sdk/etl/tests/integration
 ```
 
 `WT_SDK_RUN_INTEGRATION=1` 是 pytest 的安全开关，不是 SDK 运行时配置。
@@ -573,6 +602,7 @@ python scripts/ops/maintain_table_indexes.py \
 
 ```text
 wt_sdk/                 对外 SDK 包
+wt_sdk/etl/             可选 ETL runtime、CLI、工具、文档与测试
 scripts/ops/            运维命令
 scripts/inspect/        只读诊断工具
 scripts/dev/            可随时重建的测试表配置

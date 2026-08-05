@@ -27,7 +27,7 @@ def _env(*names: str) -> Optional[str]:
 
 
 def _resolve_table_profile(profile: Optional[str]) -> str:
-    value = (profile or _env("WT_SDK_PROFILE") or "production").strip().lower()
+    value = (profile or _env("WT_SDK_PROFILE") or "test").strip().lower()
     aliases = {"prod": "production", "production": "production", "test": "test"}
     if value not in aliases:
         raise ValueError("WT_SDK_PROFILE must be one of: production, prod, test")
@@ -70,7 +70,7 @@ class S3Config:
 
 @dataclass
 class TableConfig:
-    """Logical table configuration with a production-safe default profile."""
+    """Logical table configuration with a test-safe default profile."""
 
     db_uri: Optional[str] = None
     landing_table: Optional[str] = None

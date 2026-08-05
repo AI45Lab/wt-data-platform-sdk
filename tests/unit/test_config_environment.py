@@ -29,16 +29,17 @@ def test_s3_config_reads_environment_and_omits_missing_values(monkeypatch):
     assert options == {"allow_http": "true"}
 
 
-def test_table_config_defaults_to_production(monkeypatch):
+def test_table_config_defaults_to_test_without_etl_configuration(monkeypatch):
     monkeypatch.delenv("WT_SDK_PROFILE", raising=False)
+    monkeypatch.delenv("WT_SDK_ETL_STATE_DB_URI", raising=False)
     monkeypatch.delenv("WT_SDK_LANDING_TABLE", raising=False)
     monkeypatch.delenv("WT_SDK_SERVING_TABLE", raising=False)
 
     config = TableConfig()
 
-    assert config.profile == "production"
-    assert config.landing_table == "wind_tunnel_landing"
-    assert config.serving_table == "wind_tunnel_serving"
+    assert config.profile == "test"
+    assert config.landing_table == "landing_test"
+    assert config.serving_table == "serving_test"
 
 
 def test_gateway_config_switches_to_test_profile_from_environment(monkeypatch):
@@ -51,6 +52,19 @@ def test_gateway_config_switches_to_test_profile_from_environment(monkeypatch):
     assert config.tables.profile == "test"
     assert config.tables.landing_table == "landing_test"
     assert config.tables.serving_table == "serving_test"
+
+
+def test_production_profile_resolution_does_not_require_etl_state_uri(monkeypatch):
+    monkeypatch.setenv("WT_SDK_PROFILE", "production")
+    monkeypatch.delenv("WT_SDK_ETL_STATE_DB_URI", raising=False)
+    monkeypatch.delenv("WT_SDK_LANDING_TABLE", raising=False)
+    monkeypatch.delenv("WT_SDK_SERVING_TABLE", raising=False)
+
+    config = TableConfig()
+
+    assert config.profile == "production"
+    assert config.landing_table == "wind_tunnel_landing"
+    assert config.serving_table == "wind_tunnel_serving"
 
 
 def test_explicit_table_config_overrides_environment_profile(monkeypatch):
