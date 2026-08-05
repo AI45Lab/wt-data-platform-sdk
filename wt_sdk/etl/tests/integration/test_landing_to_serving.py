@@ -11,64 +11,26 @@ import uuid
 from dldb.utils import stable_hash
 
 import wt_sdk._time as sdk_time
-from wt_sdk import GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
+from wt_sdk import LandingRecord, WTGatewayClient
 from wt_sdk.core.schemas import LANDING_PARTITIONS
 from wt_sdk.etl import (
     DldbCheckpointStore,
     ETLEngine,
+    ETLStage,
+    PipelineDefinition,
+    PipelineMode,
     SessionKey,
     TEST_CHECKPOINT_TABLE,
     build_serving_publish_pipeline,
     load_pipeline,
     resolve_etl_state_db_uri,
 )
-
-
-LANDING_TEST_TABLE = "landing_test"
-SERVING_TEST_TABLE = "serving_test"
-TEST_TABLE_CONFIG = GatewayConfig(
-    tables=TableConfig(
-        profile="test",
-        landing_table=LANDING_TEST_TABLE,
-        serving_table=SERVING_TEST_TABLE,
-    )
+from wt_sdk.etl.tests.integration.helpers import (
+    LANDING_TEST_TABLE,
+    SERVING_TEST_TABLE,
+    TEST_TABLE_CONFIG,
+    cleanup_test_trajectory,
 )
-
-
-def _cleanup_and_verify(client: WTGatewayClient, job_id: str) -> None:
-    """Attempt both deletes and fail unless both test tables are empty."""
-
-    filter_query = f"job_id = '{job_id}'"
-    errors: list[str] = []
-    for table_name, delete in (
-        (LANDING_TEST_TABLE, client.delete_landing),
-        (SERVING_TEST_TABLE, client.delete_serving),
-    ):
-        try:
-            delete(filter_query)
-        except Exception as exc:
-            errors.append(f"{table_name} delete failed: {exc}")
-
-    time.sleep(1)
-    for table_name in (LANDING_TEST_TABLE, SERVING_TEST_TABLE):
-        try:
-            remaining = client.query_data(
-                filter_query=filter_query,
-                partition=job_id,
-                table=table_name,
-                checkout_latest=True,
-            )
-        except Exception as exc:
-            errors.append(f"{table_name} cleanup verification failed: {exc}")
-        else:
-            if remaining:
-                errors.append(
-                    f"{table_name} cleanup left {len(remaining)} row(s): "
-                    f"{[row.get('id') for row in remaining]}"
-                )
-
-    if errors:
-        raise AssertionError("Integration cleanup failed: " + "; ".join(errors))
 
 
 def test_landing_to_serving_builds_chosen_trace_and_job_tags():
@@ -152,7 +114,7 @@ def test_landing_to_serving_builds_chosen_trace_and_job_tags():
                 assert row["source_updated_at"] is not None
                 assert row["serving_updated_at"] is not None
         finally:
-            _cleanup_and_verify(client, job_id)
+            cleanup_test_trajectory(client, job_id)
 
 
 def _unused_test_job_and_bucket(
@@ -179,6 +141,7 @@ def _incremental_record(
     step_id: int,
     source_updated_at: int,
     answer: str,
+    is_trainable: bool,
 ) -> LandingRecord:
     return LandingRecord(
         dataset_type="ETL_INCREMENTAL_INTEGRATION_TEST",
@@ -196,12 +159,32 @@ def _incremental_record(
         agent_model="opencode-integration-test",
         env_name="etl-incremental-integration-test",
         is_session_completed=False,
-        is_trainable=True,
+        is_trainable=is_trainable,
         meta_json=json.dumps({"source": "etl-incremental-integration-test"}),
     )
 
 
-def test_incremental_discovers_new_rows_and_updates_previously_scanned_rows():
+class _MockUpdateIsTrainableStage(ETLStage):
+    """Integration-only stand-in for the pending enrichment contribution."""
+
+    name = "mock_update_is_trainable"
+    version = "1"
+    required_fields = ("dataset_type", "is_trainable")
+    output_fields = ("is_trainable",)
+
+    def applies(self, record, context):
+        del context
+        return (
+            record.get("dataset_type") == "ETL_INCREMENTAL_INTEGRATION_TEST"
+            and record.get("is_trainable") is False
+        )
+
+    def transform(self, record, context):
+        del record, context
+        return {"is_trainable": True}
+
+
+def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
     suffix = uuid.uuid4().hex
     session_id = f"incremental-session-{suffix}"
     pipeline = build_serving_publish_pipeline(
@@ -221,29 +204,39 @@ def test_incremental_discovers_new_rows_and_updates_previously_scanned_rows():
         try:
             job_id, bucket = _unused_test_job_and_bucket(client, suffix)
             initial_timestamp = sdk_time.now_ms() - 10_000
-            updated_id = f"incremental-updated-{suffix}"
-            stable_id = f"incremental-stable-{suffix}"
-            new_id = f"incremental-new-{suffix}"
             client.ingest_landing_batch(
                 [
                     _incremental_record(
-                        record_id=updated_id,
+                        record_id=f"incremental-old-{suffix}-0",
                         job_id=job_id,
                         session_id=session_id,
                         step_id=0,
                         source_updated_at=initial_timestamp,
-                        answer="answer-before-update",
+                        answer="old-answer-0",
+                        is_trainable=False,
                     ),
                     _incremental_record(
-                        record_id=stable_id,
+                        record_id=f"incremental-old-{suffix}-1",
                         job_id=job_id,
                         session_id=session_id,
                         step_id=1,
                         source_updated_at=initial_timestamp,
-                        answer="stable-answer",
+                        answer="old-answer-1",
+                        is_trainable=False,
+                    ),
+                    _incremental_record(
+                        record_id=f"incremental-old-{suffix}-2",
+                        job_id=job_id,
+                        session_id=session_id,
+                        step_id=2,
+                        source_updated_at=initial_timestamp,
+                        answer="old-answer-2",
+                        is_trainable=False,
                     ),
                 ]
             )
+            old_ids = {f"incremental-old-{suffix}-{index}" for index in range(3)}
+            new_ids = {f"incremental-new-{suffix}-{index}" for index in range(3, 6)}
 
             engine = ETLEngine(client, checkpoint_store=checkpoint_store)
             first_cutoff = initial_timestamp + 1_000
@@ -254,43 +247,44 @@ def test_incremental_discovers_new_rows_and_updates_previously_scanned_rows():
                 run_started_at_ms=first_cutoff,
                 run_id=f"first-{suffix}",
                 buckets=[bucket],
+                page_size=2,
             )
-            assert first.discovery_rows == 2
-            assert first.serving_rows_upserted == 2
+            assert first.discovery_rows == 3
+            assert first.source_rows == 3
+            assert first.selected_rows == 0
+            assert first.serving_rows_upserted == 0
 
-            first_serving = client.query_data(
-                filter_query=f"job_id = '{job_id}'",
-                partition=job_id,
-                table=SERVING_TEST_TABLE,
-                checkout_latest=True,
+            enrichment_pipeline = PipelineDefinition(
+                name="landing_enrichment_pipeline",
+                version="1",
+                mode=PipelineMode.LANDING,
+                stages=(_MockUpdateIsTrainableStage(),),
             )
-            assert {row["id"] for row in first_serving} == {updated_id, stable_id}
-            first_by_id = {row["id"]: row for row in first_serving}
-            assert json.loads(first_by_id[updated_id]["chosen_trace"])[-1]["content"] == (
-                "answer-before-update"
+            enrichment = engine.run_sessions(
+                enrichment_pipeline,
+                [SessionKey(job_id=job_id, session_id=session_id)],
             )
+            assert enrichment.source_rows == 3
+            assert enrichment.landing_rows_updated == 3
+            assert enrichment.dirty_sessions == {
+                SessionKey(job_id=job_id, session_id=session_id)
+            }
 
-            client.update_landing(
-                (
-                    f"job_id = '{job_id}' AND session_id = '{session_id}' "
-                    f"AND id = '{updated_id}'"
-                ),
-                {
-                    "response": json.dumps(
-                        {"role": "assistant", "content": "answer-after-update"}
+            new_timestamp = sdk_time.now_ms()
+            client.ingest_landing_batch(
+                [
+                    _incremental_record(
+                        record_id=f"incremental-new-{suffix}-{step_id}",
+                        job_id=job_id,
+                        session_id=session_id,
+                        step_id=step_id,
+                        source_updated_at=new_timestamp,
+                        answer=f"new-answer-{step_id}",
+                        is_trainable=True,
                     )
-                },
-                partition=job_id,
+                    for step_id in range(3, 6)
+                ]
             )
-            new_record = _incremental_record(
-                record_id=new_id,
-                job_id=job_id,
-                session_id=session_id,
-                step_id=2,
-                source_updated_at=sdk_time.now_ms(),
-                answer="new-answer",
-            )
-            client.ingest_landing(new_record)
 
             landing_after_change = client.query_data(
                 filter_query=f"job_id = '{job_id}'",
@@ -299,8 +293,13 @@ def test_incremental_discovers_new_rows_and_updates_previously_scanned_rows():
                 checkout_latest=True,
             )
             landing_by_id = {row["id"]: row for row in landing_after_change}
-            assert landing_by_id[updated_id]["source_updated_at"] > initial_timestamp
-            assert landing_by_id[stable_id]["source_updated_at"] == initial_timestamp
+            assert set(landing_by_id) == old_ids | new_ids
+            for record_id in old_ids:
+                assert landing_by_id[record_id]["is_trainable"] is True
+                assert landing_by_id[record_id]["source_updated_at"] > first_cutoff
+            for record_id in new_ids:
+                assert landing_by_id[record_id]["is_trainable"] is True
+                assert landing_by_id[record_id]["source_updated_at"] == new_timestamp
             second_cutoff = max(
                 int(row["source_updated_at"]) for row in landing_after_change
             ) + 1_000
@@ -311,12 +310,15 @@ def test_incremental_discovers_new_rows_and_updates_previously_scanned_rows():
                 run_started_at_ms=second_cutoff,
                 run_id=f"second-{suffix}",
                 buckets=[bucket],
+                page_size=2,
             )
-            assert second.discovery_rows == 2
-            # One changed/new row causes the complete session to be reloaded;
-            # serving upsert keeps all three business IDs unique.
-            assert second.source_rows == 3
-            assert second.serving_rows_upserted == 3
+            # All three old rows moved past the serving watermark when the
+            # landing pipeline refreshed source_updated_at, and all three new
+            # rows are in the same incremental window.
+            assert second.discovery_rows == 6
+            assert second.source_rows == 6
+            assert second.selected_rows == 6
+            assert second.serving_rows_upserted == 6
 
             second_serving = client.query_data(
                 filter_query=f"job_id = '{job_id}'",
@@ -324,21 +326,23 @@ def test_incremental_discovers_new_rows_and_updates_previously_scanned_rows():
                 table=SERVING_TEST_TABLE,
                 checkout_latest=True,
             )
-            assert {row["id"] for row in second_serving} == {
-                updated_id,
-                stable_id,
-                new_id,
-            }
+            assert {row["id"] for row in second_serving} == old_ids | new_ids
             second_by_id = {row["id"]: row for row in second_serving}
-            assert json.loads(second_by_id[updated_id]["chosen_trace"])[-1]["content"] == (
-                "answer-after-update"
-            )
-            assert json.loads(second_by_id[new_id]["chosen_trace"])[-1]["content"] == (
-                "new-answer"
-            )
-            assert second_by_id[updated_id]["source_updated_at"] == landing_by_id[
-                updated_id
-            ]["source_updated_at"]
+            for step_id in range(6):
+                prefix = "old" if step_id < 3 else "new"
+                record_id = f"incremental-{prefix}-{suffix}-{step_id}"
+                assert json.loads(second_by_id[record_id]["chosen_trace"])[-1][
+                    "content"
+                ] == f"{prefix}-answer-{step_id}"
+                assert second_by_id[record_id]["source_updated_at"] == landing_by_id[
+                    record_id
+                ]["source_updated_at"]
+                assert second_by_id[record_id]["tags"] == [
+                    "integration-incremental",
+                    "wt-etl",
+                    "opencode",
+                    "change-discovery",
+                ]
 
             checkpoint = checkpoint_store.load(
                 pipeline_name=pipeline.name,
@@ -354,7 +358,7 @@ def test_incremental_discovers_new_rows_and_updates_previously_scanned_rows():
         finally:
             if job_id:
                 try:
-                    _cleanup_and_verify(client, job_id)
+                    cleanup_test_trajectory(client, job_id)
                 except Exception as exc:
                     cleanup_errors.append(f"trajectory tables: {exc}")
             if bucket >= 0:

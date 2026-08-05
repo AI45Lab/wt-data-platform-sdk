@@ -235,6 +235,86 @@ def test_landing_timestamp_echo_is_harmless_because_diff_is_empty():
     assert _checkpoint(store, pipeline).committed_until_ms == 9_000
 
 
+def test_serving_checkpoint_rediscovers_enriched_old_rows_and_new_rows():
+    old_rows = [
+        _row(
+            id=f"old-{step_id}",
+            step_id=step_id,
+            is_trainable=False,
+            source_updated_at=1_000,
+            _bucket=3,
+        )
+        for step_id in range(3)
+    ]
+    client = FakeGatewayClient(old_rows)
+    store = InMemoryCheckpointStore()
+    serving_pipeline = build_serving_publish_pipeline(
+        name="serving_after_enrichment",
+        version="1",
+    )
+    enrichment_pipeline = PipelineDefinition(
+        name="landing_enrichment_pipeline",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(MarkTrainableStage(),),
+    )
+    engine = ETLEngine(client, checkpoint_store=store)
+
+    first = engine.run_incremental(
+        serving_pipeline,
+        settle_delay_ms=0,
+        page_size=2,
+        start_from_ms=1_000,
+        run_started_at_ms=5_000,
+        buckets=[3],
+    )
+    assert first.discovery_rows == 3
+    assert first.selected_rows == 0
+    assert client.serving == {}
+    assert _checkpoint(store, serving_pipeline).committed_until_ms == 5_000
+
+    enrichment = engine.run_sessions(
+        enrichment_pipeline,
+        [SessionKey(old_rows[0]["job_id"], old_rows[0]["session_id"])],
+    )
+    assert enrichment.landing_rows_updated == 3
+    assert {row["source_updated_at"] for row in client.rows} == {8_000}
+
+    client.rows.extend(
+        [
+            _row(
+                id=f"new-{step_id}",
+                step_id=step_id,
+                is_trainable=True,
+                source_updated_at=8_100,
+                _bucket=3,
+            )
+            for step_id in range(3, 6)
+        ]
+    )
+    second = engine.run_incremental(
+        serving_pipeline,
+        settle_delay_ms=0,
+        page_size=2,
+        run_started_at_ms=9_000,
+        buckets=[3],
+    )
+
+    assert second.discovery_rows == 6
+    assert second.source_rows == 6
+    assert second.selected_rows == 6
+    assert second.serving_rows_upserted == 6
+    assert set(client.serving) == {
+        "old-0",
+        "old-1",
+        "old-2",
+        "new-3",
+        "new-4",
+        "new-5",
+    }
+    assert _checkpoint(store, serving_pipeline).committed_until_ms == 9_000
+
+
 def test_manual_range_does_not_create_or_advance_checkpoint():
     client = FakeGatewayClient([_row(source_updated_at=1_000, _bucket=3)])
     store = InMemoryCheckpointStore()

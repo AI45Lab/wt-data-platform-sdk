@@ -5,6 +5,8 @@
 stage，并由引擎统一持久化到 landing 或 serving。
 
 本文既是框架说明，也是所有 ETL stage 贡献者必须遵守的 coding contract。
+只贡献 stage 的开发者可先阅读更短的
+[`README_STAGE_DEVELOPMENT.md`](README_STAGE_DEVELOPMENT.md)。
 
 ETL 的 runtime、CLI、运维/检查工具、文档和测试全部收敛在 `wt_sdk/etl/`：业务规则放在
 `stages/`，pipeline 放在 `pipelines/`，入口放在 `cli/`，fixture/只读检查工具放在 `tools/`，
