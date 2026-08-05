@@ -59,11 +59,51 @@ class PipelineDefinition:
             raise PipelineConfigurationError("pipeline mode must be a PipelineMode")
         if not callable(self.record_selector):
             raise PipelineConfigurationError("pipeline record_selector must be callable")
-        object.__setattr__(self, "_ordered_stages", _order_and_validate_stages(self.stages))
+        object.__setattr__(self, "_ordered_stages", self.validate_dag(self.stages))
+
+    @staticmethod
+    def validate_dag(stages: Sequence[ETLStage]) -> tuple[ETLStage, ...]:
+        """Validate a stage DAG without executing ETL or accessing tables.
+
+        The returned tuple is the deterministic topological execution order.
+        Invalid metadata, dependencies, field ownership, or cycles raise
+        PipelineConfigurationError.
+        """
+
+        return _order_and_validate_stages(stages)
 
     @property
     def ordered_stages(self) -> tuple[ETLStage, ...]:
         return self._ordered_stages
+
+    def describe_dag(self) -> dict[str, object]:
+        """Return a JSON-serializable stage inventory and dependency graph."""
+
+        stages = []
+        edges = []
+        for order, stage in enumerate(self.ordered_stages, start=1):
+            stages.append(
+                {
+                    "order": order,
+                    "name": stage.name,
+                    "version": stage.version,
+                    "required_fields": list(stage.required_fields),
+                    "output_fields": list(stage.output_fields),
+                    "dependencies": list(stage.dependencies),
+                }
+            )
+            edges.extend(
+                {"from": dependency, "to": stage.name}
+                for dependency in stage.dependencies
+            )
+        return {
+            "pipeline_name": self.name,
+            "pipeline_version": self.version,
+            "mode": self.mode.value,
+            "execution_order": [stage.name for stage in self.ordered_stages],
+            "stages": stages,
+            "edges": edges,
+        }
 
     def process_session(self, rows: Sequence[Mapping[str, object]]) -> SessionResult:
         ordered_rows, session_key = _validate_and_order_session(rows)

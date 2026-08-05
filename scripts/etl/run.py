@@ -81,6 +81,31 @@ def _validate_pipeline_order(pipelines: list[PipelineDefinition]) -> None:
             raise ValueError("landing pipelines must run before serving pipelines in v1")
 
 
+def _inspection_payload(
+    pipelines: list[PipelineDefinition],
+    *,
+    include_stage_details: bool,
+) -> dict:
+    if include_stage_details:
+        pipeline_payloads = [pipeline.describe_dag() for pipeline in pipelines]
+    else:
+        pipeline_payloads = [
+            {
+                "pipeline_name": pipeline.name,
+                "pipeline_version": pipeline.version,
+                "mode": pipeline.mode.value,
+                "stage_count": len(pipeline.ordered_stages),
+                "execution_order": [stage.name for stage in pipeline.ordered_stages],
+            }
+            for pipeline in pipelines
+        ]
+    return {
+        "valid": True,
+        "pipeline_count": len(pipelines),
+        "pipelines": pipeline_payloads,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run WT landing/serving ETL pipelines")
     parser.add_argument(
@@ -92,8 +117,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile",
         choices=["production", "test"],
-        required=True,
-        help="Required safety selection; production writes need --confirm-production.",
+        default=None,
+        help=(
+            "Required for ETL execution; not needed for --list-stages/--validate-only. "
+            "Production writes need --confirm-production."
+        ),
+    )
+    parser.add_argument(
+        "--list-stages",
+        action="store_true",
+        help="Print stage metadata, execution order, and dependency edges; do not access DB.",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate pipeline/stage DAG configuration; do not access DB or execute stages.",
     )
     parser.add_argument("--landing-table", default=None)
     parser.add_argument("--serving-table", default=None)
@@ -123,6 +161,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    try:
+        pipelines = [_load_pipeline(reference) for reference in args.pipeline_factory]
+        _validate_pipeline_order(pipelines)
+    except Exception as exc:
+        raise SystemExit(f"pipeline validation failed: {exc}") from exc
+
+    if args.list_stages or args.validate_only:
+        payload = _inspection_payload(
+            pipelines,
+            include_stage_details=args.list_stages,
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    if args.profile is None:
+        raise SystemExit(
+            "--profile is required for ETL execution; it is optional only with "
+            "--list-stages or --validate-only"
+        )
     if args.session_id and not args.job_id:
         raise SystemExit("--session-id requires --job-id")
     if args.end_time and not args.start_time:
@@ -133,9 +191,6 @@ def main() -> int:
         raise SystemExit("--start-from is only valid for default incremental mode")
     if args.settle_delay_seconds < 0:
         raise SystemExit("--settle-delay-seconds must be non-negative")
-
-    pipelines = [_load_pipeline(reference) for reference in args.pipeline_factory]
-    _validate_pipeline_order(pipelines)
 
     table_config = TableConfig(
         profile=args.profile,

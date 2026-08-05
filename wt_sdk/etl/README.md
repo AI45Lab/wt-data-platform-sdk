@@ -11,6 +11,35 @@ stage，并由引擎统一持久化到 landing 或 serving。
 触发入口只放在 `scripts/etl/`。不要把新框架或业务 stage 放回历史目录
 `scripts/existing_data_etl/`，也不要在 stage 文件 import 时自动连接数据库或执行注册。
 
+## 核心对象与 factory 语义
+
+以下对象不要混为一谈：
+
+- **Stage**：一个纯业务转换规则，例如生成 `chosen_trace`。
+- **`PipelineDefinition`**：某条逻辑 pipeline 的静态定义，包含名称、版本、模式、入口
+  selector、stage 集合和 DAG；创建时会立即做静态校验，但不会读写数据。
+- **Pipeline factory**：无参数函数，每次调用返回一个 `PipelineDefinition`。它不是正在
+  运行的 ETL 实例，也不持有 client、checkpoint 或运行状态。
+- **`ETLEngine`**：真正执行 pipeline 的运行时对象，负责扫描、加载 session、调用 stage、
+  写入和 checkpoint。
+- **一次 ETL run**：一个 `scripts/etl/run.py` 进程。它可以通过多个
+  `--pipeline-factory` 加载多条 pipeline，并交给同一个 engine 串行执行。
+
+因此，一个 factory 通常对应“一条可复用的 pipeline 配置”，而不是“一次 ETL 任务
+实例”。同一个 factory 可以被多次手动运行或定时调用，每次都会产生新的 definition，
+但增量状态由持久化 checkpoint 标识，而不保存在 factory 中。
+
+### Stage 集合如何配置
+
+Stage 集合由 factory 构造 `PipelineDefinition` 时显式确定。新增 stage 后，应把它加入相应
+factory/builder 的 `stages=(...)`，而不是依赖目录自动发现。
+
+v1 暂不提供运行时 `--skip-stage`/`--only-stage`。如果确实需要一条不包含某些 stage 的
+pipeline，应创建一个名称和版本清晰的独立 factory，并保证剩余 stage 的依赖闭包完整。
+尤其是增量执行不能临时删减 stage 后继续推进原 pipeline 的 checkpoint，否则会把没有
+执行完整业务规则的数据标记为已处理。仅用于一次性实验的变体应优先使用 job/session 或
+时间范围手动模式，并使用独立 pipeline identity。
+
 ## v1 的边界
 
 v1 只有一个执行引擎，但支持两类 pipeline：
@@ -104,7 +133,18 @@ class ExampleStage(ETLStage):
 它不会随着当前记录的前序 patch 改变；当前记录在同一 pipeline 内的 stage patch 会依次
 合并，后序依赖 stage 可以从自己的 `record` 参数读取前序输出。
 
-## v1 serving pipeline 的固定业务规则
+## 当前 pipeline 与 stage 清单
+
+框架本身没有预置 landing enrichment 业务 pipeline；landing pipeline 的 stage 由具体
+业务 factory 提供。当前提供的是标准跨表 `serving_publish` builder：
+
+| 执行顺序 | Stage | 依赖 | 输入/输出 | 核心逻辑与状态 |
+| --- | --- | --- | --- | --- |
+| 1 | `normalize_claude_messages` | 无 | `agent_model/meta_json` → `messages` | Claude 轨迹判定和消息标准化扩展点，由对应贡献者实现；框架要求名称固定且声明输出 `messages`。 |
+| 2 | `build_chosen_trace` | `normalize_claude_messages` | `is_trainable/messages/response` → `chosen_trace` | 解析标准化 `messages` 和 `response`，按顺序拼成 JSON trace；畸形 JSON 直接失败。已实现。 |
+| 3 | `derive_job_tags` | `build_chosen_trace` | `is_trainable/job_id` → `tags` | 按 `#` 尽最大努力提取 job ID 前四段；不符合规则时写 `None`，不阻断运行。已实现。 |
+
+### v1 serving pipeline 的固定业务规则
 
 标准 serving pipeline 用 `build_serving_publish_pipeline(claude_stage)` 构造，入口条件是：
 
@@ -139,7 +179,91 @@ def build_serving_pipeline():
 ```
 
 factory 必须是无参数 callable，并返回一个 `PipelineDefinition`。运行入口通过
-`module.path:callable_name` 显式加载，不做隐式目录扫描或 import-time 注册。
+`module.path:callable_name` 显式加载，不做隐式目录扫描或 import-time 注册。factory 本身
+也必须只做对象组装，不得连接数据库、访问网络或产生其他 import/run-time side effect。
+
+## 新 Stage 的完整接入步骤
+
+1. 在 `wt_sdk/etl/stages/<stage_name>.py` 新建一个 `ETLStage` 子类。
+2. 声明唯一稳定的 `name`、`version`、`required_fields`、`output_fields` 和
+   `dependencies`；实现 `applies()` 与纯函数 `transform()`。
+3. 从 `wt_sdk/etl/stages/__init__.py` 导出该 class；若它属于公共 SDK API，再从
+   `wt_sdk/etl/__init__.py` 导出。
+4. 将 stage 显式加入目标 pipeline factory/builder。不要只把文件放进 `stages/` 目录，
+   引擎不会自动扫描。
+5. 若 stage 集合、依赖、selector 或结果语义变化，更新 pipeline version；不要只更新
+   stage version 后继续使用旧 checkpoint identity。
+6. 添加 stage 单测、依赖串联测试和非法 DAG 测试。
+7. 先运行静态 `validate_dag()`/`--validate-only`，再用 `--list-stages` 核对最终执行顺序。
+8. 最后在 test profile 使用真实 landing 数据执行 `--dry-run`，确认 runtime predicate、
+   JSON 解析、session 校验和 transform 结果。
+
+## DAG 校验与运行前检查
+
+### Python 静态 API
+
+开发者可以只构造 stage，不创建完整 pipeline，也不连接数据库：
+
+```python
+from wt_sdk.etl import PipelineDefinition
+
+
+ordered_stages = PipelineDefinition.validate_dag(
+    (
+        NormalizeClaudeMessagesStage(),
+        BuildChosenTraceStage(),
+        DeriveJobTagsStage(),
+    )
+)
+print([stage.name for stage in ordered_stages])
+```
+
+`validate_dag()` 成功时返回确定的拓扑执行顺序；失败时抛出
+`PipelineConfigurationError`。它会检查：
+
+- stage 类型、名称、版本以及字段/依赖声明；
+- 缺失依赖、重复依赖和 DAG 环；
+- 重复 stage 名；
+- 多个 stage 争用同一个输出字段；
+- schema 中不存在的 required/output 字段；
+- 对 identity/timestamp 等不可修改字段的声明。
+
+创建 `PipelineDefinition` 时会自动调用同一个方法，因此静态 API 与真实 pipeline 构造使用
+完全一致的规则。`pipeline.describe_dag()` 可获得 JSON-serializable 的 stage 清单、执行
+顺序和 dependency edges。
+
+### CLI 静态检查
+
+只校验一个或多个 factory，不创建 SDK client、不访问 dldb/S3，也不要求 `--profile`：
+
+```bash
+.venv-dldb-v1/bin/python scripts/etl/run.py \
+  --pipeline-factory your_package.etl:build_serving_pipeline \
+  --validate-only
+```
+
+列出 factory 最终生成的 stage、版本、输入输出、执行顺序和依赖边：
+
+```bash
+.venv-dldb-v1/bin/python scripts/etl/run.py \
+  --pipeline-factory your_package.etl:build_serving_pipeline \
+  --list-stages
+```
+
+传入多个 factory 时，这两个命令还会检查 v1 的跨 pipeline 顺序：landing pipeline 必须在
+serving pipeline 之前，同一次 run 不能包含重复 pipeline identity。
+
+### `--validate-only` 与 `--dry-run` 的区别
+
+| 模式 | 连接/读取数据库 | 执行 `applies/transform` | 写业务表/checkpoint | 主要用途 |
+| --- | --- | --- | --- | --- |
+| `--validate-only` | 否 | 否 | 否 | 快速检查 stage 元数据、字段所有权、依赖 DAG 和 pipeline 顺序。 |
+| `--list-stages` | 否 | 否 | 否 | 在静态校验通过后展示实际 stage 清单和 DAG。 |
+| `--dry-run` | 是，会扫描真实 source | 是 | 否 | 用真实数据检查 selector、stage runtime、JSON、session 和输出 model。 |
+
+所以 `--dry-run` 的确能覆盖静态 DAG 校验，并额外覆盖数据相关逻辑，但成本更高且依赖真实
+环境；贡献 stage 时应先执行 `--validate-only`，然后运行单元测试，最后再做 test profile
+的 `--dry-run`。
 
 ## 测试与代码评审要求
 
@@ -215,8 +339,9 @@ WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-dldb \
 ```
 
 正式增量运行去掉 `--dry-run`。首次 dry run 不写 checkpoint，因此随后正式运行仍需保留
-`--start-from`。运行入口强制显式选择 `--profile test|production`；任何非 dry-run 的
-production 执行还必须传入 `--confirm-production`。
+`--start-from`。实际 ETL 执行强制显式选择 `--profile test|production`；静态
+`--validate-only`/`--list-stages` 不需要 profile。任何非 dry-run 的 production 执行还
+必须传入 `--confirm-production`。
 
 同一次运行串联 landing 与 serving：
 

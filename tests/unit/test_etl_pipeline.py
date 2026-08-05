@@ -4,6 +4,7 @@ import pytest
 
 from wt_sdk.etl import (
     BuildChosenTraceStage,
+    DeriveJobTagsStage,
     ETLStage,
     PipelineConfigurationError,
     PipelineDefinition,
@@ -103,6 +104,63 @@ def test_canonical_serving_pipeline_applies_claude_then_trace_then_tags():
     assert serving.tags == ["dataset", "harness", "model", "task"]
     assert serving.source_updated_at == 1_754_000_000_000
     assert serving.serving_updated_at is None
+
+
+def test_public_validate_dag_returns_topological_order_without_pipeline_run():
+    ordered = PipelineDefinition.validate_dag(
+        (
+            DeriveJobTagsStage(),
+            BuildChosenTraceStage(),
+            NormalizeClaudeMessagesStage(),
+        )
+    )
+
+    assert [stage.name for stage in ordered] == [
+        "normalize_claude_messages",
+        "build_chosen_trace",
+        "derive_job_tags",
+    ]
+
+
+def test_public_validate_dag_rejects_cycle():
+    class FirstStage(ETLStage):
+        name = "first"
+        output_fields = ("search_text",)
+        dependencies = ("second",)
+
+        def transform(self, record, context):
+            del record, context
+            return {"search_text": "first"}
+
+    class SecondStage(ETLStage):
+        name = "second"
+        output_fields = ("reference_answer",)
+        dependencies = ("first",)
+
+        def transform(self, record, context):
+            del record, context
+            return {"reference_answer": "second"}
+
+    with pytest.raises(PipelineConfigurationError, match="cycle"):
+        PipelineDefinition.validate_dag((FirstStage(), SecondStage()))
+
+
+def test_describe_dag_returns_machine_readable_stage_inventory():
+    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+
+    description = pipeline.describe_dag()
+
+    assert description["pipeline_name"] == "serving_publish"
+    assert description["execution_order"] == [
+        "normalize_claude_messages",
+        "build_chosen_trace",
+        "derive_job_tags",
+    ]
+    assert description["edges"] == [
+        {"from": "normalize_claude_messages", "to": "build_chosen_trace"},
+        {"from": "build_chosen_trace", "to": "derive_job_tags"},
+    ]
+    assert description["stages"][1]["output_fields"] == ["chosen_trace"]
 
 
 @pytest.mark.parametrize(
