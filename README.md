@@ -340,8 +340,9 @@ also stamp `serving_updated_at`.
 The repository now includes the ETL v1 engine, durable per-bucket checkpoints,
 manual backfill modes, and the built-in chosen-trace/tag stages. Contributors
 must follow the stage contract and integration guide in
-[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md); operational execution uses the
-ETL module CLI.
+[`wt_sdk/etl/README_STAGE_DEVELOPMENT.md`](wt_sdk/etl/README_STAGE_DEVELOPMENT.md);
+runtime and operational guidance remains in
+[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md).
 
 List the registered pipelines without connecting to any database:
 

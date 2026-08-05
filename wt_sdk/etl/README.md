@@ -1,12 +1,12 @@
-# WT ETL v1 开发与接入规范
+# (WIP)WT ETL v1 使用与运维说明
 
 本目录提供 Wind Tunnel 轨迹数据的 ETL v1 引擎。它负责从 landing
 发现发生过变化的数据，以 `(job_id, session_id)` 为完整轨迹范围加载，依次执行
 stage，并由引擎统一持久化到 landing 或 serving。
 
-本文既是框架说明，也是所有 ETL stage 贡献者必须遵守的 coding contract。
-只贡献 stage 的开发者可先阅读更短的
-[`README_STAGE_DEVELOPMENT.md`](README_STAGE_DEVELOPMENT.md)。
+本文面向 ETL pipeline 的使用、测试与运维。如果要开发或接入新 stage，请直接阅读
+[`README_STAGE_DEVELOPMENT.md`](README_STAGE_DEVELOPMENT.md)，其中包含 stage contract、
+依赖声明、接入步骤、单元测试和 `landing_test` 集成测试规范；本文不再重复这些内容。
 
 ETL 的 runtime、CLI、运维/检查工具、文档和测试全部收敛在 `wt_sdk/etl/`：业务规则放在
 `stages/`，pipeline 放在 `pipelines/`，入口放在 `cli/`，fixture/只读检查工具放在 `tools/`，
@@ -35,41 +35,15 @@ stage 把依赖加入核心 SDK dependencies。ETL tests 由 setuptools 明确�
 实例”。同一个 factory 可以被多次手动运行或定时调用，每次都会产生新的 definition，
 但增量状态由持久化 checkpoint 标识，而不保存在 factory 中。
 
-### Stage 集合如何配置
+### Pipeline 运行边界
 
-Stage 集合由 factory 构造 `PipelineDefinition` 时显式确定。新增 stage 后，应把它加入相应
-factory/builder 的 `stages=(...)`，而不是依赖目录自动发现。
+CLI 使用 `wt_sdk/etl/pipelines/` 下的短名称加载 pipeline。`--list-pipelines` 可查看当前
+可用名称，`--list-stages` 可查看所选 pipeline 的完整 stage 清单和 DAG。
 
-v1 暂不提供运行时 `--skip-stage`/`--only-stage`。如果确实需要一条不包含某些 stage 的
-pipeline，应创建一个名称和版本清晰的独立 factory，并保证剩余 stage 的依赖闭包完整。
-尤其是增量执行不能临时删减 stage 后继续推进原 pipeline 的 checkpoint，否则会把没有
-执行完整业务规则的数据标记为已处理。仅用于一次性实验的变体应优先使用 job/session 或
-时间范围手动模式，并使用独立 pipeline identity。
-
-每条 pipeline 是 `wt_sdk/etl/pipelines/` 下一个独立 Python 文件。文件名（不含 `.py`）必须
-和 `PipelineDefinition.name` 完全相同，文件只暴露无参数 `build_pipeline()`。CLI 根据短名称
-导入对应文件，不需要用户写 Python package 路径。`--list-pipelines` 可查看所有可用名称，
-`--list-stages` 可查看所选 pipeline 的 stage/DAG。
-
-当前两条 pipeline：
-
-- `landing_enrichment_pipeline.py`：landing 原地 enrichment pipeline；目前唯一业务 stage
-  `UpdateIsTrainableStage` 已留好 TODO，
-  贡献者实现前不能真实执行。
-- `landing_to_serving_pipeline.py`：当前 OpenCode 可直接运行，包含 chosen trace 和 tags。
-
-### Stage 顺序由谁负责
-
-引擎会根据每个 stage 声明的 `dependencies` 做拓扑排序，因此真实的前置依赖不要求贡献者
-手工把 stage 放在正确位置；即使 factory 声明顺序相反，依赖边仍会保证前置 stage 先执行。
-但贡献者必须准确声明真实依赖，pipeline owner 必须决定哪些 stage 被接入。对于彼此完全
-独立、DAG 中没有路径关系的 stage，引擎使用 pipeline 文件中的声明顺序作为稳定 tie-break。
-不能为了展示顺序虚构 dependency；若一个 stage 必须读取另一个 stage 的 patch，就必须声明
-dependency 并添加串联测试。
-
-唯一需要特别区分的是“可选前处理”：例如 Claude normalizer 只对 Claude 行执行，而 chosen
-trace 在 normalizer 不存在或不适用时也必须运行。这不是 hard dependency；pipeline owner
-把可选 normalizer 声明在 consumer 前，并分别测试“前处理执行/跳过”两条路径。
+v1 不提供运行时 `--skip-stage`/`--only-stage`。一次运行必须执行所选 pipeline 的完整定义，
+否则继续推进同一 pipeline/version 的 checkpoint 会错误地把未执行完整规则的数据标记为
+已处理。一次性补数或验证应通过 job/session、时间范围或 `--source-filter` 缩小数据范围，
+而不是临时删减 stage。
 
 ## v1 的边界
 
@@ -142,184 +116,21 @@ landing enrichment 对下游有意义的字段发生实际变化，就必须使�
 `--start-time [--end-time]` 和 `--source-filter`。这些模式都不读写全局 checkpoint；只有默认
 incremental 模式会使用 checkpoint。
 
-## Stage coding contract
-
-每个 stage 继承 `ETLStage`，并声明稳定的元数据：
-
-```python
-from wt_sdk.etl import ETLStage, StageContext
-
-
-class ExampleStage(ETLStage):
-    name = "example_enrichment"
-    version = "1"
-    required_fields = ("meta_json",)
-    output_fields = ("search_text",)
-    dependencies = ()
-
-    def applies(self, record, context: StageContext) -> bool:
-        return record.get("meta_json") is not None
-
-    def transform(self, record, context: StageContext):
-        return {"search_text": "..."}
-```
-
-贡献的 stage 必须满足以下约束：
-
-1. **纯函数与确定性**：相同的 `record + context` 必须产生相同 patch。不得使用当前时间、
-   随机数或未固定版本的外部状态决定结果。
-2. **禁止 I/O**：不得创建 SDK client，不得读写 landing、serving、checkpoint、网络或
-   本地文件。引擎统一处理 I/O、重试边界和提交顺序。
-3. **不得原地修改输入**：`transform()` 返回新 `dict`，只包含该 stage 声明拥有的
-   `output_fields`。返回完整 record、未声明字段或非 dict 都会失败。
-4. **字段单一所有者**：同一 pipeline 内，一个输出字段只能由一个 stage 拥有。若后续
-   stage 需要前序结果，用 `dependencies` 声明 stage 名称。required/output 字段都必须
-   存在于当前统一 schema，且 `applies()` 必须返回真正的 bool。某 stage 适用时，它
-   声明的全部 dependency 也必须已经对当前记录实际执行；否则该记录会失败。
-5. **不得改系统字段**：stage 不能输出 `id`、`job_id`、`session_id`、`created_at`、
-   `source_updated_at` 或 `serving_updated_at`。
-6. **幂等**：stage 必须允许同一行、同一 session 被重复执行。checkpoint 失败恢复、手动
-   backfill、landing 时间戳回扫都会导致合理的重复执行。
-7. **条件分层**：pipeline 级 selector 决定记录是否进入整条 pipeline；`applies()` 只决定
-   当前 stage 是否执行。不要在多个 stage 中复制互相矛盾的总入口条件。
-8. **错误策略明确**：数据损坏或无法安全生成结果时抛出异常，使当前 checkpoint 窗口失败
-   并可恢复；只有业务明确要求 best effort 的字段才允许返回 `None`。不要静默吞掉未知
-   异常。
-9. **JSON 边界**：`messages`、`response`、`chosen_trace`、`rejected_trace` 和
-   `meta_json` 在 SDK 边界都是 JSON 字符串。stage 可在内存解析，但 patch 必须重新输出
-   合法 JSON 字符串，不能输出 Python dict/list。
-10. **版本可追踪**：改变 stage 结果语义时更新 stage `version`；改变 pipeline 的 stage
-    集合、选择条件或结果语义时必须更新 pipeline `version`。pipeline version 属于
-    checkpoint identity，新版本需要显式选择重新扫描起点。
-
-`StageContext.session` 是按 `step_id` 排序的原始 session 快照，可用于 session 级判断。
-它不会随着当前记录的前序 patch 改变；当前记录在同一 pipeline 内的 stage patch 会依次
-合并，后序依赖 stage 可以从自己的 `record` 参数读取前序输出。
-
 ## 当前 pipeline 与 stage 清单
 
-### `landing_enrichment_pipeline`（同表原地更新）
+| Pipeline | 模式 | 当前 stage | 当前状态 |
+| --- | --- | --- | --- |
+| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable` | 业务逻辑仍为 TODO；实现合入前只能做静态检查，不能真实执行。 |
+| `landing_to_serving_pipeline` | landing → serving | `build_chosen_trace`、`derive_job_tags` | 可用于现有 OpenCode 轨迹；仅处理 `is_trainable is True` 的行。 |
 
-文件：`wt_sdk/etl/pipelines/landing_enrichment_pipeline.py`；CLI 名称：
-`landing_enrichment_pipeline`。该名称不绑定某个字段；未来其他 landing 原地 enrichment
-stage 也接入这条 pipeline，并由 DAG 编排。
+`build_chosen_trace` 将 `messages + response` 写入 `chosen_trace`；`derive_job_tags` 从
+`job_id` 前四段尽最大努力生成 `[数据集, harness, 模型, 任务类型]`，无法解析时写 `None`。
+当前 serving pipeline 尚未接入 Claude messages normalization。
 
-| 执行顺序 | Stage | 依赖 | 输入/输出 | 核心逻辑与状态 |
-| --- | --- | --- | --- | --- |
-| 1 | `update_is_trainable` | 无 | 贡献者补充 → `is_trainable` | pipeline、diff patch、landing sink 和 `source_updated_at` 刷新已接好；`applies()`、`transform()`、required fields 和单测由贡献者在 `wt_sdk/etl/stages/trainability.py` 完成。当前 TODO 会显式报错，防止误运行。 |
+如需开发、接入或调整 stage，请参见
+[`README_STAGE_DEVELOPMENT.md`](README_STAGE_DEVELOPMENT.md)。
 
-贡献者只修改该 stage 及其测试；不在 stage 中调用 SDK/dldb，也不自行更新时间戳。
-`transform()` 只返回 `{"is_trainable": bool}`。引擎会去掉与原值相同的 patch；只有实际
-变化才调用 `update_landing()`，由该接口默认刷新 `source_updated_at`。
-
-### `landing_to_serving_pipeline`（landing → serving）
-
-文件：`wt_sdk/etl/pipelines/landing_to_serving_pipeline.py`；CLI 名称：
-`landing_to_serving_pipeline`。
-
-| 执行顺序 | Stage | 依赖 | 输入/输出 | 核心逻辑与状态 |
-| --- | --- | --- | --- | --- |
-| 1 | `build_chosen_trace` | 无 | `is_trainable/messages/response` → `chosen_trace` | 解析现有 `messages` 和 `response`，按顺序拼成 JSON trace；畸形 JSON 直接失败。已实现。 |
-| 2 | `derive_job_tags` | 无 | `is_trainable/job_id` → `tags` | 按 `#` 尽最大努力提取 job ID 前四段；不符合规则时写 `None`，不阻断运行。已实现。 |
-
-### v1 serving pipeline 的固定业务规则
-
-标准 serving pipeline 的入口条件是：
-
-```text
-is_trainable is True
-```
-
-OpenCode 数据已有可直接使用的 `messages`，所以当前无需 provider normalization。
-`build_chosen_trace` 和 `derive_job_tags` 彼此独立，不声明 dependency，只按 factory 声明
-顺序执行。
-
-未来 Claude stage 完成后，通过
-`build_serving_publish_pipeline(NormalizeClaudeMessagesStage())` 加在同一 pipeline 的最前面：
-
-1. `normalize_claude_messages`：由贡献者实现，从 Claude 原始 `meta_json` 生成标准化
-   `messages`；其 `applies()` 只对 Claude 数据返回 true。
-2. `build_chosen_trace`：对所有 trainable 数据使用“当前 record 的 messages”与 response
-   生成 `chosen_trace`。Claude 行会看到前序 normalization patch，OpenCode 行继续使用原始
-   messages。
-3. `derive_job_tags`：从 `job_id` 尽最大努力提取前四段
-   `[数据集名字, harness名字, 模型名字, 任务类型]`。
-
-Claude stage 必须命名为 `normalize_claude_messages`，并把 `messages` 声明为输出字段。
-Claude 判定逻辑只写在它的 `applies()` 中。它和 chosen trace 不声明硬 dependency，因为
-normalizer 对 OpenCode 不适用时 chosen trace 仍必须执行；正确先后由 factory 声明顺序保证。
-`job_id` 不满足约定、分段不足或前四段存在空值时，`tags` 为 `None`，不能因此阻断整条轨迹。
-把 Claude stage 加入已经运行过的 serving pipeline 时必须提升 pipeline version，并为新版本
-指定 backfill 起点，不能继续沿用旧版本 checkpoint。
-
-示例 factory：
-
-```python
-from wt_sdk.etl import build_serving_publish_pipeline
-
-
-def build_pipeline():
-    return build_serving_publish_pipeline(
-        NormalizeClaudeMessagesStage(),
-        name="landing_to_serving_pipeline",
-        version="2",
-    )
-```
-
-每个 pipeline 文件的 `build_pipeline()` 必须是无参数 callable，并返回一个
-`PipelineDefinition`。文件名、definition name 和 CLI short name 必须一致。factory 本身
-只做对象组装，不得连接数据库、访问网络或产生其他 import/run-time side effect。
-
-## 新 Stage 的完整接入步骤
-
-1. 在 `wt_sdk/etl/stages/<stage_name>.py` 新建一个 `ETLStage` 子类。
-2. 声明唯一稳定的 `name`、`version`、`required_fields`、`output_fields` 和
-   `dependencies`；实现 `applies()` 与纯函数 `transform()`。
-3. 从 `wt_sdk/etl/stages/__init__.py` 导出该 class；若它属于公共 SDK API，再从
-   `wt_sdk/etl/__init__.py` 导出。
-4. 将 stage 显式加入 `wt_sdk/etl/pipelines/<pipeline_name>.py` 的 `build_pipeline()`。不要只把文件放进 `stages/` 目录，
-   引擎不会自动扫描。
-5. 若 stage 集合、依赖、selector 或结果语义变化，更新 pipeline version；不要只更新
-   stage version 后继续使用旧 checkpoint identity。
-6. 添加 stage 单测、依赖串联测试和非法 DAG 测试。
-7. 先运行静态 `validate_dag()`/`--validate-only`，再用 `--list-stages` 核对最终执行顺序。
-8. 最后在 test profile 使用真实 landing 数据执行 `--dry-run`，确认 runtime predicate、
-   JSON 解析、session 校验和 transform 结果。
-
-## DAG 校验与运行前检查
-
-### Python 静态 API
-
-开发者可以只构造 stage，不创建完整 pipeline，也不连接数据库：
-
-```python
-from wt_sdk.etl import PipelineDefinition
-
-
-ordered_stages = PipelineDefinition.validate_dag(
-    (
-        BuildChosenTraceStage(),
-        DeriveJobTagsStage(),
-    )
-)
-print([stage.name for stage in ordered_stages])
-```
-
-`validate_dag()` 成功时返回确定的拓扑执行顺序；失败时抛出
-`PipelineConfigurationError`。它会检查：
-
-- stage 类型、名称、版本以及字段/依赖声明；
-- 缺失依赖、重复依赖和 DAG 环；
-- 重复 stage 名；
-- 多个 stage 争用同一个输出字段；
-- schema 中不存在的 required/output 字段；
-- 对 identity/timestamp 等不可修改字段的声明。
-
-创建 `PipelineDefinition` 时会自动调用同一个方法，因此静态 API 与真实 pipeline 构造使用
-完全一致的规则。`pipeline.describe_dag()` 可获得 JSON-serializable 的 stage 清单、执行
-顺序和 dependency edges。
-
-### CLI 静态检查
+## Pipeline 静态检查
 
 列出当前可用 pipeline 文件，不创建 SDK client、不访问 dldb/S3：
 
@@ -346,9 +157,6 @@ print([stage.name for stage in ordered_stages])
 传入多个 pipeline 名称时，这两个命令还会检查 v1 的跨 pipeline 顺序：landing pipeline 必须在
 serving pipeline 之前，同一次 run 不能包含重复 pipeline identity。
 
-对没有依赖关系的 stage，DAG 会保持它们在 factory 中的声明顺序；`dependencies` 只表达
-真实的数据/执行前置条件，不能为了显示顺序而虚构 dependency。
-
 ### `--validate-only` 与 `--dry-run` 的区别
 
 | 模式 | 连接/读取数据库 | 执行 `applies/transform` | 写业务表/checkpoint | 主要用途 |
@@ -357,26 +165,9 @@ serving pipeline 之前，同一次 run 不能包含重复 pipeline identity。
 | `--list-stages` | 否 | 否 | 否 | 在静态校验通过后展示实际 stage 清单和 DAG。 |
 | `--dry-run` | 是，会扫描真实 source | 是 | 否 | 用真实数据检查 selector、stage runtime、JSON、session 和输出 model。 |
 
-所以 `--dry-run` 的确能覆盖静态 DAG 校验，并额外覆盖数据相关逻辑，但成本更高且依赖真实
-环境；贡献 stage 时应先执行 `--validate-only`，然后运行单元测试，最后再做 test profile
-的 `--dry-run`。
-
-## 测试与代码评审要求
-
-每个新 stage 至少提交以下 hermetic unit tests：
-
-- `applies()` 的正例和反例；
-- 正常输入对应的精确 patch；
-- 缺失字段、null、畸形 JSON 和错误数据类型；
-- 重复执行产生相同结果；
-- 与依赖 stage 串联后顺序和结果正确；
-- best-effort 字段不会使 row/session/batch 失败。
-
-测试不得访问真实 S3。真实 integration test 只能显式使用 `landing_test` 和
-`serving_test`，且必须遵守仓库根目录 `AGENTS.md` 的安全开关与清理约束。
-
-提交 review 时需说明：stage 的输入字段、输出字段、触发条件、错误策略、幂等依据、依赖
-关系，以及是否改变 pipeline version/backfill 范围。
+`--validate-only` 适合快速确认 pipeline 定义可以加载；`--dry-run` 会进一步使用真实 source
+检查运行期行为，但成本更高且依赖 test 环境。stage 开发所需的测试和评审要求统一见
+[`README_STAGE_DEVELOPMENT.md`](README_STAGE_DEVELOPMENT.md)。
 
 ## Checkpoint 与扫描模式
 

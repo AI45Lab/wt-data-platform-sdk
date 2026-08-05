@@ -323,8 +323,9 @@ ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_upda
 
 仓库现已包含 ETL v1 引擎、按 HASH bucket 持久化的 checkpoint、手动 backfill 模式，
 以及内置的 chosen-trace/tags stage。贡献者必须遵守
-[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md) 中的 stage contract 与接入规范；运维
-入口统一由 ETL module CLI 提供。
+[`wt_sdk/etl/README_STAGE_DEVELOPMENT.md`](wt_sdk/etl/README_STAGE_DEVELOPMENT.md) 中的
+stage contract 与接入规范；运行与运维说明见
+[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md)。
 
 无需连接数据库即可列出当前已注册的 pipeline：
 
