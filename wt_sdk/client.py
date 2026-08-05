@@ -762,6 +762,16 @@ class WTGatewayClient:
         logger.info(f"Queried table {table_name}: {len(records)} results")
         return records
 
+    def list_table_partitions(self, table: Optional[str] = None) -> List[Union[str, int]]:
+        """Return existing logical partitions/buckets for landing or a named table.
+
+        Empty HASH tables return an empty list because physical buckets are
+        created lazily on first write. Partition metadata comes from dldb; the
+        SDK does not infer buckets from physical table-name strings.
+        """
+        table_name = table or self.config.tables.landing_table
+        return self._list_existing_partitions_for_table(table_name)
+
     def update_landing(
         self,
         filter_query: str,

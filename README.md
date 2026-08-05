@@ -320,6 +320,12 @@ keep IDs globally unique and must never move an existing ID to another
 `job_id`. The append/add `ingest_serving(_batch)` methods remain available and
 also stamp `serving_updated_at`.
 
+The repository now includes the ETL v1 engine, durable per-bucket checkpoints,
+manual backfill modes, and the built-in chosen-trace/tag stages. Contributors
+must follow the stage contract and integration guide in
+[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md); operational execution starts at
+[`scripts/etl/run.py`](scripts/etl/run.py).
+
 For a formal offline export after serving data has been published, use
 `export_data_batches()`. It defaults to serving, captures a complete unique-ID
 manifest before yielding the first batch, and then validates every exact-ID

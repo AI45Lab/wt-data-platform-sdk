@@ -307,6 +307,11 @@ ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_upda
 全局唯一，且已有 ID 不能迁移到另一个 `job_id`。保留 append/add 语义的
 `ingest_serving(_batch)` 仍可使用，也会刷新 `serving_updated_at`。
 
+仓库现已包含 ETL v1 引擎、按 HASH bucket 持久化的 checkpoint、手动 backfill 模式，
+以及内置的 chosen-trace/tags stage。贡献者必须遵守
+[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md) 中的 stage contract 与接入规范；运维
+入口为 [`scripts/etl/run.py`](scripts/etl/run.py)。
+
 serving 数据发布完成后，正式离线导出请使用 `export_data_batches()`。它默认查询
 serving，在返回第一批数据之前先生成完整的唯一 ID 清单，随后按精确 ID 取数并逐批
 校验。清单生成之后新增的记录不会混入本次导出；如果发现重复 ID，或者源记录被
