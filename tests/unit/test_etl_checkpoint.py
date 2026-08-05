@@ -42,6 +42,27 @@ def test_in_memory_checkpoint_identity_includes_pipeline_version_and_bucket():
     assert checkpoint.checkpoint_id == (
         "serving_publish|2|landing_test|serving_test|17"
     )
+    assert store.delete(
+        pipeline_name="serving_publish",
+        pipeline_version="2",
+        source_table="landing_test",
+        target_table="serving_test",
+        bucket=17,
+    ) is True
+    assert store.load(
+        pipeline_name="serving_publish",
+        pipeline_version="2",
+        source_table="landing_test",
+        target_table="serving_test",
+        bucket=17,
+    ) is None
+    assert store.delete(
+        pipeline_name="serving_publish",
+        pipeline_version="2",
+        source_table="landing_test",
+        target_table="serving_test",
+        bucket=17,
+    ) is False
 
 
 def test_etl_state_uri_requires_explicit_configuration(monkeypatch):
@@ -64,6 +85,7 @@ def test_checkpoint_table_follows_shared_profile_unless_overridden():
 
 def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
     class Record:
+        partition_column = "job_id"
         partition_type = ""
 
     class SchemaTable:
@@ -96,6 +118,11 @@ def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
             assert limit == 1
             assert checkout_latest is True
             return self.frame
+
+        def delete(self, table_name, query):
+            assert table_name == PRODUCTION_CHECKPOINT_TABLE
+            assert "serving_publish|1|landing_test|serving_test|3" in query
+            self.frame = pd.DataFrame()
 
         def shutdown(self):
             return None
@@ -135,6 +162,60 @@ def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
 
     assert loaded == checkpoint
     assert session.tables[PRODUCTION_CHECKPOINT_TABLE] is sentinel
+    assert store.delete(
+        pipeline_name="serving_publish",
+        pipeline_version="1",
+        source_table="landing_test",
+        target_table="serving_test",
+        bucket=3,
+    ) is True
+    assert store.load(
+        pipeline_name="serving_publish",
+        pipeline_version="1",
+        source_table="landing_test",
+        target_table="serving_test",
+        bucket=3,
+    ) is None
+
+
+def test_checkpoint_store_opens_non_partitioned_table_as_simple_table(monkeypatch):
+    class Record:
+        partition_column = ""
+        partition_type = "VALUE"
+
+    class SchemaTable:
+        def get(self, table_name):
+            assert table_name == TEST_CHECKPOINT_TABLE
+            return Record()
+
+    class Session:
+        def __init__(self):
+            self.schema_table = SchemaTable()
+            self.db_conn = object()
+            self.tables = {}
+
+        def table_exists(self, table_name):
+            return table_name == TEST_CHECKPOINT_TABLE
+
+        def get_schema(self, table_name):
+            assert table_name == TEST_CHECKPOINT_TABLE
+            return ETL_CHECKPOINT_SCHEMA
+
+        def shutdown(self):
+            return None
+
+    session = Session()
+    simple_table = object()
+    monkeypatch.setattr(checkpoint_module.dldb, "connect", lambda *args, **kwargs: session)
+
+    import dldb.table
+
+    monkeypatch.setattr(dldb.table, "open_table", lambda *args, **kwargs: simple_table)
+    store = DldbCheckpointStore("s3://state", table_name=TEST_CHECKPOINT_TABLE)
+
+    store.verify_ready()
+
+    assert session.tables[TEST_CHECKPOINT_TABLE] is simple_table
 
 
 def test_init_script_creates_test_and_production_tables_by_default(

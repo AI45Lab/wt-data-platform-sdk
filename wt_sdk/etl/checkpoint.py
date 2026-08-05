@@ -51,6 +51,16 @@ class CheckpointStore(Protocol):
 
     def save(self, checkpoint: Checkpoint) -> None: ...
 
+    def delete(
+        self,
+        *,
+        pipeline_name: str,
+        pipeline_version: str,
+        source_table: str,
+        target_table: str,
+        bucket: int,
+    ) -> bool: ...
+
     def close(self) -> None: ...
 
 
@@ -80,6 +90,24 @@ class InMemoryCheckpointStore:
 
     def save(self, checkpoint: Checkpoint) -> None:
         self._values[checkpoint.checkpoint_id] = checkpoint
+
+    def delete(
+        self,
+        *,
+        pipeline_name: str,
+        pipeline_version: str,
+        source_table: str,
+        target_table: str,
+        bucket: int,
+    ) -> bool:
+        checkpoint_id = checkpoint_identity(
+            pipeline_name,
+            pipeline_version,
+            source_table,
+            target_table,
+            bucket,
+        )
+        return self._values.pop(checkpoint_id, None) is not None
 
     def close(self) -> None:
         return None
@@ -144,14 +172,25 @@ class DldbCheckpointStore:
                 f"checkpoint metadata is missing for exact table '{self.table_name}'"
             )
         try:
-            from dldb.table import open_table_by_partition_type
+            if not getattr(record, "partition_column", None):
+                from dldb.table import open_table
 
-            self.session.tables[self.table_name] = open_table_by_partition_type(
-                self.session.db_conn,
-                schema_table,
-                self.table_name,
-                record.partition_type,
-            )
+                table = open_table(
+                    self.session.db_conn,
+                    schema_table,
+                    self.table_name,
+                    self.table_name,
+                )
+            else:
+                from dldb.table import open_table_by_partition_type
+
+                table = open_table_by_partition_type(
+                    self.session.db_conn,
+                    schema_table,
+                    self.table_name,
+                    record.partition_type,
+                )
+            self.session.tables[self.table_name] = table
         except Exception as exc:
             raise CheckpointError(
                 f"failed to open exact checkpoint table '{self.table_name}': {exc}"
@@ -212,6 +251,38 @@ class DldbCheckpointStore:
             columns=["id"],
             datas=frame,
         )
+
+    def delete(
+        self,
+        *,
+        pipeline_name: str,
+        pipeline_version: str,
+        source_table: str,
+        target_table: str,
+        bucket: int,
+    ) -> bool:
+        """Delete one exact checkpoint identity, primarily for safe test cleanup."""
+
+        checkpoint_id = checkpoint_identity(
+            pipeline_name,
+            pipeline_version,
+            source_table,
+            target_table,
+            bucket,
+        )
+        if self.load(
+            pipeline_name=pipeline_name,
+            pipeline_version=pipeline_version,
+            source_table=source_table,
+            target_table=target_table,
+            bucket=bucket,
+        ) is None:
+            return False
+        self.session.delete(
+            self.table_name,
+            f"id = '{_escape_sql(checkpoint_id)}'",
+        )
+        return True
 
     def close(self) -> None:
         self.session.shutdown()

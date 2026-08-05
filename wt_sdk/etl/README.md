@@ -107,6 +107,35 @@ v1 不做以下事情：
 - serving 保留 landing 的 `source_updated_at`；SDK 在每次 serving upsert 时写入新的
   `serving_updated_at`。
 
+## 哪些运行会改变 Landing 时间戳
+
+先看 **pipeline 类型**，再看是否 `--dry-run`；`--job-id`、`--session`、时间范围和
+`--source-filter` 只决定扫描范围，不改变写入语义。
+
+| Pipeline 与运行方式 | Landing 数据 | Landing `source_updated_at` | Serving 数据 | ETL checkpoint |
+| --- | --- | --- | --- | --- |
+| `landing_to_serving_pipeline` + 任意手动模式 + `--dry-run` | 只读 | **不变** | 不写；report 中是计划 upsert 数 | 不写 |
+| `landing_to_serving_pipeline` + 任意手动模式正式运行 | 只读 | **不变** | 按 `id` upsert，刷新 `serving_updated_at` | 不写 |
+| `landing_to_serving_pipeline` + incremental + `--dry-run` | 只读 | **不变** | 不写 | 只读并校验，不推进 |
+| `landing_to_serving_pipeline` + incremental 正式运行 | 只读 | **不变** | 按 `id` upsert，刷新 `serving_updated_at` | 成功后推进 |
+| `landing_enrichment_pipeline` + 任意模式 + `--dry-run` | 只读 | **不变** | 不写 | 不写或只读，不推进 |
+| `landing_enrichment_pipeline` + 手动模式正式运行 | 只更新产生非空 diff 的行 | **仅实际更新成功的行改变** | 不写 | 不写 |
+| `landing_enrichment_pipeline` + incremental 正式运行 | 只更新产生非空 diff 的行 | **仅实际更新成功的行改变** | 不写 | 成功后推进 |
+| 同一次命令先 enrichment、再 serving | enrichment 有实际 patch 时更新 | **有实际 landing patch 的行改变** | 后续 serving 立即发布变化后的完整 session | incremental 才推进各自 checkpoint |
+
+“stage 被执行”不等于时间戳一定变化。Landing engine 会先比较 patch 与当前值；patch 为空或
+所有值都相同时，不调用 `update_landing()`，因此不会刷新 `source_updated_at`。反过来，只要
+landing enrichment 对下游有意义的字段发生实际变化，就必须使用默认
+`touch_source_updated_at=True`，让后续 `landing_to_serving_pipeline` 能通过增量扫描发现它。
+
+`landing_to_serving_pipeline` 永远不会修改 landing。它把 landing 的 `source_updated_at`
+原样保留到 serving，并单独刷新 serving 的 `serving_updated_at`。`--force-unsettled` 只把
+本次扫描 cutoff 的稳定延迟设为 0，也不会改变上述写入规则。
+
+手动模式包括：`--job-id`/`--session-id`、`--session JOB SESSION`、
+`--start-time [--end-time]` 和 `--source-filter`。这些模式都不读写全局 checkpoint；只有默认
+incremental 模式会使用 checkpoint。
+
 ## Stage coding contract
 
 每个 stage 继承 `ETLStage`，并声明稳定的元数据：

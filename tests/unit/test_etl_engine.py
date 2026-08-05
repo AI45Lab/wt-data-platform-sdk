@@ -163,6 +163,39 @@ def test_incremental_serving_run_commits_checkpoint_after_upsert():
     assert _checkpoint(store, pipeline).committed_until_ms == 6_000
 
 
+def test_incremental_can_be_limited_to_selected_hash_buckets():
+    rows = [
+        _row(
+            id="bucket-3",
+            session_id="session-3",
+            source_updated_at=1_000,
+            _bucket=3,
+        ),
+        _row(
+            id="bucket-4",
+            session_id="session-4",
+            source_updated_at=1_000,
+            _bucket=4,
+        ),
+    ]
+    client = FakeGatewayClient(rows)
+    store = InMemoryCheckpointStore()
+    pipeline = build_serving_publish_pipeline()
+
+    summary = ETLEngine(client, checkpoint_store=store).run_incremental(
+        pipeline,
+        settle_delay_ms=0,
+        start_from_ms=0,
+        run_started_at_ms=5_000,
+        buckets=[4],
+    )
+
+    assert summary.buckets_scanned == 1
+    assert set(client.serving) == {"bucket-4"}
+    assert _checkpoint(store, pipeline, bucket=3) is None
+    assert _checkpoint(store, pipeline, bucket=4) is not None
+
+
 def test_landing_timestamp_echo_is_harmless_because_diff_is_empty():
     client = FakeGatewayClient(
         [_row(is_trainable=False, source_updated_at=1_000, _bucket=3)]

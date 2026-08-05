@@ -45,8 +45,9 @@ class ETLEngine:
         dry_run: bool = False,
         run_started_at_ms: Optional[int] = None,
         run_id: Optional[str] = None,
+        buckets: Optional[Sequence[int]] = None,
     ) -> RunSummary:
-        """Scan every existing landing HASH bucket from durable checkpoints."""
+        """Scan selected or all existing landing HASH buckets from checkpoints."""
 
         _validate_page_size(page_size)
         if settle_delay_ms < 0:
@@ -66,9 +67,13 @@ class ETLEngine:
 
         summary = self._new_summary(pipeline)
         source_table, target_table = self._table_names(pipeline)
-        buckets = self.client.list_table_partitions(table=source_table)
+        selected_buckets = (
+            list(buckets)
+            if buckets is not None
+            else list(self.client.list_table_partitions(table=source_table))
+        )
         has_failures = False
-        for raw_bucket in buckets:
+        for raw_bucket in selected_buckets:
             if not isinstance(raw_bucket, int):
                 raise CheckpointError(
                     f"v1 incremental ETL requires integer HASH buckets, got {raw_bucket!r}"
