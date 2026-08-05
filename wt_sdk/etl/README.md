@@ -6,10 +6,15 @@ stage，并由引擎统一持久化到 landing 或 serving。
 
 本文既是框架说明，也是所有 ETL stage 贡献者必须遵守的 coding contract。
 
-代码放置约定：引擎、checkpoint、pipeline 编排留在 `wt_sdk/etl/`；可复用业务规则各自
-放在 `wt_sdk/etl/stages/<stage_name>.py`，并从 `stages/__init__.py` 导出；手动/定时
-触发入口只放在 `scripts/etl/`。不要把新框架或业务 stage 放回历史目录
-`scripts/existing_data_etl/`，也不要在 stage 文件 import 时自动连接数据库或执行注册。
+ETL 的 runtime、CLI、运维/检查工具、文档和测试全部收敛在 `wt_sdk/etl/`：业务规则放在
+`stages/`，pipeline 放在 `pipelines/`，入口放在 `cli/`，fixture/只读检查工具放在 `tools/`，
+测试放在 `tests/{unit,integration}`。旧数据迁移/导入脚本归档在 `legacy/`，不属于 v1 引擎，
+并与 `tests/` 一样被 setuptools 排除在发布包之外。任何 stage 文件在 import 时都不得连接
+数据库或执行注册。
+
+普通 SDK 使用者无需 import ETL。ETL 专属第三方依赖必须声明在 `pyproject.toml` 的
+`[project.optional-dependencies].etl`，使用者按需执行 `pip install ".[etl]"`；不得为了某个
+stage 把依赖加入核心 SDK dependencies。ETL tests 由 setuptools 明确排除，不会进入安装包。
 
 ## 核心对象与 factory 语义
 
@@ -22,7 +27,7 @@ stage，并由引擎统一持久化到 landing 或 serving。
   运行的 ETL 实例，也不持有 client、checkpoint 或运行状态。
 - **`ETLEngine`**：真正执行 pipeline 的运行时对象，负责扫描、加载 session、调用 stage、
   写入和 checkpoint。
-- **一次 ETL run**：一个 `scripts/etl/run.py` 进程。它可以通过 `--pipeline` 后的名称列表
+- **一次 ETL run**：一个 `python -m wt_sdk.etl.cli.run` 进程。它可以通过 `--pipeline` 后的名称列表
   加载多条 pipeline，并交给同一个 engine 串行执行。
 
 因此，一个 factory 通常对应“一条可复用的 pipeline 配置”，而不是“一次 ETL 任务
@@ -318,13 +323,13 @@ print([stage.name for stage in ordered_stages])
 列出当前可用 pipeline 文件，不创建 SDK client、不访问 dldb/S3：
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py --list-pipelines
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run --list-pipelines
 ```
 
 只校验一个或多个 pipeline，不创建 SDK client、不访问 dldb/S3，也不要求 profile：
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
   --pipeline landing_to_serving_pipeline \
   --validate-only
 ```
@@ -332,7 +337,7 @@ print([stage.name for stage in ordered_stages])
 列出 factory 最终生成的 stage、版本、输入输出、执行顺序和依赖边：
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
   --pipeline landing_to_serving_pipeline \
   --list-stages
 ```
@@ -564,7 +569,7 @@ checkpoint 的 `last_run_id` 只关联最近一次触碰该 bucket 的执行。�
 
 ```bash
 set -a && source .env && set +a
-.venv-dldb-v1/bin/python scripts/ops/init_etl_checkpoint_table.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.init_checkpoint_tables \
   --db-uri s3://wind-tunnel-etl \
   --confirm-create
 ```
@@ -575,7 +580,7 @@ checkpoint 表，因此无需再写 `--profile test`。命令行 `--profile` 仍
 先做 test dry run：
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
   --pipeline landing_to_serving_pipeline \
   --start-from 2026-08-01T00:00:00Z \
   --dry-run
@@ -592,7 +597,7 @@ checkpoint 表，因此无需再写 `--profile test`。命令行 `--profile` 仍
 > `--list-stages`/`--validate-only`，不要执行下面的真实数据命令。
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
   --pipeline landing_enrichment_pipeline landing_to_serving_pipeline \
   --start-from 2026-08-01T00:00:00Z
 ```
@@ -600,7 +605,7 @@ checkpoint 表，因此无需再写 `--profile test`。命令行 `--profile` 仍
 即时处理一个 session：
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
   --pipeline landing_to_serving_pipeline \
   --job-id 'dataset#harness#model#task#date#owner#extra' \
   --session-id 'session-id'
@@ -609,7 +614,7 @@ checkpoint 表，因此无需再写 `--profile test`。命令行 `--profile` 仍
 一个 job 下立即处理多个 session：
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
   --pipeline landing_to_serving_pipeline \
   --job-id 'job-id' \
   --session-id 'session-1' 'session-2'
@@ -618,7 +623,7 @@ checkpoint 表，因此无需再写 `--profile test`。命令行 `--profile` 仍
 多个 job 各自只处理指定 session：
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
   --pipeline landing_to_serving_pipeline \
   --session 'job-a' 'session-1' \
   --session 'job-b' 'session-9'
@@ -627,7 +632,7 @@ checkpoint 表，因此无需再写 `--profile test`。命令行 `--profile` 仍
 高级条件 backfill：
 
 ```bash
-.venv-dldb-v1/bin/python scripts/etl/run.py \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
   --pipeline landing_to_serving_pipeline \
   --source-filter "is_trainable = true AND agent_model LIKE 'opencode%'" \
   --dry-run

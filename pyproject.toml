@@ -33,12 +33,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# ETL-specific third-party dependencies must be declared here, never in the
+# core dependency list. The v1 engine currently needs no packages beyond the
+# core SDK stack, so this extra intentionally starts empty.
+etl = []
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "black>=23.11.0",
     "ruff>=0.1.6",
 ]
+
+[project.scripts]
+wt-etl = "wt_sdk.etl.cli.run:main"
+wt-etl-init-checkpoints = "wt_sdk.etl.cli.init_checkpoint_tables:main"
+wt-etl-prepare-fixture = "wt_sdk.etl.tools.prepare_real_data_fixture:main"
+wt-etl-inspect-fixture = "wt_sdk.etl.tools.inspect_test_fixture:main"
 
 [project.urls]
 Homepage = "https://github.com/AI45Lab/wt-data-platform-sdk"
@@ -51,7 +61,12 @@ package-dir = {"" = "."}
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["wt_sdk*"]
-exclude = ["wt_data_platform_sdk.egg-info*", "tests*"]
+exclude = [
+    "wt_data_platform_sdk.egg-info*",
+    "tests*",
+    "wt_sdk.etl.legacy*",
+    "wt_sdk.etl.tests*",
+]
 
 [tool.black]
 line-length = 100
@@ -62,7 +77,7 @@ line-length = 100
 target-version = ["py310"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit"]
+testpaths = ["tests/unit", "wt_sdk/etl/tests/unit"]
 markers = [
     "integration: requires a configured DLDB/S3 environment and may write test tables",
 ]

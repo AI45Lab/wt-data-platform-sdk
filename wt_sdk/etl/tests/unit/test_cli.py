@@ -3,8 +3,7 @@ import sys
 
 import pytest
 
-import scripts.etl.run as run_module
-from test_etl_pipeline import NormalizeClaudeMessagesStage
+import wt_sdk.etl.cli.run as run_module
 from wt_sdk.etl import (
     ETLRunFailed,
     PipelineMode,
@@ -13,6 +12,7 @@ from wt_sdk.etl import (
     SessionKey,
     build_serving_publish_pipeline,
 )
+from wt_sdk.etl.tests.unit.test_pipeline import NormalizeClaudeMessagesStage
 
 
 def test_builtin_pipeline_short_name_is_directly_loadable():

@@ -3,19 +3,14 @@
 Main ETL script for ingesting LLM benchmark data from S3 into landing table.
 
 Usage:
-    python scripts/existing_data_etl/run_landing_etl.py --s3-prefix s3://wind-tunnel-landing/liuqihua/safety_image_ch/
+    python -m wt_sdk.etl.legacy.run_landing_etl --s3-prefix s3://wind-tunnel-landing/liuqihua/safety_image_ch/
 
 This script processes LLM benchmark data from S3 and ingests it into the landing table.
 """
-import sys
 import argparse
 from loguru import logger
-from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from scripts.existing_data_etl.ingest_landing_data import LandingDataETL
+from wt_sdk.etl.legacy.ingest_landing_data import LandingDataETL
 
 
 def main():
@@ -25,18 +20,18 @@ def main():
         epilog="""
 Examples:
   # Dry run (validate only)
-  python scripts/existing_data_etl/run_landing_etl.py --dry-run
+  python -m wt_sdk.etl.legacy.run_landing_etl --dry-run
 
   # Skip blob verification
-  python scripts/existing_data_etl/run_landing_etl.py --skip-blob-check
+  python -m wt_sdk.etl.legacy.run_landing_etl --skip-blob-check
 
   # Custom S3 prefix with batch size
-  python scripts/existing_data_etl/run_landing_etl.py \\
+  python -m wt_sdk.etl.legacy.run_landing_etl \\
       --s3-prefix "s3://wind-tunnel-landing/owner/dataset/type/2025-01-04_v1/" \\
       --batch-size 200
 
   # Ingest from specific path (make sure to set --s3-prefix)
-  python scripts/existing_data_etl/run_landing_etl.py \\
+  python -m wt_sdk.etl.legacy.run_landing_etl \\
       --s3-prefix "s3://wind-tunnel-landing/owner/dataset/type/dt_v1/"
         """
     )

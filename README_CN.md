@@ -14,8 +14,15 @@ dldb 当前通过 `pyproject.toml` 中声明的公开仓库
 
 ```bash
 python -m pip install -e .
-python -m pip install -e ".[dev]"  # 开发和测试依赖
+python -m pip install -e ".[etl]"      # 核心 SDK 加 ETL 专属依赖
+python -m pip install -e ".[dev,etl]"  # 完整仓库开发环境
 ```
+
+ETL 子系统统一放在 `wt_sdk/etl/`，核心 SDK 的 import 不会加载它。只有需要 ETL 时才安装
+ETL 专属依赖：
+
+ETL v1 目前没有在核心 SDK 依赖之外新增第三方包；以后新增的 ETL 专属依赖必须只放进该
+extra，不能加入核心依赖列表。
 
 ## 集成前配置
 
@@ -317,12 +324,12 @@ ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_upda
 仓库现已包含 ETL v1 引擎、按 HASH bucket 持久化的 checkpoint、手动 backfill 模式，
 以及内置的 chosen-trace/tags stage。贡献者必须遵守
 [`wt_sdk/etl/README.md`](wt_sdk/etl/README.md) 中的 stage contract 与接入规范；运维
-入口为 [`scripts/etl/run.py`](scripts/etl/run.py)。
+入口统一由 ETL module CLI 提供。
 
 无需连接数据库即可列出当前已注册的 pipeline：
 
 ```bash
-python scripts/etl/run.py --list-pipelines
+python -m wt_sdk.etl.cli.run --list-pipelines
 ```
 
 serving 数据发布完成后，正式离线导出请使用 `export_data_batches()`。它默认查询
@@ -487,6 +494,9 @@ pytest -q
 ```bash
 set -a && source .env && set +a
 WT_SDK_RUN_INTEGRATION=1 python -m pytest -q tests/integration
+
+# 仅运行 ETL 的真实集成测试
+WT_SDK_RUN_INTEGRATION=1 python -m pytest -q wt_sdk/etl/tests/integration
 ```
 
 `WT_SDK_RUN_INTEGRATION=1` 是 pytest 的安全开关，不是 SDK 运行时配置。
@@ -591,6 +601,7 @@ python scripts/ops/maintain_table_indexes.py \
 
 ```text
 wt_sdk/                 对外 SDK 包
+wt_sdk/etl/             可选 ETL runtime、CLI、工具、文档、测试与历史归档
 scripts/ops/            运维命令
 scripts/inspect/        只读诊断工具
 scripts/dev/            可随时重建的测试表配置

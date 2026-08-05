@@ -15,8 +15,15 @@ declared in `pyproject.toml`. The supported Python versions are 3.10 through
 
 ```bash
 python -m pip install -e .
-python -m pip install -e ".[dev]"  # Development and test dependencies
+python -m pip install -e ".[etl]"      # Core SDK plus ETL-only dependencies
+python -m pip install -e ".[dev,etl]"  # Full repository development
 ```
+
+The ETL subsystem is isolated under `wt_sdk/etl/`. Core SDK imports never load
+it. Install ETL-specific dependencies only when needed:
+
+ETL v1 currently adds no third-party packages beyond the core SDK stack; the
+extra is the required boundary for future ETL-only dependencies.
 
 ## Configure Before Integrating
 
@@ -333,13 +340,13 @@ also stamp `serving_updated_at`.
 The repository now includes the ETL v1 engine, durable per-bucket checkpoints,
 manual backfill modes, and the built-in chosen-trace/tag stages. Contributors
 must follow the stage contract and integration guide in
-[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md); operational execution starts at
-[`scripts/etl/run.py`](scripts/etl/run.py).
+[`wt_sdk/etl/README.md`](wt_sdk/etl/README.md); operational execution uses the
+ETL module CLI.
 
 List the registered pipelines without connecting to any database:
 
 ```bash
-python scripts/etl/run.py --list-pipelines
+python -m wt_sdk.etl.cli.run --list-pipelines
 ```
 
 For a formal offline export after serving data has been published, use
@@ -514,6 +521,9 @@ chooses the database. Both tables must use the current `HASH(job_id)` schema.
 ```bash
 set -a && source .env && set +a
 WT_SDK_RUN_INTEGRATION=1 python -m pytest -q tests/integration
+
+# ETL-only real integration tests
+WT_SDK_RUN_INTEGRATION=1 python -m pytest -q wt_sdk/etl/tests/integration
 ```
 
 WT_SDK_RUN_INTEGRATION=1 is a pytest safety switch, not an SDK runtime setting.
@@ -618,6 +628,7 @@ scripts/dev contains disposable test-table setup helpers. scripts/migrations con
 
 ```text
 wt_sdk/                 Public SDK package
+wt_sdk/etl/             Optional ETL runtime, CLI, tools, docs, tests, and legacy archive
 scripts/ops/            Operational commands
 scripts/inspect/        Read-only diagnostics
 scripts/dev/            Disposable test-table setup

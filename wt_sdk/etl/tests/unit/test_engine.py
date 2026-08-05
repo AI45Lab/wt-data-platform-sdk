@@ -11,7 +11,7 @@ from wt_sdk.etl import (
     SessionKey,
 )
 
-from test_etl_pipeline import NormalizeClaudeMessagesStage, _row
+from wt_sdk.etl.tests.unit.test_pipeline import NormalizeClaudeMessagesStage, _row
 from wt_sdk.etl.registry import build_serving_publish_pipeline
 
 

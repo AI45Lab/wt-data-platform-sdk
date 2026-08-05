@@ -6,10 +6,8 @@ the SDK's supported import API.
 - `ops/`: table initialization, cleanup, index maintenance, and table management.
 - `inspect/`: read-only inspection helpers for data, schemas, indexes, tags, and duplicate IDs.
 - `dev/`: helpers for initializing disposable test tables.
-- `etl/`: the ETL v1 runner; stage implementations and contributor rules live
-  in [`wt_sdk/etl/README.md`](../wt_sdk/etl/README.md).
-- `existing_data_etl/`: historical ETL code retained for reference; it is not
-  the new provider-normalization ETL.
+- ETL runtime, commands, tools, tests, and archived historical ETL all live in
+  [`wt_sdk/etl/`](../wt_sdk/etl/); do not add ETL entry points back under `scripts/`.
 - `migrations/`: completed, one-time migrations retained for operational history.
 
 Use the same maintenance entry point for the two production and two test

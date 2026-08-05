@@ -1,4 +1,4 @@
-# LLM Data ETL
+# LLM Data ETL (Legacy)
 
 > Historical ETL for previously existing datasets. It is not maintained against
 > the current landing/serving schema and must not be used as the new serving ETL.
@@ -60,21 +60,21 @@ print(f"Ingested {summary['records_ingested']} records")
 
 ```bash
 # Basic run
-python scripts/existing_data_etl/run_etl.py
+python -m wt_sdk.etl.legacy.run_landing_etl
 
 # Dry run (validate but don't insert)
-python scripts/existing_data_etl/run_etl.py --dry-run
+python -m wt_sdk.etl.legacy.run_landing_etl --dry-run
 
 # Skip blob verification
-python scripts/existing_data_etl/run_etl.py --skip-blob-check
+python -m wt_sdk.etl.legacy.run_landing_etl --skip-blob-check
 
 # Custom S3 prefix with batch size
-python scripts/existing_data_etl/run_etl.py \
+python -m wt_sdk.etl.legacy.run_landing_etl \
     --s3-prefix "s3://wind-tunnel-landing/owner/dataset/type/2025-01-04_v1/" \
     --batch-size 200
 
 # Disable idempotence (allow duplicates)
-python scripts/existing_data_etl/run_etl.py --allow-duplicates
+python -m wt_sdk.etl.legacy.run_landing_etl --allow-duplicates
 ```
 
 ### Command Line Options
@@ -170,7 +170,7 @@ This prevents duplicate data when re-running the ETL, even if records don't have
 **Example:**
 ```bash
 # First run: inserts 500 records
-python scripts/existing_data_etl/run_etl.py
+python -m wt_sdk.etl.legacy.run_landing_etl
 
 # Fails after 300 records due to network error (502 Bad Gateway)
 
@@ -179,12 +179,12 @@ python scripts/existing_data_etl/run_etl.py
 # - Skips the 300 existing records (detected via ID check)
 # - Inserts the remaining 200 records
 # - No duplicates created!
-python scripts/existing_data_etl/run_etl.py
+python -m wt_sdk.etl.legacy.run_landing_etl
 ```
 
 **To disable idempotence** (allow duplicates - not recommended):
 ```bash
-python scripts/existing_data_etl/run_etl.py --allow-duplicates
+python -m wt_sdk.etl.legacy.run_landing_etl --allow-duplicates
 ```
 
 ## Validation
@@ -353,12 +353,12 @@ ETL Summary:
 
 When blob verification is enabled and missing blobs are detected, the ETL automatically generates a detailed report file instead of logging all missing blob URLs to the console.
 
-**Report location:** `scripts/existing_data_etl/output/{data_owner}/missing_blobs_{dataset}_{timestamp}.txt`
+**Report location:** `wt_sdk/etl/legacy/output/{data_owner}/missing_blobs_{dataset}_{timestamp}.txt`
 
 **Directory structure:** Reports are organized by data owner name for easy management
-- Example: `scripts/existing_data_etl/output/liuqihua/missing_blobs_safety_image_ch_RL_20261218_v1_20260105_154108.txt`
-- All reports from `liuqihua` are in `scripts/existing_data_etl/output/liuqihua/`
-- All reports from `zhangsan` are in `scripts/existing_data_etl/output/zhangsan/`
+- Example: `wt_sdk/etl/legacy/output/liuqihua/missing_blobs_safety_image_ch_RL_20261218_v1_20260105_154108.txt`
+- All reports from `liuqihua` are in `wt_sdk/etl/legacy/output/liuqihua/`
+- All reports from `zhangsan` are in `wt_sdk/etl/legacy/output/zhangsan/`
 
 **Filename format:**
 - Format: `missing_blobs_{dataset}_{timestamp}.txt`
@@ -399,7 +399,7 @@ blobs/2220_030922_A_ZR166_022.PNG
 ```
 ================================================================================
 Missing Blobs Summary: 3926 unique files not found (total references: 5000)
-Full list written to: scripts/existing_data_etl/output/liuqihua/missing_blobs_...txt
+Full list written to: wt_sdk/etl/legacy/output/liuqihua/missing_blobs_...txt
 ================================================================================
 ```
 

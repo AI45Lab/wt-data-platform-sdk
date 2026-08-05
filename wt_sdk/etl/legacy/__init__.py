@@ -1,4 +1,4 @@
-"""ETL scripts for data ingestion operations."""
+"""Legacy one-off ETL scripts retained for operational history."""
 from .ingest_landing_data import LandingDataETL
 from .ingest_serving_data import ServingDataETL
 

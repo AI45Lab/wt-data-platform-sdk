@@ -5,7 +5,7 @@ Main ETL script for ingesting data from S3 into serving table.
 This is a one-time job to ingest tagged data directly into wind_tunnel_serving table.
 
 Usage:
-    python scripts/existing_data_etl/run_serving_etl.py --s3-prefix s3://wind-tunnel-landing/owner/dataset/type/dt_v1/
+    python -m wt_sdk.etl.legacy.run_serving_etl --s3-prefix s3://wind-tunnel-landing/owner/dataset/type/dt_v1/
 
 For serving table ingestion:
 - search_text: empty (None)
@@ -14,15 +14,10 @@ For serving table ingestion:
 - blob_manifest: preserved from source or extracted from content
 - meta_json: includes s3_source_path for tracking
 """
-import sys
 import argparse
 from loguru import logger
-from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from scripts.existing_data_etl.ingest_serving_data import ServingDataETL
+from wt_sdk.etl.legacy.ingest_serving_data import ServingDataETL
 
 
 def main():
@@ -32,18 +27,18 @@ def main():
         epilog="""
 Examples:
   # Dry run (validate only)
-  python scripts/existing_data_etl/run_serving_etl.py --dry-run
+  python -m wt_sdk.etl.legacy.run_serving_etl --dry-run
 
   # Skip blob verification
-  python scripts/existing_data_etl/run_serving_etl.py --skip-blob-check
+  python -m wt_sdk.etl.legacy.run_serving_etl --skip-blob-check
 
   # Custom S3 prefix with batch size
-  python scripts/existing_data_etl/run_serving_etl.py \\
+  python -m wt_sdk.etl.legacy.run_serving_etl \\
       --s3-prefix "s3://wind-tunnel-landing/owner/dataset/type/2025-01-04_v1/" \\
       --batch-size 200
 
   # Allow duplicates (skip idempotence check)
-  python scripts/existing_data_etl/run_serving_etl.py --allow-duplicates
+  python -m wt_sdk.etl.legacy.run_serving_etl --allow-duplicates
         """
     )
     parser.add_argument(

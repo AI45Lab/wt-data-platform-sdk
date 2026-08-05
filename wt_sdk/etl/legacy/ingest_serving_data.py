@@ -1,5 +1,5 @@
 """
-ETL module for ingesting data from S3 into the serving table.
+Legacy ETL module for ingesting data from S3 into the serving table.
 
 This is a one-time job to ingest data with tags directly into wind_tunnel_serving table.
 Data can come from:

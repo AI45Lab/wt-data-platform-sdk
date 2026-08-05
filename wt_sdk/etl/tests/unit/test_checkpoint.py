@@ -3,7 +3,7 @@ import sys
 import pandas as pd
 import pytest
 
-import scripts.ops.init_etl_checkpoint_table as init_checkpoint_script
+import wt_sdk.etl.cli.init_checkpoint_tables as init_checkpoint_script
 import wt_sdk.etl.checkpoint as checkpoint_module
 from wt_sdk.etl import Checkpoint, InMemoryCheckpointStore
 from wt_sdk.etl.checkpoint import (
@@ -241,7 +241,7 @@ def test_init_script_creates_test_and_production_tables_by_default(
         sys,
         "argv",
         [
-            "init_etl_checkpoint_table.py",
+            "init_checkpoint_tables.py",
             "--db-uri",
             "s3://wind-tunnel-etl",
             "--confirm-create",

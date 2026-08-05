@@ -1,11 +1,11 @@
 """Run one or more contributed ETL pipelines serially.
 
 Examples:
-  python scripts/etl/run.py \
+  python -m wt_sdk.etl.cli.run \
     --pipeline landing_enrichment_pipeline landing_to_serving_pipeline \
     --start-from 2026-08-01T00:00:00Z
 
-  python scripts/etl/run.py \
+  python -m wt_sdk.etl.cli.run \
     --pipeline landing_to_serving_pipeline \
     --job-id job-a job-b
 """

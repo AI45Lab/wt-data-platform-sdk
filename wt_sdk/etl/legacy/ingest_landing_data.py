@@ -709,7 +709,7 @@ class LandingDataETL:
         else:
             data_owner = "unknown"
 
-        # Create output directory structure: scripts/existing_data_etl/output/{data_owner}/
+        # Create output directory structure: wt_sdk/etl/legacy/output/{data_owner}/
         output_dir = Path(__file__).parent / "output" / data_owner
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -791,7 +791,7 @@ class LandingDataETL:
         else:
             data_owner = "unknown"
 
-        # Create output directory structure: scripts/existing_data_etl/output/{data_owner}/
+        # Create output directory structure: wt_sdk/etl/legacy/output/{data_owner}/
         output_dir = Path(__file__).parent / "output" / data_owner
         output_dir.mkdir(parents=True, exist_ok=True)
 

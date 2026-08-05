@@ -1,4 +1,4 @@
-"""Safely create the ETL checkpoint control table if it does not exist."""
+"""Safely create the ETL checkpoint control tables if they do not exist."""
 
 import argparse
 
