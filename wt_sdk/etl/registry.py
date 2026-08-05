@@ -44,34 +44,35 @@ class PipelineRegistry:
 
 
 def build_serving_publish_pipeline(
-    claude_stage: ETLStage,
+    normalization_stage: ETLStage | None = None,
     *,
     version: str = "1",
 ) -> PipelineDefinition:
-    """Build the canonical v1 serving pipeline around a contributed Claude stage."""
+    """Build the serving pipeline with an optional provider normalization stage."""
 
-    if claude_stage.name != "normalize_claude_messages":
-        raise PipelineConfigurationError(
-            "the contributed Claude stage must be named 'normalize_claude_messages'"
-        )
-    if "messages" not in claude_stage.output_fields:
-        raise PipelineConfigurationError(
-            "the contributed Claude stage must declare 'messages' as an output field"
-        )
+    stages: list[ETLStage] = []
+    if normalization_stage is not None:
+        if normalization_stage.name != "normalize_claude_messages":
+            raise PipelineConfigurationError(
+                "the contributed Claude stage must be named 'normalize_claude_messages'"
+            )
+        if "messages" not in normalization_stage.output_fields:
+            raise PipelineConfigurationError(
+                "the contributed Claude stage must declare 'messages' as an output field"
+            )
+        stages.append(normalization_stage)
+    stages.extend((BuildChosenTraceStage(), DeriveJobTagsStage()))
 
-    def select_trainable_claude(record: Record, context: StageContext) -> bool:
-        return record.get("is_trainable") is True and claude_stage.applies(record, context)
+    def select_trainable(record: Record, context: StageContext) -> bool:
+        _ = context
+        return record.get("is_trainable") is True
 
     return PipelineDefinition(
         name="serving_publish",
         version=version,
         mode=PipelineMode.SERVING,
-        stages=(
-            claude_stage,
-            BuildChosenTraceStage(),
-            DeriveJobTagsStage(),
-        ),
-        record_selector=select_trainable_claude,
+        stages=tuple(stages),
+        record_selector=select_trainable,
     )
 
 

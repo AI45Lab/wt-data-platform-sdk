@@ -106,6 +106,7 @@ def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
         target_table="serving_test",
         bucket=3,
         committed_until_ms=5_000,
+        last_run_id="serving_publish__v1__run-1",
         status="IDLE",
         updated_at_ms=6_000,
     )

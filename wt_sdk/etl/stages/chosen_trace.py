@@ -11,7 +11,6 @@ class BuildChosenTraceStage(ETLStage):
     version = "1"
     required_fields = ("is_trainable", "messages", "response")
     output_fields = ("chosen_trace",)
-    dependencies = ("normalize_claude_messages",)
 
     def applies(self, record: Record, context: StageContext) -> bool:
         _ = context

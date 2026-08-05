@@ -2,5 +2,10 @@
 
 from .chosen_trace import BuildChosenTraceStage
 from .job_tags import DeriveJobTagsStage
+from .trainability import UpdateIsTrainableStage
 
-__all__ = ["BuildChosenTraceStage", "DeriveJobTagsStage"]
+__all__ = [
+    "BuildChosenTraceStage",
+    "DeriveJobTagsStage",
+    "UpdateIsTrainableStage",
+]

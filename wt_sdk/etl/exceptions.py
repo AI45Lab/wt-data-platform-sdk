@@ -19,3 +19,14 @@ class StageTransformError(ETLError):
 
 class CheckpointError(ETLError):
     """Raised when durable checkpoint state is missing or inconsistent."""
+
+
+class ETLRunFailed(ETLError):
+    """Raised after recoverable row failures have been collected for a run."""
+
+    def __init__(self, summary) -> None:
+        self.summary = summary
+        super().__init__(
+            f"pipeline {summary.pipeline_name!r} completed with "
+            f"{summary.failed_rows} failed row(s)"
+        )

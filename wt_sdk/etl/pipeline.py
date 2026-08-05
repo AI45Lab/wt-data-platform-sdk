@@ -1,6 +1,7 @@
 """Pipeline definition, dependency ordering, validation, and pure execution."""
 
-from collections import defaultdict, deque
+import heapq
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -14,7 +15,7 @@ from .exceptions import (
     SessionValidationError,
     StageTransformError,
 )
-from .models import LandingRowPatch, PipelineMode, SessionResult
+from .models import LandingRowPatch, PipelineMode, RecordFailure, SessionResult
 from .stage import ETLStage, Record, SessionKey, StageContext
 
 
@@ -105,7 +106,12 @@ class PipelineDefinition:
             "edges": edges,
         }
 
-    def process_session(self, rows: Sequence[Mapping[str, object]]) -> SessionResult:
+    def process_session(
+        self,
+        rows: Sequence[Mapping[str, object]],
+        *,
+        collect_failures: bool = False,
+    ) -> SessionResult:
         ordered_rows, session_key = _validate_and_order_session(rows)
         original_session = tuple(_freeze(dict(row)) for row in ordered_rows)
         context = StageContext(
@@ -117,78 +123,104 @@ class PipelineDefinition:
 
         landing_patches: list[LandingRowPatch] = []
         serving_records: list[ServingRecord] = []
+        failures: list[RecordFailure] = []
         selected_rows = 0
+        successful_rows = 0
 
         for source_row in ordered_rows:
             original = dict(source_row)
-            if not _evaluate_predicate(
-                self.record_selector,
-                original,
-                context,
-                label=f"pipeline '{self.name}' selector",
-            ):
-                continue
-            selected_rows += 1
-            working = dict(original)
-            executed_stages: set[str] = set()
-
-            for stage in self.ordered_stages:
+            failure_stage = "__selector__"
+            try:
                 if not _evaluate_predicate(
-                    stage.applies,
-                    working,
+                    self.record_selector,
+                    original,
                     context,
-                    label=f"stage '{stage.name}' applies",
+                    label=f"pipeline '{self.name}' selector",
                 ):
                     continue
-                skipped_dependencies = set(stage.dependencies) - executed_stages
-                if skipped_dependencies:
-                    raise StageTransformError(
-                        f"stage '{stage.name}' applies but its dependencies did not run: "
-                        f"{sorted(skipped_dependencies)} for record {working.get('id')!r}"
-                    )
-                missing = [field for field in stage.required_fields if field not in working]
-                if missing:
-                    raise StageTransformError(
-                        f"stage '{stage.name}' missing required fields {missing} "
-                        f"for record {working.get('id')!r}"
-                    )
-                try:
-                    patch = stage.transform(deepcopy(working), context)
-                except StageTransformError:
-                    raise
-                except Exception as exc:
-                    raise StageTransformError(
-                        f"stage '{stage.name}' failed for record {working.get('id')!r}: {exc}"
-                    ) from exc
-                _validate_stage_patch(stage, patch)
-                working.update(patch)
-                executed_stages.add(stage.name)
+                selected_rows += 1
+                working = dict(original)
+                executed_stages: set[str] = set()
 
-            if self.mode is PipelineMode.LANDING:
-                changed = {
-                    key: value
-                    for key, value in working.items()
-                    if key not in IMMUTABLE_ETL_FIELDS and original.get(key) != value
-                }
-                if changed:
-                    landing_patches.append(
-                        LandingRowPatch(
-                            record_id=str(original["id"]),
-                            job_id=session_key.job_id,
-                            session_id=session_key.session_id,
-                            updates=changed,
+                for stage in self.ordered_stages:
+                    failure_stage = stage.name
+                    if not _evaluate_predicate(
+                        stage.applies,
+                        working,
+                        context,
+                        label=f"stage '{stage.name}' applies",
+                    ):
+                        continue
+                    skipped_dependencies = set(stage.dependencies) - executed_stages
+                    if skipped_dependencies:
+                        raise StageTransformError(
+                            f"stage '{stage.name}' applies but its dependencies did not run: "
+                            f"{sorted(skipped_dependencies)} for record {working.get('id')!r}"
                         )
+                    missing = [
+                        field for field in stage.required_fields if field not in working
+                    ]
+                    if missing:
+                        raise StageTransformError(
+                            f"stage '{stage.name}' missing required fields {missing} "
+                            f"for record {working.get('id')!r}"
+                        )
+                    try:
+                        patch = stage.transform(deepcopy(working), context)
+                    except StageTransformError:
+                        raise
+                    except Exception as exc:
+                        raise StageTransformError(
+                            f"stage '{stage.name}' failed for record "
+                            f"{working.get('id')!r}: {exc}"
+                        ) from exc
+                    _validate_stage_patch(stage, patch)
+                    working.update(patch)
+                    executed_stages.add(stage.name)
+
+                failure_stage = "__output_validation__"
+                if self.mode is PipelineMode.LANDING:
+                    changed = {
+                        key: value
+                        for key, value in working.items()
+                        if key not in IMMUTABLE_ETL_FIELDS and original.get(key) != value
+                    }
+                    if changed:
+                        landing_patches.append(
+                            LandingRowPatch(
+                                record_id=str(original["id"]),
+                                job_id=session_key.job_id,
+                                session_id=session_key.session_id,
+                                updates=changed,
+                            )
+                        )
+                else:
+                    working["serving_updated_at"] = None
+                    serving_records.append(ServingRecord(**working))
+            except Exception as exc:
+                if not collect_failures:
+                    raise
+                failures.append(
+                    RecordFailure(
+                        record_id=_optional_record_id(original.get("id")),
+                        job_id=session_key.job_id,
+                        session_id=session_key.session_id,
+                        stage_name=failure_stage,
+                        error_type=type(exc).__name__,
+                        message=str(exc),
                     )
-            else:
-                working["serving_updated_at"] = None
-                serving_records.append(ServingRecord(**working))
+                )
+                continue
+            successful_rows += 1
 
         return SessionResult(
             session_key=session_key,
             source_rows=len(ordered_rows),
             selected_rows=selected_rows,
+            successful_rows=successful_rows,
             landing_patches=tuple(landing_patches),
             serving_records=tuple(serving_records),
+            failures=tuple(failures),
         )
 
 
@@ -265,15 +297,21 @@ def _order_and_validate_stages(stages: Sequence[ETLStage]) -> tuple[ETLStage, ..
             indegree[stage.name] += 1
             downstream[dependency].append(stage.name)
 
-    queue = deque(stage.name for stage in stages if indegree[stage.name] == 0)
+    declaration_order = {stage.name: index for index, stage in enumerate(stages)}
+    queue = [
+        (declaration_order[stage.name], stage.name)
+        for stage in stages
+        if indegree[stage.name] == 0
+    ]
+    heapq.heapify(queue)
     ordered: list[ETLStage] = []
     while queue:
-        name = queue.popleft()
+        _, name = heapq.heappop(queue)
         ordered.append(by_name[name])
         for child in downstream[name]:
             indegree[child] -= 1
             if indegree[child] == 0:
-                queue.append(child)
+                heapq.heappush(queue, (declaration_order[child], child))
 
     if len(ordered) != len(stages):
         raise PipelineConfigurationError("stage dependency graph contains a cycle")
@@ -312,6 +350,13 @@ def _freeze(value: object) -> object:
     if isinstance(value, set):
         return frozenset(_freeze(item) for item in value)
     return value
+
+
+def _optional_record_id(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _validate_stage_patch(stage: ETLStage, patch: object) -> None:

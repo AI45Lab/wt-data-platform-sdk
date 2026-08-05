@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from wt_sdk.etl import (
     ETLEngine,
+    ETLRunFailed,
     ETLStage,
     InMemoryCheckpointStore,
     PipelineDefinition,
@@ -140,6 +141,7 @@ def test_incremental_serving_run_commits_checkpoint_after_upsert():
         page_size=1,
         start_from_ms=0,
         run_started_at_ms=5_000,
+        run_id="serving-publish-run-1",
     )
 
     assert summary.discovery_rows == 2
@@ -149,6 +151,7 @@ def test_incremental_serving_run_commits_checkpoint_after_upsert():
     checkpoint = _checkpoint(store, pipeline)
     assert checkpoint.committed_until_ms == 5_000
     assert checkpoint.status == "IDLE"
+    assert checkpoint.last_run_id == "serving-publish-run-1"
     assert checkpoint.active_window_end_ms is None
 
     second = engine.run_incremental(
@@ -211,6 +214,44 @@ def test_manual_range_does_not_create_or_advance_checkpoint():
     assert _checkpoint(store, pipeline) is None
 
 
+def test_manual_source_filter_loads_each_full_session_only_once_across_pages():
+    rows = [
+        _row(id="row-1", step_id=0, session_id="session-1", _bucket=3),
+        _row(id="row-2", step_id=1, session_id="session-1", _bucket=3),
+        _row(id="row-3", step_id=0, session_id="session-2", _bucket=3),
+    ]
+    client = FakeGatewayClient(rows)
+    pipeline = build_serving_publish_pipeline()
+
+    summary = ETLEngine(client).run_filter(
+        pipeline,
+        "session_id = 'session-1'",
+        page_size=1,
+        dry_run=True,
+    )
+
+    assert summary.discovery_rows == 2
+    assert summary.sessions_processed == 1
+    assert summary.source_rows == 2
+    assert summary.successful_rows == 2
+
+
+def test_multiple_jobs_are_supported_in_one_manual_run():
+    first = _row(id="row-1", job_id="job-a", session_id="session-a", _bucket=3)
+    second = _row(id="row-2", job_id="job-b", session_id="session-b", _bucket=4)
+    client = FakeGatewayClient([first, second])
+    pipeline = build_serving_publish_pipeline()
+
+    summary = ETLEngine(client).run_jobs(
+        pipeline,
+        ["job-a", "job-b"],
+        dry_run=True,
+    )
+
+    assert summary.sessions_processed == 2
+    assert summary.source_rows == 2
+
+
 def test_failed_write_keeps_resumable_active_window_and_does_not_advance_watermark():
     client = FailingServingClient([_row(source_updated_at=1_000, _bucket=3)])
     store = InMemoryCheckpointStore()
@@ -224,8 +265,11 @@ def test_failed_write_keeps_resumable_active_window_and_does_not_advance_waterma
             start_from_ms=0,
             run_started_at_ms=5_000,
         )
-    except RuntimeError as exc:
-        assert str(exc) == "simulated serving failure"
+    except ETLRunFailed as exc:
+        assert exc.summary.failed_rows == 1
+        assert exc.summary.successful_rows == 0
+        assert exc.summary.failures[0].record_id == "row-1"
+        assert exc.summary.failures[0].stage_name == "__serving_sink__"
     else:
         raise AssertionError("expected the simulated serving write to fail")
 

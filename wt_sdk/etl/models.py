@@ -23,12 +23,24 @@ class LandingRowPatch:
 
 
 @dataclass(frozen=True)
+class RecordFailure:
+    record_id: Optional[str]
+    job_id: str
+    session_id: str
+    stage_name: str
+    error_type: str
+    message: str
+
+
+@dataclass(frozen=True)
 class SessionResult:
     session_key: SessionKey
     source_rows: int
     selected_rows: int
+    successful_rows: int
     landing_patches: tuple[LandingRowPatch, ...] = ()
     serving_records: tuple[ServingRecord, ...] = ()
+    failures: tuple[RecordFailure, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -43,20 +55,33 @@ class RunSummary:
     buckets_scanned: int = 0
     discovery_rows: int = 0
     sessions_processed: int = 0
+    sessions_failed: int = 0
     source_rows: int = 0
     selected_rows: int = 0
+    successful_rows: int = 0
+    failed_rows: int = 0
     landing_rows_updated: int = 0
     serving_rows_upserted: int = 0
+    failures: list[RecordFailure] = field(default_factory=list)
     dirty_sessions: set[SessionKey] = field(default_factory=set)
 
     def add_session(self, result: SessionResult, *, dry_run: bool) -> None:
         self.sessions_processed += 1
         self.source_rows += result.source_rows
         self.selected_rows += result.selected_rows
+        self.successful_rows += result.successful_rows
+        self.failed_rows += len(result.failures)
+        self.failures.extend(result.failures)
+        if result.failures:
+            self.sessions_failed += 1
         self.landing_rows_updated += len(result.landing_patches)
         self.serving_rows_upserted += len(result.serving_records)
         if result.landing_patches and not dry_run:
             self.dirty_sessions.add(result.session_key)
+
+    def add_failure(self, failure: RecordFailure) -> None:
+        self.failed_rows += 1
+        self.failures.append(failure)
 
     def merge(self, other: "RunSummary") -> None:
         if (
@@ -72,11 +97,19 @@ class RunSummary:
         self.buckets_scanned += other.buckets_scanned
         self.discovery_rows += other.discovery_rows
         self.sessions_processed += other.sessions_processed
+        self.sessions_failed += other.sessions_failed
         self.source_rows += other.source_rows
         self.selected_rows += other.selected_rows
+        self.successful_rows += other.successful_rows
+        self.failed_rows += other.failed_rows
         self.landing_rows_updated += other.landing_rows_updated
         self.serving_rows_upserted += other.serving_rows_upserted
+        self.failures.extend(other.failures)
         self.dirty_sessions.update(other.dirty_sessions)
+
+    @property
+    def status(self) -> str:
+        return "FAILED" if self.failed_rows else "SUCCEEDED"
 
 
 @dataclass(frozen=True)
@@ -87,6 +120,7 @@ class Checkpoint:
     target_table: str
     bucket: int
     committed_until_ms: int
+    last_run_id: Optional[str] = None
     active_window_start_ms: Optional[int] = None
     active_window_end_ms: Optional[int] = None
     last_processed_id: Optional[str] = None

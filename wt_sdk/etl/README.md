@@ -40,6 +40,15 @@ pipeline，应创建一个名称和版本清晰的独立 factory，并保证剩�
 执行完整业务规则的数据标记为已处理。仅用于一次性实验的变体应优先使用 job/session 或
 时间范围手动模式，并使用独立 pipeline identity。
 
+v1 也不做全局目录扫描来“发现所有 pipeline”。一次运行究竟包含哪些 pipeline，以命令行
+中重复传入的 `--pipeline-factory` 为准；`--list-stages` 会列出这些 factory 实际生成的
+pipeline 和 stage。仓库目前提供两个可以直接传给 CLI 的无参数 factory：
+
+- `wt_sdk.etl.pipelines:build_landing_pipeline`：`landing_trainability`，其中唯一业务 stage
+  `UpdateIsTrainableStage` 已留好 TODO，贡献者实现前不能真实执行。
+- `wt_sdk.etl.pipelines:build_serving_pipeline`：当前 OpenCode 数据可直接运行的
+  `serving_publish`，包含 chosen trace 和 tags 两个 stage。
+
 ## v1 的边界
 
 v1 只有一个执行引擎，但支持两类 pipeline：
@@ -72,6 +81,9 @@ v1 不做以下事情：
 - 一个 session 最多对应一个非空 `env_id`。
 - discovery 只读取 `id/job_id/session_id/source_updated_at`，发现任意一行变化后再完整
   加载整个 session。这保证 session 级 stage 看见完整轨迹。
+- `--page-size` 只限制每页 discovery 轻量行数，不限制完整 session 大小。同一 session 的
+  discovery 行可以落在不同 page；引擎在当前 bucket/run 内按 `(job_id, session_id)` 去重，
+  第一次发现时就重新加载整个 session，因此不会只处理半条轨迹，也不会因跨页重复处理。
 - `source_updated_at` 表示 landing 来源数据最后一次业务变化；landing enrichment 也是
   会影响 serving 的业务变化，因此实际 patch 成功后必须刷新它。
 - landing pipeline 下次可能再次扫描到自己更新的行。这是预期行为。引擎先做字段 diff，
@@ -135,35 +147,56 @@ class ExampleStage(ETLStage):
 
 ## 当前 pipeline 与 stage 清单
 
-框架本身没有预置 landing enrichment 业务 pipeline；landing pipeline 的 stage 由具体
-业务 factory 提供。当前提供的是标准跨表 `serving_publish` builder：
+### `landing_trainability`（同表原地更新）
+
+直接 factory：`wt_sdk.etl.pipelines:build_landing_pipeline`。
 
 | 执行顺序 | Stage | 依赖 | 输入/输出 | 核心逻辑与状态 |
 | --- | --- | --- | --- | --- |
-| 1 | `normalize_claude_messages` | 无 | `agent_model/meta_json` → `messages` | Claude 轨迹判定和消息标准化扩展点，由对应贡献者实现；框架要求名称固定且声明输出 `messages`。 |
-| 2 | `build_chosen_trace` | `normalize_claude_messages` | `is_trainable/messages/response` → `chosen_trace` | 解析标准化 `messages` 和 `response`，按顺序拼成 JSON trace；畸形 JSON 直接失败。已实现。 |
-| 3 | `derive_job_tags` | `build_chosen_trace` | `is_trainable/job_id` → `tags` | 按 `#` 尽最大努力提取 job ID 前四段；不符合规则时写 `None`，不阻断运行。已实现。 |
+| 1 | `update_is_trainable` | 无 | 贡献者补充 → `is_trainable` | pipeline、diff patch、landing sink 和 `source_updated_at` 刷新已接好；`applies()`、`transform()`、required fields 和单测由贡献者在 `wt_sdk/etl/stages/trainability.py` 完成。当前 TODO 会显式报错，防止误运行。 |
+
+贡献者只修改该 stage 及其测试；不在 stage 中调用 SDK/dldb，也不自行更新时间戳。
+`transform()` 只返回 `{"is_trainable": bool}`。引擎会去掉与原值相同的 patch；只有实际
+变化才调用 `update_landing()`，由该接口默认刷新 `source_updated_at`。
+
+### `serving_publish`（landing → serving）
+
+当前 OpenCode 直接 factory：`wt_sdk.etl.pipelines:build_serving_pipeline`。
+
+| 执行顺序 | Stage | 依赖 | 输入/输出 | 核心逻辑与状态 |
+| --- | --- | --- | --- | --- |
+| 1 | `build_chosen_trace` | 无 | `is_trainable/messages/response` → `chosen_trace` | 解析现有 `messages` 和 `response`，按顺序拼成 JSON trace；畸形 JSON 直接失败。已实现。 |
+| 2 | `derive_job_tags` | 无 | `is_trainable/job_id` → `tags` | 按 `#` 尽最大努力提取 job ID 前四段；不符合规则时写 `None`，不阻断运行。已实现。 |
 
 ### v1 serving pipeline 的固定业务规则
 
-标准 serving pipeline 用 `build_serving_publish_pipeline(claude_stage)` 构造，入口条件是：
+标准 serving pipeline 的入口条件是：
 
 ```text
-is_trainable is True AND claude_stage.applies(record, context)
+is_trainable is True
 ```
 
-它的顺序固定为：
+OpenCode 数据已有可直接使用的 `messages`，所以当前无需 provider normalization。
+`build_chosen_trace` 和 `derive_job_tags` 彼此独立，不声明 dependency，只按 factory 声明
+顺序执行。
+
+未来 Claude stage 完成后，通过
+`build_serving_publish_pipeline(NormalizeClaudeMessagesStage())` 加在同一 pipeline 的最前面：
 
 1. `normalize_claude_messages`：由贡献者实现，从 Claude 原始 `meta_json` 生成标准化
-   `messages`。
-2. `build_chosen_trace`：将标准化后的 `messages` 与 `response` 拼接为
-   `chosen_trace`。
+   `messages`；其 `applies()` 只对 Claude 数据返回 true。
+2. `build_chosen_trace`：对所有 trainable 数据使用“当前 record 的 messages”与 response
+   生成 `chosen_trace`。Claude 行会看到前序 normalization patch，OpenCode 行继续使用原始
+   messages。
 3. `derive_job_tags`：从 `job_id` 尽最大努力提取前四段
    `[数据集名字, harness名字, 模型名字, 任务类型]`。
 
 Claude stage 必须命名为 `normalize_claude_messages`，并把 `messages` 声明为输出字段。
-Claude 判定逻辑只写在它的 `applies()` 中。`job_id` 不满足约定、分段不足或前四段存在
-空值时，`tags` 为 `None`，不能因此阻断整条轨迹。
+Claude 判定逻辑只写在它的 `applies()` 中。它和 chosen trace 不声明硬 dependency，因为
+normalizer 对 OpenCode 不适用时 chosen trace 仍必须执行；正确先后由 factory 声明顺序保证。
+`job_id` 不满足约定、分段不足或前四段存在空值时，`tags` 为 `None`，不能因此阻断整条轨迹。
+把 Claude stage 加入已经运行过的 serving pipeline 时必须提升 pipeline version，并为新版本
+指定 backfill 起点，不能继续沿用旧版本 checkpoint。
 
 示例 factory：
 
@@ -171,7 +204,7 @@ Claude 判定逻辑只写在它的 `applies()` 中。`job_id` 不满足约定、
 from wt_sdk.etl import build_serving_publish_pipeline
 
 
-def build_serving_pipeline():
+def build_serving_pipeline_with_claude():
     return build_serving_publish_pipeline(
         NormalizeClaudeMessagesStage(),
         version="1",
@@ -210,7 +243,6 @@ from wt_sdk.etl import PipelineDefinition
 
 ordered_stages = PipelineDefinition.validate_dag(
     (
-        NormalizeClaudeMessagesStage(),
         BuildChosenTraceStage(),
         DeriveJobTagsStage(),
     )
@@ -238,7 +270,7 @@ print([stage.name for stage in ordered_stages])
 
 ```bash
 .venv-dldb-v1/bin/python scripts/etl/run.py \
-  --pipeline-factory your_package.etl:build_serving_pipeline \
+  --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
   --validate-only
 ```
 
@@ -246,12 +278,15 @@ print([stage.name for stage in ordered_stages])
 
 ```bash
 .venv-dldb-v1/bin/python scripts/etl/run.py \
-  --pipeline-factory your_package.etl:build_serving_pipeline \
+  --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
   --list-stages
 ```
 
 传入多个 factory 时，这两个命令还会检查 v1 的跨 pipeline 顺序：landing pipeline 必须在
 serving pipeline 之前，同一次 run 不能包含重复 pipeline identity。
+
+对没有依赖关系的 stage，DAG 会保持它们在 factory 中的声明顺序；`dependencies` 只表达
+真实的数据/执行前置条件，不能为了显示顺序而虚构 dependency。
 
 ### `--validate-only` 与 `--dry-run` 的区别
 
@@ -290,7 +325,8 @@ serving pipeline 之前，同一次 run 不能包含重复 pipeline identity。
 (pipeline_name, pipeline_version, source_table, target_table, HASH bucket)
 ```
 
-checkpoint 保存已提交 watermark、当前固定窗口和页内 `last_processed_id`。只有一页内所有
+checkpoint 保存已提交 watermark、当前固定窗口、页内 `last_processed_id` 和最近一次写入
+该 checkpoint 的 `last_run_id`。只有一页内所有
 session 的 landing update 或 serving batch upsert 成功后，页游标才推进；整个固定窗口
 成功后才推进 watermark。进程崩溃后会从持久化的活动窗口恢复，而不是依赖内存状态。
 恢复窗口完成后，同一次正式增量运行会继续追赶到本次启动时计算出的 cutoff。
@@ -305,35 +341,163 @@ cutoff = run_started_at - settle_delay
 `source_updated_at`”，不是当前系统时间。首次运行以及以后首次出现的新 HASH bucket 都要
 提供同一个稳定的 `--start-from` bootstrap 起点。
 
+`--start-from` 和 `--start-time` 的区别：
+
+- `--start-from` 只用于默认增量模式，是某个新 checkpoint/new bucket 第一次从哪里开始的
+  bootstrap watermark。运行成功会持续推进 checkpoint，后续通常不用再传。
+- `--start-time` 开启一次性手动时间范围 backfill；可以搭配 `--end-time`，但完全不读取或
+  推进全局 checkpoint，重复执行同一命令就会重复处理同一范围。
+
 以下手动模式不读写全局 checkpoint，并天然支持立即执行：
 
-- `--job-id ... --session-id ...`
-- `--job-id ...`
+- 一个 `--job-id` 搭配一个或多个重复的 `--session-id`；
+- 一个或多个重复的 `--job-id`，不传 session 时处理各 job 的全部合法 session；
 - `--start-time ... [--end-time ...]`
+- `--source-filter "..."`：高级 dldb WHERE predicate，对每个 landing HASH bucket 做
+  discovery，再按发现的 `(job_id, session_id)` 加载完整 session；
 - `--force-unsettled`：把当前运行的稳定期设为 0；这是显式接受仍在变化数据的操作。
+
+结构化的 job/session/time 参数仍是默认推荐：它们容易校验、含义清晰，并能在 job 模式下
+直接 HASH pruning。`--source-filter` 不替代这些参数，只用于它们不能自然表达的临时筛选；
+它接收 WHERE 条件表达式而不是完整 `SELECT`，会扫描所有现有 landing HASH buckets，且不写
+checkpoint。条件命中的行只用于发现 session；一旦某行命中，引擎仍加载完整 session，并让
+pipeline selector 决定其中每一行是否处理。三类入口 `--job-id`、`--start-time`、
+`--source-filter` 互斥。
 
 所有模式都要求 stage 和 serving upsert 幂等。手动模式适合补历史遗漏、刚完成数据的即时
 验证，以及不知道具体 job_id 时从某一时间开始 backfill。
 
+## 失败处理与 Audit Report
+
+v1 不新增持久化 failure 表，但每条 pipeline 的每次实际执行都会生成一个独立 JSON report，
+默认写入当前工作目录下的 `etl_reports/`，同时也在 terminal 输出。文件名格式为：
+
+```text
+<pipeline_name>__v<pipeline_version>__<UTC开始时间>__<随机后缀>.json
+```
+
+该完整文件名前缀也是 `pipeline_run_id`。可通过 `--report-dir` 改目录。report 使用临时文件
+加原子 rename 落盘，避免把半个 JSON 当成完整审计结果。可归因到记录的 selector、stage、
+输出 model、landing sink 和 serving sink 错误会收集为：
+
+```json
+{
+  "record_id": "row-id",
+  "job_id": "job-id",
+  "session_id": "session-id",
+  "stage_name": "build_chosen_trace",
+  "error_type": "StageTransformError",
+  "message": "response contains malformed JSON"
+}
+```
+
+每条 pipeline 完成后都会输出以下 audit 计数：
+
+- `discovery_rows_read`：增量/时间范围 discovery 读取的轻量行数；定向 session 模式可能为 0。
+- `source_rows_read`：加载完整 session 后实际送入 pipeline 的 source 行数。
+- `rows_selected`：通过 pipeline selector、进入 stage 流程的行数。
+- `rows_succeeded`：通过 selector，且 stage、输出校验和实际 sink 均成功的行数；dry-run 时表示
+  stage/output 成功，不包含真实 sink 写入。
+- `rows_failed`：失败记录数。
+- `landing_rows_updated` / `serving_rows_upserted`：成功产生的实际写入数；dry-run 时表示计划
+  写入数。
+
+Report 还包含 `pipeline_run_id`、`started_at`、`ended_at`、毫秒时间、`duration_ms`、`status`、
+`sessions_processed`、`sessions_failed`、`failed_row_ids`、完整 `failures` 和实际
+`report_path`。失败记录同时保留 job/session scope，因此后续可以按一次 report 批量构造
+session 重试。存在行级失败时命令仍会先写 report、打印汇总，然后以 exit code `1` 结束。
+
+增量执行不会越过失败位置提交 page cursor/window watermark；checkpoint 标为 `FAILED`，下次
+运行会安全重放。失败前已经成功的 landing patch/serving upsert 也会重放，因此 stage 和 sink
+必须幂等。不同 HASH bucket 独立提交：一个 bucket 失败不阻止其他 bucket 的安全 checkpoint。
+
+report 目录应由调度器作为运行 artifact 保存或上传到约定的 ETL audit 路径。若后续需要跨
+run 结构化查询、告警、重试次数和保留周期，再增加单独的 `wt_etl_failures` dldb 表；在这些
+需求确认前不把失败明细混入 checkpoint 表。
+
 ## 初始化与运行
 
-checkpoint 可以与业务表使用同一个 dldb database URI，也可以使用单独的控制库；它必须
-通过 `WT_SDK_ETL_STATE_DB_URI` 或命令行显式指定。初始化只创建缺失表，不会删除或重建：
+### `run.py` 完整参数表
+
+| 参数 | 是否必需/默认值 | 作用与约束 | Sample |
+| --- | --- | --- | --- |
+| `-h`, `--help` | 可选 | 显示完整 CLI 帮助并退出。 | `--help` |
+| `--pipeline-factory` | 必需，可重复 | Python `module:callable` 导入路径；每个 callable 无参数返回 `PipelineDefinition`。重复传入时按命令行顺序串行执行。 | `--pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline` |
+| `--profile` | 实际 ETL 必需 | 选择 WT SDK 的表 profile：`test` → `landing_test/serving_test`，`production` → `wind_tunnel_landing/wind_tunnel_serving`；显式 table 参数可覆盖。静态检查不需要。 | `--profile test` |
+| `--list-stages` | 可选，默认关闭 | 只加载并校验 factory，输出 pipeline、stage、字段、顺序和依赖边；不创建 SDK client。 | `--list-stages` |
+| `--validate-only` | 可选，默认关闭 | 只做 pipeline/stage DAG 静态校验；不访问数据库、不执行 transform。 | `--validate-only` |
+| `--landing-table` | 可选，按 profile | 覆盖 source landing 逻辑表名。 | `--landing-table landing_test` |
+| `--serving-table` | 可选，按 profile | 覆盖 serving 目标逻辑表名。 | `--serving-table serving_test` |
+| `--page-size` | 可选，默认 `1000` | 每页轻量 discovery 行数；不是完整 session 截断大小，跨 page 的同一 session 会去重并整组加载。 | `--page-size 500` |
+| `--settle-delay-seconds` | 可选，默认 `7200` | 增量 cutoff 的稳定延迟；无显式 `--end-time` 的时间范围也使用它。 | `--settle-delay-seconds 3600` |
+| `--start-from` | 首次增量/新 bucket 必需 | 首个 checkpoint 的包含式 bootstrap 时间；支持 ISO 8601、epoch 秒或 epoch 毫秒。不能与 job/time-range 模式组合。 | `--start-from 2026-08-01T00:00:00Z` |
+| `--start-time` | 手动时间范围必需 | 按 `source_updated_at` 做包含式 backfill；不推进全局 checkpoint。 | `--start-time 2026-08-04T00:00:00Z` |
+| `--end-time` | 可选 | 手动范围包含式结束时间；必须和 `--start-time` 一起使用。省略时取当前 cutoff。 | `--end-time 2026-08-05T00:00:00Z` |
+| `--job-id` | 可选，可重复 | 立即处理一个或多个 job；不传 session 时处理每个 job 的全部合法 session，不使用 checkpoint。 | `--job-id job-a --job-id job-b` |
+| `--session-id` | 可选，可重复 | 处理一个 job 下的一个或多个 session；要求命令中恰好一个 `--job-id`。 | `--job-id job-a --session-id s1 --session-id s2` |
+| `--source-filter` | 可选 | 高级手动 dldb WHERE 表达式；扫描所有 landing HASH buckets，发现后加载完整 session，不使用 checkpoint。与 job/time 模式互斥。 | `--source-filter "is_trainable = true AND agent_model = 'opencode'"` |
+| `--force-unsettled` | 可选，默认关闭 | 将本次隐式 cutoff 的 settle delay 设为 0；显式接受仍可能变化的数据。定向 job/session 本来就立即执行。 | `--force-unsettled` |
+| `--dry-run` | 可选，默认关闭 | 读取真实 source 并执行 selector/stage/output 校验，但不写 landing、serving 或 checkpoint。 | `--dry-run` |
+| `--confirm-production` | production 写入必需 | 非 dry-run production 执行的二次安全确认。 | `--confirm-production` |
+| `--state-db-uri` | 增量模式必需，可用环境变量 | ETL 控制表所在独立 dldb database；也可设置 `WT_SDK_ETL_STATE_DB_URI`。 | `--state-db-uri s3://wind-tunnel-etl` |
+| `--checkpoint-table` | 可选，默认 `wt_etl_checkpoints` | 覆盖 checkpoint 逻辑表名；表必须预先存在且 schema 完全匹配。 | `--checkpoint-table wt_etl_checkpoints` |
+| `--report-dir` | 可选，默认 `etl_reports` | 每条 pipeline 每次运行的 JSON audit report 目录；静态检查不生成 report。 | `--report-dir /var/log/wt-etl/reports` |
+
+`--job-id`、`--start-time`、`--source-filter` 三种手动入口互斥；`--start-from` 仅用于默认增量模式。命令接受多个
+`--pipeline-factory`，但 v1 要求所有 landing pipeline 位于 serving pipeline 之前。
+
+### 辅助表与建表
+
+当前 ETL v1 在代码中只定义 **一张辅助表**：默认名为 `wt_etl_checkpoints`。它不是直接
+通过原生 LanceDB API 定义或访问的；SDK 使用 PyArrow schema 描述字段，并统一通过
+`dldb` 创建、查询和 upsert，底层物理存储仍由 dldb/LanceDB 管理。
+
+ETL 控制数据不放进只承载轨迹数据的 `s3://wind-tunnel-dldb`。约定使用新的独立 database
+URI `s3://wind-tunnel-etl`，未来的 failure/control 表也放在这里。2026-08-05 的只读 catalog
+检查确认旧轨迹库里没有 checkpoint 表；本次代码变更不会自动创建新的 S3 database/table。
+
+Schema 定义位于 `wt_sdk/etl/checkpoint.py` 的 `ETL_CHECKPOINT_SCHEMA`：
+
+| 字段 | 类型/可空 | 含义 |
+| --- | --- | --- |
+| `id` | string, non-null | checkpoint identity 的物化字符串，不是轨迹 row ID。 |
+| `pipeline_name` / `pipeline_version` | string, non-null | 隔离不同 pipeline 及版本。 |
+| `source_table` / `target_table` | string, non-null | 隔离 test/prod 及 landing/serving sink。 |
+| `bucket` | int32, non-null | landing 的 dldb HASH bucket。 |
+| `committed_until_ms` | int64, non-null | 已完整成功处理到的 `source_updated_at` watermark。 |
+| `last_run_id` | string, nullable | 最近一次更新该 bucket checkpoint 的 `pipeline_run_id`，用于关联 JSON report。 |
+| `active_window_start_ms` / `active_window_end_ms` | int64, nullable | 正在执行或失败待恢复的固定时间窗口。 |
+| `last_processed_id` | string, nullable | 活动窗口内最后安全提交的分页 ID cursor。 |
+| `status` | string, non-null | `IDLE`、`RUNNING` 或 `FAILED`。 |
+| `updated_at_ms` | int64, non-null | checkpoint 状态最后更新时间。 |
+
+checkpoint **不是每次运行追加一组历史行**。每个
+`(pipeline_name, pipeline_version, source_table, target_table, bucket)` 只有一行，并通过
+`id` upsert 为当前恢复状态。一次 pipeline 执行由 JSON report 的 `pipeline_run_id` 标识；
+checkpoint 的 `last_run_id` 只关联最近一次触碰该 bucket 的执行。完整运行历史属于 report，
+不是 checkpoint 表。
+
+该表是非分区控制表，需要在第一次默认增量运行前显式创建一次；runner 不会自动建表或覆盖
+错误 schema。job/session 和时间范围手动模式不使用全局 checkpoint；但默认增量 dry-run
+仍会读取并校验 checkpoint 表。
+
+checkpoint database 必须通过 `WT_SDK_ETL_STATE_DB_URI` 或命令行显式指定。初始化只创建
+缺失表，不会删除或重建：
 
 ```bash
 set -a && source .env && set +a
 .venv-dldb-v1/bin/python scripts/ops/init_etl_checkpoint_table.py \
-  --db-uri s3://wind-tunnel-dldb \
+  --db-uri s3://wind-tunnel-etl \
   --confirm-create
 ```
 
 先在 test profile 做 dry run：
 
 ```bash
-WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-dldb \
+WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-etl \
 .venv-dldb-v1/bin/python scripts/etl/run.py \
   --profile test \
-  --pipeline-factory your_package.etl:build_serving_pipeline \
+  --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
   --start-from 2026-08-01T00:00:00Z \
   --dry-run
 ```
@@ -345,11 +509,14 @@ WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-dldb \
 
 同一次运行串联 landing 与 serving：
 
+> `UpdateIsTrainableStage` 的 TODO 实现及单测合入前，只能对 landing factory 使用
+> `--list-stages`/`--validate-only`，不要执行下面的真实数据命令。
+
 ```bash
 .venv-dldb-v1/bin/python scripts/etl/run.py \
   --profile test \
-  --pipeline-factory your_package.etl:build_landing_pipeline \
-  --pipeline-factory your_package.etl:build_serving_pipeline \
+  --pipeline-factory wt_sdk.etl.pipelines:build_landing_pipeline \
+  --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
   --start-from 2026-08-01T00:00:00Z
 ```
 
@@ -358,9 +525,30 @@ WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-dldb \
 ```bash
 .venv-dldb-v1/bin/python scripts/etl/run.py \
   --profile test \
-  --pipeline-factory your_package.etl:build_serving_pipeline \
+  --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
   --job-id 'dataset#harness#model#task#date#owner#extra' \
   --session-id 'session-id'
+```
+
+一个 job 下立即处理多个 session：
+
+```bash
+.venv-dldb-v1/bin/python scripts/etl/run.py \
+  --profile test \
+  --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
+  --job-id 'job-id' \
+  --session-id 'session-1' \
+  --session-id 'session-2'
+```
+
+高级条件 backfill：
+
+```bash
+.venv-dldb-v1/bin/python scripts/etl/run.py \
+  --profile test \
+  --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
+  --source-filter "is_trainable = true AND agent_model LIKE 'opencode%'" \
+  --dry-run
 ```
 
 生产运行前必须先在 test tables 完成验证，并确认 profile、表名、pipeline version、起始

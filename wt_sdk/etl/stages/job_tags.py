@@ -8,7 +8,6 @@ class DeriveJobTagsStage(ETLStage):
     version = "1"
     required_fields = ("is_trainable",)
     output_fields = ("tags",)
-    dependencies = ("build_chosen_trace",)
 
     def applies(self, record: Record, context: StageContext) -> bool:
         _ = context
