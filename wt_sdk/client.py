@@ -439,13 +439,22 @@ class WTGatewayClient:
         self,
         record_or_batch: Union[LandingRecord, List[LandingRecord], LandingRecordBatch],
     ) -> Union[LandingRecord, List[LandingRecord], LandingRecordBatch]:
-        """Copy landing records while enforcing a null serving publication time."""
+        """Enforce null landing publication times without unnecessary copies."""
         def landing_copy(record: LandingRecord) -> LandingRecord:
+            if record.serving_updated_at is None:
+                return record
             return record.model_copy(update={"serving_updated_at": None})
 
         if isinstance(record_or_batch, list):
+            if all(record.serving_updated_at is None for record in record_or_batch):
+                return record_or_batch
             return [landing_copy(record) for record in record_or_batch]
         if isinstance(record_or_batch, LandingRecordBatch):
+            if all(
+                record.serving_updated_at is None
+                for record in record_or_batch.records
+            ):
+                return record_or_batch
             return LandingRecordBatch(
                 records=[landing_copy(record) for record in record_or_batch.records]
             )

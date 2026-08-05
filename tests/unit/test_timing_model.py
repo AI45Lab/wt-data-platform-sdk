@@ -14,6 +14,7 @@ from wt_sdk import (
     EnvConfigManager,
     GatewayConfig,
     LandingRecord,
+    LandingRecordBatch,
     ServingRecord,
     ServingRecordBatch,
     TableConfig,
@@ -1153,6 +1154,25 @@ def test_landing_ingest_enforces_null_serving_time_without_mutating_input(monkey
 
     assert fake_session.rows["landing_test"][0]["serving_updated_at"] is None
     assert record.serving_updated_at == 123
+
+
+def test_landing_publish_time_normalization_reuses_already_clean_inputs(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    record = LandingRecord(
+        dataset_type="RL",
+        id="landing-clean",
+        created_at=100,
+        source_updated_at=1_800_000_000_000,
+        job_id="job-123",
+    )
+    records = [record]
+    batch = LandingRecordBatch(records=records)
+
+    assert client._without_serving_publish_time(record) is record
+    assert client._without_serving_publish_time(records) is records
+    assert client._without_serving_publish_time(batch) is batch
 
 
 def test_serving_upsert_uses_id_and_refreshes_publish_time(monkeypatch):
