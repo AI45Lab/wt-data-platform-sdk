@@ -95,6 +95,14 @@ def test_gateway_query_and_update_landing_interfaces():
             )
             assert update_result["updated"] is True
             assert update_result["partition"] is not None
+            assert update_result["updated_fields"] == [
+                "is_session_completed",
+                "is_terminal",
+                "is_trainable",
+                "meta_json",
+            ]
+            assert "source_updated_at" in update_result["effective_updated_fields"]
+            assert update_result["source_updated_at_touched"] is True
 
             updated = client.query_data(
                 filter_query=(
@@ -107,6 +115,7 @@ def test_gateway_query_and_update_landing_interfaces():
             assert updated[0]["is_terminal"] is True
             assert updated[0]["is_session_completed"] is True
             assert updated[0]["is_trainable"] is True
+            assert updated[0]["source_updated_at"] >= records[1].source_updated_at
             assert json.loads(updated[0]["meta_json"])["env_state"]["weight_version"] == "1.0.1"
 
             trainable_rows = client.query_data(

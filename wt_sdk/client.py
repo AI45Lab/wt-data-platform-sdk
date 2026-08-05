@@ -6,6 +6,7 @@ from typing import List, Optional, Union, Dict, Any, Iterator
 from loguru import logger
 import dldb
 import pandas as pd
+import wt_sdk._time as sdk_time
 from wt_sdk.config import (
     DEFAULT_LANDING_TABLE,
     DEFAULT_SERVING_TABLE,
@@ -391,14 +392,23 @@ class WTGatewayClient:
         from wt_sdk.utils import landing_record_to_arrow, landing_batch_to_arrow, serving_record_to_arrow, serving_batch_to_arrow
         from wt_sdk.core.schemas import LANDING_SCHEMA, SERVING_SCHEMA
 
+        if isinstance(record_or_batch, list) and not record_or_batch:
+            logger.warning(f"Empty records list, skipping ingestion to {table}")
+            return
+        if isinstance(record_or_batch, (LandingRecordBatch, ServingRecordBatch)) and len(record_or_batch) == 0:
+            logger.warning(f"Empty record batch, skipping ingestion to {table}")
+            return
+
+        if table == "landing":
+            record_or_batch = self._without_serving_publish_time(record_or_batch)
+        else:
+            record_or_batch = self._with_serving_publish_time(record_or_batch)
+
         info = self._get_table_info(table)
         schema = LANDING_SCHEMA if table == "landing" else SERVING_SCHEMA
 
         # Convert to PyArrow table with explicit schema
         if isinstance(record_or_batch, list):
-            if not record_or_batch:
-                logger.warning(f"Empty records list, skipping ingestion to {table}")
-                return
             # Create batch object
             if table == "landing":
                 batch = LandingRecordBatch(records=record_or_batch)
@@ -424,6 +434,104 @@ class WTGatewayClient:
             extra={"input_rows": len(arrow_table)},
         )
         logger.info(f"Successfully added {len(arrow_table)} records to {table} table via DLDB wrapper")
+
+    def _without_serving_publish_time(
+        self,
+        record_or_batch: Union[LandingRecord, List[LandingRecord], LandingRecordBatch],
+    ) -> Union[LandingRecord, List[LandingRecord], LandingRecordBatch]:
+        """Enforce null landing publication times without unnecessary copies."""
+        def landing_copy(record: LandingRecord) -> LandingRecord:
+            if record.serving_updated_at is None:
+                return record
+            return record.model_copy(update={"serving_updated_at": None})
+
+        if isinstance(record_or_batch, list):
+            if all(record.serving_updated_at is None for record in record_or_batch):
+                return record_or_batch
+            return [landing_copy(record) for record in record_or_batch]
+        if isinstance(record_or_batch, LandingRecordBatch):
+            if all(
+                record.serving_updated_at is None
+                for record in record_or_batch.records
+            ):
+                return record_or_batch
+            return LandingRecordBatch(
+                records=[landing_copy(record) for record in record_or_batch.records]
+            )
+        return landing_copy(record_or_batch)
+
+    def _with_serving_publish_time(
+        self,
+        record_or_batch: Union[ServingRecord, List[ServingRecord], ServingRecordBatch],
+    ) -> Union[ServingRecord, List[ServingRecord], ServingRecordBatch]:
+        """Copy serving records and stamp one SDK-managed publication time."""
+        publish_time = sdk_time.now_ms()
+
+        def stamped(record: ServingRecord) -> ServingRecord:
+            return record.model_copy(update={"serving_updated_at": publish_time})
+
+        if isinstance(record_or_batch, list):
+            return [stamped(record) for record in record_or_batch]
+        if isinstance(record_or_batch, ServingRecordBatch):
+            return ServingRecordBatch(
+                records=[stamped(record) for record in record_or_batch.records]
+            )
+        return stamped(record_or_batch)
+
+    def _upsert_serving_batch(
+        self,
+        records: Union[List[ServingRecord], ServingRecordBatch],
+    ) -> None:
+        """Upsert a validated serving batch by globally unique business ID."""
+        from wt_sdk.core.schemas import SERVING_SCHEMA
+        from wt_sdk.utils import serving_batch_to_arrow
+
+        source_records = records.records if isinstance(records, ServingRecordBatch) else records
+        if not source_records:
+            logger.warning("Empty records list, skipping serving upsert")
+            return
+
+        missing_job_ids = [record.id for record in source_records if not str(record.job_id or "").strip()]
+        if missing_job_ids:
+            raise ValueError(
+                "serving upsert requires a non-empty job_id for every record; "
+                f"missing for IDs: {', '.join(missing_job_ids)}"
+            )
+
+        seen_ids = set()
+        duplicate_ids = set()
+        for record in source_records:
+            if record.id in seen_ids:
+                duplicate_ids.add(record.id)
+            seen_ids.add(record.id)
+        if duplicate_ids:
+            raise ValueError(
+                "serving upsert batch contains duplicate IDs: "
+                f"{', '.join(sorted(duplicate_ids))}"
+            )
+
+        stamped = self._with_serving_publish_time(
+            ServingRecordBatch(records=list(source_records))
+        )
+        arrow_table = serving_batch_to_arrow(stamped, SERVING_SCHEMA)
+        dataframe = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
+        info = self._get_table_info("serving")
+
+        self.session.upsert(
+            info["table_name"],
+            columns=["id"],
+            datas=dataframe,
+        )
+        self._log_dldb_timing(
+            "upsert",
+            self._extract_dldb_last_call(),
+            table_name=info["table_name"],
+            extra={"input_rows": len(arrow_table), "api": "upsert_serving_batch"},
+        )
+        logger.info(
+            f"Successfully upserted {len(arrow_table)} records to serving table "
+            "via DLDB wrapper"
+        )
 
     def _query(
         self,
@@ -659,21 +767,37 @@ class WTGatewayClient:
         filter_query: str,
         updates: Dict[str, Any],
         partition: Optional[Union[str, int]] = None,
+        *,
+        touch_source_updated_at: bool = True,
     ) -> Dict[str, Any]:
         """Update matching landing rows and return an execution acknowledgement.
 
-        id, created_at, and job_id are immutable. Include job_id for HASH pruning.
+        SDK-managed timestamps, id, created_at, and job_id are immutable to
+        callers. Source time is refreshed by default. Include job_id for HASH
+        pruning.
         """
         if not filter_query or not filter_query.strip():
             raise ValueError("filter_query is required for update_landing")
         if not updates:
             raise ValueError("updates is required for update_landing")
+        if type(touch_source_updated_at) is not bool:
+            raise TypeError("touch_source_updated_at must be a bool")
 
-        protected_columns = {"id", "created_at", "job_id"}
+        protected_columns = {
+            "id",
+            "created_at",
+            "job_id",
+            "source_updated_at",
+            "serving_updated_at",
+        }
         protected_updates = protected_columns.intersection(updates)
         if protected_updates:
             columns = ", ".join(sorted(protected_updates))
             raise ValueError(f"update_landing cannot update protected columns: {columns}")
+
+        effective_updates = dict(updates)
+        if touch_source_updated_at:
+            effective_updates["source_updated_at"] = sdk_time.now_ms()
 
         info = self._get_table_info("landing")
         effective_filter_query = self._add_hash_partition_filter_for_raw_value(
@@ -697,27 +821,34 @@ class WTGatewayClient:
             if resolved_partitions and len(resolved_partitions) == 1:
                 update_partition = resolved_partitions[0]
 
-        result = self.session.update(info["table_name"], effective_filter_query, updates, partition=update_partition)
+        result = self.session.update(
+            info["table_name"],
+            effective_filter_query,
+            effective_updates,
+            partition=update_partition,
+        )
         self._log_dldb_timing(
             "update",
             self._extract_dldb_last_call(),
             table_name=info["table_name"],
             extra={
                 "api": "update_landing",
-                "updated_fields": len(updates),
+                "updated_fields": len(effective_updates),
                 "partition": update_partition,
                 "partitions_count": len(resolved_partitions) if resolved_partitions else None,
             },
         )
         logger.info(
             f"Submitted landing update: table={info['table_name']}, "
-            f"fields={list(updates.keys())}, partition={update_partition}"
+            f"fields={list(effective_updates.keys())}, partition={update_partition}"
         )
         return {
             "updated": True,
             "table_name": info["table_name"],
             "partition": update_partition,
             "updated_fields": sorted(updates.keys()),
+            "effective_updated_fields": sorted(effective_updates.keys()),
+            "source_updated_at_touched": touch_source_updated_at,
             "dldb_result": result,
         }
 
@@ -737,6 +868,17 @@ class WTGatewayClient:
         records: Union[List[ServingRecord], ServingRecordBatch]
     ) -> None:
         self._ingest("serving", records)
+
+    def upsert_serving(self, record: ServingRecord) -> None:
+        """Insert or replace one serving record matched by business ID."""
+        self._upsert_serving_batch([record])
+
+    def upsert_serving_batch(
+        self,
+        records: Union[List[ServingRecord], ServingRecordBatch],
+    ) -> None:
+        """Insert or replace serving records matched by business ID."""
+        self._upsert_serving_batch(records)
 
     def count_serving(self, partition: Optional[str] = None) -> int:
         return self._count("serving", partition)

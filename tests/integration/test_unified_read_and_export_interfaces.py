@@ -168,6 +168,7 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 "meta_json",
             ):
                 assert isinstance(raw_landing_result[column], str)
+            assert raw_landing_result["source_updated_at"] is not None
 
             landing_result = client.query_data(
                 filter_query=filter_query,
@@ -211,7 +212,11 @@ def test_unified_read_interfaces_on_landing_and_serving_test_tables():
                 deserialize_json=True,
             )
             assert landing_with_nulls[0]["ground_truth_answer"] is None
+            assert landing_with_nulls[0]["serving_updated_at"] is None
             assert isinstance(landing_with_nulls[0]["messages"], list)
+
+            assert all(record["source_updated_at"] is not None for record in serving_result)
+            assert all(record["serving_updated_at"] is not None for record in serving_result)
 
             first_landing_page = client.pull_data(
                 dataset_type=dataset_type,
@@ -339,5 +344,56 @@ def test_export_data_batches_from_serving_test_and_cleanup():
             assert {row["id"] for row in exported_rows} == {record.id for record in records}
             assert {row["meta_json"]["job_id"] for row in exported_rows} == {job_id}
             assert all(tag in row["tags"] for row in exported_rows)
+        finally:
+            _cleanup_and_verify(client, job_id, tables=(SERVING_TEST_TABLE,))
+
+
+def test_serving_upsert_preserves_source_time_and_replaces_by_id():
+    suffix = uuid.uuid4().hex
+    job_id = f"integration-dataset#test-harness#test-model#serving-upsert#20260805#codex#{suffix}"
+    source_updated_at = 1_800_000_000_123
+    filter_query = f"job_id = '{job_id}'"
+    original = ServingRecord(
+        dataset_type="RL",
+        id=f"serving-upsert-{suffix}",
+        session_id=f"session-{suffix}",
+        created_at=int(time.time()),
+        source_updated_at=source_updated_at,
+        serving_updated_at=1,
+        job_id=job_id,
+        messages=json.dumps([_message("user", "question")]),
+        response=json.dumps(_message("assistant", "first")),
+    )
+
+    with WTGatewayClient(config=TEST_TABLE_CONFIG) as client:
+        try:
+            client.upsert_serving(original)
+            time.sleep(1)
+            first = client.query_data(
+                filter_query=filter_query,
+                table=SERVING_TEST_TABLE,
+                checkout_latest=True,
+                deserialize_json=True,
+            )
+            assert len(first) == 1
+            first_publish_time = first[0]["serving_updated_at"]
+
+            replacement = original.model_copy(
+                update={"response": json.dumps(_message("assistant", "second"))}
+            )
+            client.upsert_serving(replacement)
+            time.sleep(1)
+            second = client.query_data(
+                filter_query=filter_query,
+                table=SERVING_TEST_TABLE,
+                checkout_latest=True,
+                deserialize_json=True,
+            )
+
+            assert len(second) == 1
+            assert second[0]["response"]["content"] == "second"
+            assert second[0]["source_updated_at"] == source_updated_at
+            assert second[0]["serving_updated_at"] >= first_publish_time
+            assert original.serving_updated_at == replacement.serving_updated_at == 1
         finally:
             _cleanup_and_verify(client, job_id, tables=(SERVING_TEST_TABLE,))

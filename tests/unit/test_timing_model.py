@@ -7,9 +7,20 @@ import pandas as pd
 import pytest
 from dldb.utils import stable_hash
 
-from wt_sdk import EnvConfigManager, GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
+import wt_sdk._time as sdk_time
 import wt_sdk.client as client_module
 import wt_sdk.env_config_client as env_manager_module
+from wt_sdk import (
+    EnvConfigManager,
+    GatewayConfig,
+    LandingRecord,
+    LandingRecordBatch,
+    ServingRecord,
+    ServingRecordBatch,
+    TableConfig,
+    WTGatewayClient,
+)
+from wt_sdk.core.schemas import JSON_TYPE
 
 class FakeSession:
     def __init__(self, *, attach_df_timing: bool, shutdown_result: Optional[Dict[str, Any]] = None):
@@ -20,6 +31,7 @@ class FakeSession:
         self.last_count_kwargs: Optional[Dict[str, Any]] = None
         self.last_delete_kwargs: Optional[Dict[str, Any]] = None
         self.last_update_kwargs: Optional[Dict[str, Any]] = None
+        self.last_upsert_kwargs: Optional[Dict[str, Any]] = None
         self.filter_calls: List[Dict[str, Any]] = []
         self.created_indexes: List[Dict[str, Any]] = []
         self.optimized_partitions: List[Dict[str, Any]] = []
@@ -149,6 +161,31 @@ class FakeSession:
                 if record.get(key.strip()) == value:
                     record.update(values)
         self._set_last_call("update", len(values))
+
+    def upsert(self, table_name: str, columns: List[str], datas: pd.DataFrame, partition=None):
+        records = datas.to_dict("records")
+        self.last_upsert_kwargs = {
+            "table_name": table_name,
+            "columns": columns,
+            "datas": datas,
+            "partition": partition,
+        }
+        existing = self.rows.setdefault(table_name, [])
+        for incoming in records:
+            match = next(
+                (
+                    row
+                    for row in existing
+                    if all(row.get(column) == incoming.get(column) for column in columns)
+                ),
+                None,
+            )
+            if match is None:
+                existing.append(incoming)
+            else:
+                match.clear()
+                match.update(incoming)
+        self._set_last_call("upsert", len(records))
 
     def create_scalar_index(self, table_name: str, column: str, *, partition=None, index_type: str = "BTREE"):
         self.created_indexes.append(
@@ -814,6 +851,7 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
         "job_id",
         "session_id",
         "created_at",
+        "source_updated_at",
         "is_terminal",
         "is_trainable",
     ]
@@ -853,6 +891,8 @@ def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatc
         ("job_id", "BTREE"),
         ("session_id", "BTREE"),
         ("created_at", "BTREE"),
+        ("source_updated_at", "BTREE"),
+        ("serving_updated_at", "BTREE"),
         ("dataset_type", "BITMAP"),
         ("is_terminal", "BITMAP"),
         ("is_trainable", "BITMAP"),
@@ -1008,6 +1048,229 @@ def test_update_landing_adds_job_id_filter_when_partition_string_is_raw_job_id(m
 
     assert fake_session.last_update_kwargs["partition"] == stable_hash("job-123") % 128
     assert "job_id = 'job-123'" in fake_session.last_update_kwargs["where"]
+
+
+def test_update_landing_touches_source_time_without_mutating_input(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    monkeypatch.setattr(sdk_time, "now_ms", lambda: 1_800_000_000_123)
+    updates = {"is_trainable": True}
+
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    result = client.update_landing(
+        "job_id = 'job-123' AND id = 'rec-1'",
+        updates,
+    )
+
+    assert updates == {"is_trainable": True}
+    assert fake_session.last_update_kwargs["values"] == {
+        "is_trainable": True,
+        "source_updated_at": 1_800_000_000_123,
+    }
+    assert result["updated_fields"] == ["is_trainable"]
+    assert result["effective_updated_fields"] == ["is_trainable", "source_updated_at"]
+    assert result["source_updated_at_touched"] is True
+
+
+def test_update_landing_can_skip_source_touch_and_strictly_validates_flag(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+
+    result = client.update_landing(
+        "job_id = 'job-123' AND id = 'rec-1'",
+        {"is_terminal": True},
+        touch_source_updated_at=False,
+    )
+    assert fake_session.last_update_kwargs["values"] == {"is_terminal": True}
+    assert result["source_updated_at_touched"] is False
+
+    for invalid in (1, 0, "true", None):
+        with pytest.raises(TypeError, match="must be a bool"):
+            client.update_landing(
+                "job_id = 'job-123' AND id = 'rec-1'",
+                {"is_terminal": True},
+                touch_source_updated_at=invalid,
+            )
+
+
+@pytest.mark.parametrize("field", ["source_updated_at", "serving_updated_at"])
+def test_update_landing_rejects_sdk_managed_timestamp_fields(monkeypatch, field):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+
+    with pytest.raises(ValueError, match="protected columns"):
+        client.update_landing("id = 'rec-1'", {field: 123})
+
+    assert fake_session.last_update_kwargs is None
+
+
+def test_serving_ingest_stamps_copy_and_preserves_source_time(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    monkeypatch.setattr(sdk_time, "now_ms", lambda: 1_900_000_000_456)
+    records = [
+        ServingRecord(
+            dataset_type="RL",
+            id=f"serving-{index}",
+            created_at=100 + index,
+            source_updated_at=1_800_000_000_000 + index,
+            serving_updated_at=99,
+            job_id="job-123",
+            messages='[{"role":"user","content":"hello"}]',
+        )
+        for index in range(2)
+    ]
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+
+    client.ingest_serving_batch(records)
+
+    stored = fake_session.rows["serving_test"]
+    assert [row["source_updated_at"] for row in stored] == [
+        1_800_000_000_000,
+        1_800_000_000_001,
+    ]
+    assert {row["serving_updated_at"] for row in stored} == {1_900_000_000_456}
+    assert [record.serving_updated_at for record in records] == [99, 99]
+
+
+def test_landing_ingest_enforces_null_serving_time_without_mutating_input(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    record = LandingRecord(
+        dataset_type="RL",
+        id="landing-1",
+        created_at=100,
+        source_updated_at=1_800_000_000_000,
+        serving_updated_at=123,
+        job_id="job-123",
+    )
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+
+    client.ingest_landing(record)
+
+    assert fake_session.rows["landing_test"][0]["serving_updated_at"] is None
+    assert record.serving_updated_at == 123
+
+
+def test_landing_publish_time_normalization_reuses_already_clean_inputs(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    record = LandingRecord(
+        dataset_type="RL",
+        id="landing-clean",
+        created_at=100,
+        source_updated_at=1_800_000_000_000,
+        job_id="job-123",
+    )
+    records = [record]
+    batch = LandingRecordBatch(records=records)
+
+    assert client._without_serving_publish_time(record) is record
+    assert client._without_serving_publish_time(records) is records
+    assert client._without_serving_publish_time(batch) is batch
+
+
+def test_serving_upsert_uses_id_and_refreshes_publish_time(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    publish_times = iter([1_900_000_000_001, 1_900_000_000_002])
+    monkeypatch.setattr(sdk_time, "now_ms", lambda: next(publish_times))
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+
+    original = ServingRecord(
+        dataset_type="RL",
+        id="serving-1",
+        created_at=100,
+        source_updated_at=1_800_000_000_000,
+        serving_updated_at=123,
+        job_id="job-123",
+        response='{"content":"first"}',
+    )
+    replacement = original.model_copy(update={"response": '{"content":"second"}'})
+
+    client.upsert_serving(original)
+    client.upsert_serving(replacement)
+
+    assert fake_session.last_upsert_kwargs["table_name"] == "serving_test"
+    assert fake_session.last_upsert_kwargs["columns"] == ["id"]
+    assert (
+        fake_session.last_upsert_kwargs["datas"]["response"].dtype.pyarrow_dtype
+        == JSON_TYPE
+    )
+    assert len(fake_session.rows["serving_test"]) == 1
+    stored = fake_session.rows["serving_test"][0]
+    assert stored["response"] == '{"content":"second"}'
+    assert stored["source_updated_at"] == 1_800_000_000_000
+    assert stored["serving_updated_at"] == 1_900_000_000_002
+    assert original.serving_updated_at == replacement.serving_updated_at == 123
+
+
+def test_serving_upsert_batch_uses_one_publish_time(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    captured = _capture_logger(monkeypatch, client_module)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    monkeypatch.setattr(sdk_time, "now_ms", lambda: 1_900_000_000_456)
+    client = WTGatewayClient(
+        GatewayConfig(
+            tables=TableConfig(serving_table="serving_test"),
+            enable_dldb_timing_logs=True,
+        )
+    )
+    records = [
+        ServingRecord(
+            dataset_type="RL",
+            id=f"serving-{index}",
+            created_at=100 + index,
+            source_updated_at=1_800_000_000_000 + index,
+            serving_updated_at=index,
+            job_id="job-123",
+        )
+        for index in range(2)
+    ]
+
+    client.upsert_serving_batch(ServingRecordBatch(records=records))
+
+    stored = fake_session.rows["serving_test"]
+    assert {row["serving_updated_at"] for row in stored} == {1_900_000_000_456}
+    assert [record.serving_updated_at for record in records] == [0, 1]
+    assert any(
+        "dldb_timing api=upsert" in message
+        and "table_name=serving_test" in message
+        and "input_rows=2" in message
+        for message in captured
+    )
+
+
+def test_serving_upsert_batch_validates_job_id_duplicate_ids_and_empty_input(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+    valid = ServingRecord(
+        dataset_type="RL",
+        id="serving-1",
+        created_at=100,
+        source_updated_at=1_800_000_000_000,
+        job_id="job-123",
+    )
+
+    client.upsert_serving_batch([])
+    assert fake_session.last_upsert_kwargs is None
+
+    missing_job = valid.model_copy(update={"id": "missing-job", "job_id": None})
+    with pytest.raises(ValueError, match="non-empty job_id"):
+        client.upsert_serving(missing_job)
+
+    with pytest.raises(ValueError, match="duplicate IDs"):
+        client.upsert_serving_batch(
+            ServingRecordBatch(records=[valid, valid.model_copy()])
+        )
+
+    assert fake_session.last_upsert_kwargs is None
 
 
 def test_pull_data_keeps_dt_partition_cond_for_dt_tables(monkeypatch):

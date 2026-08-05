@@ -3,10 +3,12 @@ Pydantic models for Landing Table.
 Maps 1:1 to LANDING_SCHEMA in wt_sdk.core.schemas.
 """
 import json
+from datetime import datetime
 from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
-from datetime import datetime
+
+import wt_sdk._time as sdk_time
 
 
 class LandingRecord(BaseModel):
@@ -22,6 +24,14 @@ class LandingRecord(BaseModel):
     id: str = Field(..., description="Unique record ID")
     session_id: Optional[str] = Field(None, description="Session identifier (optional)")
     created_at: int = Field(..., description="Creation timestamp (Unix epoch)")
+    source_updated_at: Optional[int] = Field(
+        None,
+        description="Last source change time in Unix epoch milliseconds",
+    )
+    serving_updated_at: Optional[int] = Field(
+        None,
+        description="Last serving publication time in Unix epoch milliseconds",
+    )
 
     # RL Core
     step_id: Optional[int] = None
@@ -74,6 +84,9 @@ class LandingRecord(BaseModel):
             # Convert Unix timestamp to YYYY-MM-DD format
             dt_datetime = datetime.fromtimestamp(self.created_at)
             self.dt = dt_datetime.strftime('%Y-%m-%d')
+
+        if self.source_updated_at is None:
+            self.source_updated_at = sdk_time.now_ms()
 
         # Auto-extract blob_manifest if empty and content exists
         if not self.blob_manifest:

@@ -3,6 +3,7 @@ import json
 import pandas as pd
 import pyarrow as pa
 
+import wt_sdk._time as sdk_time
 from wt_sdk import LandingRecord, ServingRecord
 from wt_sdk.core.schemas import (
     JSON_TYPE,
@@ -113,6 +114,41 @@ def test_trajectory_payloads_round_trip_as_opaque_json_strings():
     assert decoded["response"] == json.loads(response)
 
 
+def test_sdk_initializes_source_time_and_preserves_explicit_time(monkeypatch):
+    monkeypatch.setattr(sdk_time, "now_ms", lambda: 1_800_000_000_123)
+
+    generated = LandingRecord(
+        dataset_type="test",
+        id="generated-time",
+        created_at=1_700_000_000,
+    )
+    explicit = ServingRecord(
+        dataset_type="test",
+        id="explicit-time",
+        created_at=1_700_000_000,
+        source_updated_at=1_600_000_000_456,
+        serving_updated_at=1_650_000_000_789,
+    )
+
+    assert generated.source_updated_at == 1_800_000_000_123
+    assert generated.serving_updated_at is None
+    assert explicit.source_updated_at == 1_600_000_000_456
+    assert explicit.serving_updated_at == 1_650_000_000_789
+
+    table = landing_batch_to_arrow(
+        LandingRecordBatch(records=[generated, explicit]),
+        LANDING_SCHEMA,
+    )
+    assert table.column("source_updated_at").to_pylist() == [
+        1_800_000_000_123,
+        1_600_000_000_456,
+    ]
+    assert table.column("serving_updated_at").to_pylist() == [
+        None,
+        1_650_000_000_789,
+    ]
+
+
 def test_json_payload_shape_is_not_validated_by_landing_model():
     payload = json.dumps(
         {
@@ -213,6 +249,10 @@ def test_landing_and_serving_use_the_same_schema_and_hash_partition():
         assert LANDING_SCHEMA.field(field_name).type == pa.json_(pa.string())
 
     assert LANDING_SCHEMA.field("tags").type == pa.list_(pa.string())
+    assert LANDING_SCHEMA.field("source_updated_at").type == pa.int64()
+    assert LANDING_SCHEMA.field("source_updated_at").nullable is False
+    assert LANDING_SCHEMA.field("serving_updated_at").type == pa.int64()
+    assert LANDING_SCHEMA.field("serving_updated_at").nullable is True
     assert LANDING_SCHEMA.field("search_text").type == pa.string()
     assert "chosen_response" not in LANDING_SCHEMA.names
     assert "rejected_response" not in LANDING_SCHEMA.names
@@ -226,6 +266,7 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("job_id", "BTREE"),
         ("session_id", "BTREE"),
         ("created_at", "BTREE"),
+        ("source_updated_at", "BTREE"),
         ("is_terminal", "BITMAP"),
         ("is_trainable", "BITMAP"),
     ]
@@ -234,6 +275,8 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("job_id", "BTREE"),
         ("session_id", "BTREE"),
         ("created_at", "BTREE"),
+        ("source_updated_at", "BTREE"),
+        ("serving_updated_at", "BTREE"),
         ("dataset_type", "BITMAP"),
         ("is_terminal", "BITMAP"),
         ("is_trainable", "BITMAP"),
