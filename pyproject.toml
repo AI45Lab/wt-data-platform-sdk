@@ -64,7 +64,6 @@ include = ["wt_sdk*"]
 exclude = [
     "wt_data_platform_sdk.egg-info*",
     "tests*",
-    "wt_sdk.etl.legacy*",
     "wt_sdk.etl.tests*",
 ]
 

@@ -628,7 +628,7 @@ scripts/dev contains disposable test-table setup helpers. scripts/migrations con
 
 ```text
 wt_sdk/                 Public SDK package
-wt_sdk/etl/             Optional ETL runtime, CLI, tools, docs, tests, and legacy archive
+wt_sdk/etl/             Optional ETL runtime, CLI, tools, docs, and tests
 scripts/ops/            Operational commands
 scripts/inspect/        Read-only diagnostics
 scripts/dev/            Disposable test-table setup

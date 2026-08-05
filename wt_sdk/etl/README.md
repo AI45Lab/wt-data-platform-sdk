@@ -10,9 +10,8 @@ stage，并由引擎统一持久化到 landing 或 serving。
 
 ETL 的 runtime、CLI、运维/检查工具、文档和测试全部收敛在 `wt_sdk/etl/`：业务规则放在
 `stages/`，pipeline 放在 `pipelines/`，入口放在 `cli/`，fixture/只读检查工具放在 `tools/`，
-测试放在 `tests/{unit,integration}`。旧数据迁移/导入脚本归档在 `legacy/`，不属于 v1 引擎，
-并与 `tests/` 一样被 setuptools 排除在发布包之外。任何 stage 文件在 import 时都不得连接
-数据库或执行注册。
+测试放在 `tests/{unit,integration}`。ETL tests 被 setuptools 排除在发布包之外。任何 stage
+文件在 import 时都不得连接数据库或执行注册。
 
 普通 SDK 使用者无需 import ETL。ETL 专属第三方依赖必须声明在 `pyproject.toml` 的
 `[project.optional-dependencies].etl`，使用者按需执行 `pip install ".[etl]"`；不得为了某个

@@ -601,7 +601,7 @@ python scripts/ops/maintain_table_indexes.py \
 
 ```text
 wt_sdk/                 对外 SDK 包
-wt_sdk/etl/             可选 ETL runtime、CLI、工具、文档、测试与历史归档
+wt_sdk/etl/             可选 ETL runtime、CLI、工具、文档与测试
 scripts/ops/            运维命令
 scripts/inspect/        只读诊断工具
 scripts/dev/            可随时重建的测试表配置
