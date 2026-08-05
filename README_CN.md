@@ -144,7 +144,7 @@ with WTGatewayClient() as client:
     client.update_landing(
         f"{scope} AND step_id = 3",
         {"reward": 1.0, "step_reward": 1.0, "is_trainable": True},
-    )
+    )  # SDK 自动刷新 source_updated_at。
 
     trajectory = client.query_data(
         scope,
@@ -179,6 +179,18 @@ landing 和 serving 的 `messages`、`response`、`chosen_trace`、
 数组，不再是 Arrow `list<struct>`。SDK 暂不校验 OpenAI 或其他 provider 的
 内部结构；landing 可将 provider 原始数据保留在 `meta_json`，ETL 再向 serving
 写入归一化的 OpenAI 风格 payload JSON。
+
+### SDK 管理的时间字段
+
+| 字段 | 单位 | 含义 |
+| --- | --- | --- |
+| `created_at` | 保持调用方现有单位 | 原始轨迹创建时间，写入后不可修改。 |
+| `source_updated_at` | Unix epoch 毫秒 | 可能影响 ETL/serving 结果的 source 最后实质变化时间；model 自动初始化，landing update 默认刷新。 |
+| `serving_updated_at` | Unix epoch 毫秒 | serving 最后一次成功 ingest/upsert 的发布时间；landing 中始终为 null。 |
+
+回放或迁移时调用方可以显式提供 `source_updated_at`，否则
+`LandingRecord`/`ServingRecord` 会自动初始化。serving 写入保留该 source 时间，
+并在内部副本上生成新的 `serving_updated_at`，不会修改调用方传入的 model。
 
 ### 2. 消费已完成事件
 
@@ -264,7 +276,8 @@ serving_data.update(
 serving_record = ServingRecord(**serving_data)
 
 with WTGatewayClient() as client:
-    client.ingest_serving(serving_record)
+    # ETL 发布应支持安全重试，避免 query-then-write 竞态。
+    client.upsert_serving(serving_record)
     published = client.get_by_id(
         serving_record.id,
         exclude_none=True,
@@ -285,6 +298,14 @@ with WTGatewayClient() as client:
 自动兜底。单独一个 ID 无法定位 HASH bucket，因此 landing 高频查询应优先使用同时
 包含 `job_id` 和 `id` 的 `query_data()`。和 `query_data()` 一样，它返回普通字典，
 默认省略 null 表列，但不会修改 JSON 字符串内容。
+
+ETL 应通过 `upsert_serving()` 或 `upsert_serving_batch()` 发布完整记录。
+它们直接调用 dldb 的 `columns=["id"]` upsert，不应自行实现“先查询、再决定
+ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_updated_at` 表示
+最后一次成功发布时间，因此重试时允许变化。每条 upsert 记录都必须带非空且不可变
+的 `job_id`。dldb HASH 表不提供跨 bucket 唯一约束，因此调用方必须保证 `id`
+全局唯一，且已有 ID 不能迁移到另一个 `job_id`。保留 append/add 语义的
+`ingest_serving(_batch)` 仍可使用，也会刷新 `serving_updated_at`。
 
 serving 数据发布完成后，正式离线导出请使用 `export_data_batches()`。它默认查询
 serving，在返回第一批数据之前先生成完整的唯一 ID 清单，随后按精确 ID 取数并逐批
@@ -358,7 +379,7 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 | `ingest_landing(record)` | 写入一条 `LandingRecord`。 |
 | `ingest_landing_batch(records)` | 写入记录列表或 `LandingRecordBatch`。 |
 | `query_data(filter_query, ..., table=None, exclude_none=True, deserialize_json=False)` | 默认查询 landing，也可查询指定表；始终返回 `List[dict]`。 |
-| `update_landing(filter_query, updates, ...)` | 更新匹配记录。`id`、`created_at` 和 `job_id` 为受保护字段。 |
+| `update_landing(filter_query, updates, ..., touch_source_updated_at=True)` | patch 匹配记录并默认刷新 `source_updated_at`；SDK 时间字段以及 `id`、`created_at`、`job_id` 均受保护。 |
 | `count_landing(partition=None)` | 统计行数，可选指定原始 `job_id` 或 hash bucket。 |
 | `delete_landing(filter_query)` | 删除匹配的 landing 记录。 |
 
@@ -380,13 +401,21 @@ with WTGatewayClient() as client:
     )
 ```
 
-`update_landing()` 返回执行确认。dldb 目前不会返回跨逻辑分区精确汇总的匹配行数或更新行数。
+现有 `update_landing()` 调用不需要修改：新增的 keyword-only 参数
+`touch_source_updated_at` 默认为 `True`。更新 `is_trainable`、payload、reward、
+`meta_json`、`agent_model` 或任何 serving 会消费的 enrichment 字段时都必须保持
+默认值，包括 landing 原地 ETL。只有确认不会影响任何下游结果的纯运维/诊断更新
+才允许设置 `touch_source_updated_at=False`。ETL engine 应在字段值实际没有变化时
+避免调用 update。返回值中的 `updated_fields` 仍表示调用方字段，
+`effective_updated_fields` 表示实际提交字段；dldb 目前不会返回跨逻辑分区精确汇总
+的匹配行数或更新行数。
 
 ### Serving、搜索和分页
 
 | 方法 | 用途 |
 | --- | --- |
-| `ingest_serving(record)` / `ingest_serving_batch(records)` | 写入处理后的 serving 记录。 |
+| `ingest_serving(record)` / `ingest_serving_batch(records)` | append 写入 serving，并刷新 `serving_updated_at`。 |
+| `upsert_serving(record)` / `upsert_serving_batch(records)` | ETL 按全局唯一 `id` 发布；保留 `source_updated_at` 并刷新 `serving_updated_at`。 |
 | `query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
 | `search(query, ..., deserialize_json=False)` | 检索 serving 的 `search_text`、tags/SQL 或显式指定的标量字符串字段。 |

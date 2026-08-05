@@ -147,7 +147,7 @@ with WTGatewayClient() as client:
     client.update_landing(
         f"{scope} AND step_id = 3",
         {"reward": 1.0, "step_reward": 1.0, "is_trainable": True},
-    )
+    )  # source_updated_at is refreshed automatically.
 
     trajectory = client.query_data(
         scope,
@@ -184,6 +184,19 @@ array encoded as one string, not an Arrow `list<struct>`. The SDK deliberately
 does not enforce an OpenAI or provider-specific document shape; landing may keep
 provider-native raw data in `meta_json`, while ETL writes normalized OpenAI-style
 payload JSON into serving.
+
+### SDK-managed timestamps
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `created_at` | Existing caller-defined unit | Original trajectory creation time; immutable after ingestion. |
+| `source_updated_at` | Unix epoch milliseconds | Last substantive source change that may affect ETL/serving output. Automatically initialized and refreshed by landing updates. |
+| `serving_updated_at` | Unix epoch milliseconds | Last successful serving ingest/upsert publication. Always null in landing. |
+
+Callers may provide `source_updated_at` when replaying or migrating records;
+otherwise `LandingRecord`/`ServingRecord` initializes it. Serving writes preserve
+that source value and stamp a fresh `serving_updated_at` on an internal copy, so
+the caller's model is not mutated.
 
 ### 2. Consume Completed Events
 
@@ -272,7 +285,8 @@ serving_data.update(
 serving_record = ServingRecord(**serving_data)
 
 with WTGatewayClient() as client:
-    client.ingest_serving(serving_record)
+    # ETL publication should be retryable and race-free.
+    client.upsert_serving(serving_record)
     published = client.get_by_id(
         serving_record.id,
         exclude_none=True,
@@ -294,6 +308,17 @@ not fall back across the internal/external table boundary. Because an ID alone
 cannot identify a HASH bucket, prefer `query_data()` with both `job_id` and `id`
 on hot landing paths. Like `query_data()`, it returns a plain dictionary and
 omits null table columns by default without modifying JSON strings.
+
+ETL should publish complete records through `upsert_serving()` or
+`upsert_serving_batch()`. These methods call dldb's native upsert path with
+`columns=["id"]`; do not implement a query-then-ingest/update sequence. Repeated
+upserts converge to the same business content, while `serving_updated_at`
+records the most recent successful publication and may therefore change on a
+retry. Every upsert record requires a non-empty, immutable `job_id`. dldb HASH
+tables do not provide a uniqueness constraint across buckets, so callers must
+keep IDs globally unique and must never move an existing ID to another
+`job_id`. The append/add `ingest_serving(_batch)` methods remain available and
+also stamp `serving_updated_at`.
 
 For a formal offline export after serving data has been published, use
 `export_data_batches()`. It defaults to serving, captures a complete unique-ID
@@ -374,7 +399,7 @@ a presentation option cannot make an otherwise readable row fail.
 | ingest_landing(record) | Write one LandingRecord. |
 | ingest_landing_batch(records) | Write a list of records or LandingRecordBatch. |
 | query_data(filter_query, ..., table=None, exclude_none=True, deserialize_json=False) | Query landing by default, or a named table; always return `List[dict]`. |
-| update_landing(filter_query, updates, ...) | Update matching records. id, created_at, and job_id are protected. |
+| update_landing(filter_query, updates, ..., touch_source_updated_at=True) | Patch matching rows and refresh `source_updated_at` by default. SDK timestamps, `id`, `created_at`, and `job_id` are protected. |
 | count_landing(partition=None) | Count rows, optionally in one raw job_id or hash bucket. |
 | delete_landing(filter_query) | Delete matching landing records. |
 
@@ -396,13 +421,23 @@ with WTGatewayClient() as client:
     )
 ```
 
-update_landing() returns an execution acknowledgement. dldb does not yet return exact matched or updated counts across logical partitions.
+Existing `update_landing()` calls require no changes: the new keyword-only
+`touch_source_updated_at` defaults to `True`. Updates to `is_trainable`, payloads,
+rewards, `meta_json`, `agent_model`, or any enrichment consumed by serving must
+keep that default, including in-place landing ETL. Use
+`touch_source_updated_at=False` only for a purely operational/diagnostic patch
+that cannot affect any downstream result. The ETL engine should avoid calling
+update when values did not actually change. `update_landing()` returns caller
+fields in `updated_fields` and submitted fields in `effective_updated_fields`;
+dldb does not yet return exact matched or updated counts across logical
+partitions.
 
 ### Serving, Search, and Pagination
 
 | Method | Purpose |
 | --- | --- |
-| ingest_serving(record) / ingest_serving_batch(records) | Write processed serving records. |
+| ingest_serving(record) / ingest_serving_batch(records) | Append processed serving records and stamp `serving_updated_at`. |
+| upsert_serving(record) / upsert_serving_batch(records) | ETL publication by globally unique `id`; preserve `source_updated_at` and refresh `serving_updated_at`. |
 | query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False) | Query serving with the same filtering and HASH pruning behavior; always return `List[dict]`. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
 | search(query, ..., deserialize_json=False) | Search serving `search_text`, tags/SQL, or explicit scalar string fields. |

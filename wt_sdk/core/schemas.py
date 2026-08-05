@@ -19,6 +19,8 @@ BASE_FIELDS = [
     pa.field('id', pa.string(), nullable=False),
     pa.field('session_id', pa.string(), nullable=True),  # Optional for dataset types like PreTrain
     pa.field('created_at', pa.int64(), nullable=False),
+    pa.field('source_updated_at', pa.int64(), nullable=False),
+    pa.field('serving_updated_at', pa.int64(), nullable=True),
 
     # --- RL 核心  ---
     pa.field('step_id', pa.int32()),
@@ -94,6 +96,7 @@ LANDING_SCALAR_INDEXES = [
     ("job_id", "BTREE"),
     ("session_id", "BTREE"),
     ("created_at", "BTREE"),
+    ("source_updated_at", "BTREE"),
     ("is_terminal", "BITMAP"),
     ("is_trainable", "BITMAP"),
 ]
@@ -104,6 +107,8 @@ SERVING_SCALAR_INDEXES = [
     ("job_id", "BTREE"),
     ("session_id", "BTREE"),
     ("created_at", "BTREE"),
+    ("source_updated_at", "BTREE"),
+    ("serving_updated_at", "BTREE"),
     ("dataset_type", "BITMAP"),
     ("is_terminal", "BITMAP"),
     ("is_trainable", "BITMAP"),
