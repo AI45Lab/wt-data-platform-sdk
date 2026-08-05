@@ -15,7 +15,9 @@ from .exceptions import CheckpointError
 from .models import Checkpoint, checkpoint_identity
 
 
-DEFAULT_CHECKPOINT_TABLE = "wt_etl_checkpoints"
+PRODUCTION_CHECKPOINT_TABLE = "wind_tunnel_etl_checkpoints"
+TEST_CHECKPOINT_TABLE = "etl_checkpoints_test"
+DEFAULT_CHECKPOINT_TABLE = PRODUCTION_CHECKPOINT_TABLE
 
 ETL_CHECKPOINT_SCHEMA = pa.schema(
     [
@@ -224,6 +226,22 @@ def resolve_etl_state_db_uri(explicit: Optional[str] = None) -> str:
     return value.strip()
 
 
+def resolve_checkpoint_table(profile: str, explicit: Optional[str] = None) -> str:
+    """Resolve the checkpoint table from one shared WT SDK profile."""
+
+    if explicit is not None:
+        normalized_table = explicit.strip()
+        if not normalized_table:
+            raise ValueError("checkpoint table override must be non-empty")
+        return normalized_table
+    normalized_profile = profile.strip().lower()
+    if normalized_profile == "test":
+        return TEST_CHECKPOINT_TABLE
+    if normalized_profile in {"production", "prod"}:
+        return PRODUCTION_CHECKPOINT_TABLE
+    raise ValueError("checkpoint profile must be 'test' or 'production'")
+
+
 def _optional_int(value: object) -> Optional[int]:
     if value is None:
         return None
@@ -256,5 +274,8 @@ __all__ = [
     "DldbCheckpointStore",
     "ETL_CHECKPOINT_SCHEMA",
     "InMemoryCheckpointStore",
+    "PRODUCTION_CHECKPOINT_TABLE",
+    "TEST_CHECKPOINT_TABLE",
+    "resolve_checkpoint_table",
     "resolve_etl_state_db_uri",
 ]

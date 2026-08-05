@@ -15,34 +15,73 @@ from wt_sdk.etl import (
 )
 
 
-def test_builtin_serving_factory_reference_is_directly_loadable():
-    pipeline = run_module._load_pipeline(
-        "wt_sdk.etl.pipelines:build_serving_pipeline"
-    )
+def test_builtin_pipeline_short_name_is_directly_loadable():
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
 
-    assert pipeline.name == "serving_publish"
+    assert pipeline.name == "landing_to_serving_pipeline"
     assert [stage.name for stage in pipeline.ordered_stages] == [
         "build_chosen_trace",
         "derive_job_tags",
     ]
 
 
-def test_parser_accepts_repeated_job_and_session_ids():
+def test_parser_accepts_job_and_session_id_lists():
     args = run_module.build_parser().parse_args(
         [
-            "--pipeline-factory",
-            "wt_sdk.etl.pipelines:build_serving_pipeline",
+            "--pipeline",
+            "landing_to_serving_pipeline",
             "--job-id",
             "job-1",
             "--session-id",
             "session-1",
-            "--session-id",
             "session-2",
         ]
     )
 
     assert args.job_id == ["job-1"]
     assert args.session_id == ["session-1", "session-2"]
+
+    jobs = run_module.build_parser().parse_args(
+        [
+            "--pipeline",
+            "landing_to_serving_pipeline",
+            "--job-id",
+            "job-1",
+            "job-2",
+        ]
+    )
+    assert jobs.job_id == ["job-1", "job-2"]
+
+
+def test_parser_accepts_exact_session_pairs_from_multiple_jobs():
+    args = run_module.build_parser().parse_args(
+        [
+            "--pipeline",
+            "landing_to_serving_pipeline",
+            "--session",
+            "job-1",
+            "session-1",
+            "--session",
+            "job-2",
+            "session-2",
+        ]
+    )
+
+    assert args.session == [["job-1", "session-1"], ["job-2", "session-2"]]
+
+
+def test_list_pipelines_uses_short_module_names(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run.py", "--list-pipelines"],
+    )
+
+    assert run_module.main() == 0
+    assert json.loads(capsys.readouterr().out)["pipelines"] == [
+        "landing_enrichment_pipeline",
+        "landing_to_serving_pipeline",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -59,7 +98,7 @@ def test_stage_introspection_does_not_create_database_client(
     expect_details,
 ):
     pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
-    monkeypatch.setattr(run_module, "_load_pipeline", lambda reference: pipeline)
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
     monkeypatch.setattr(
         run_module,
         "WTGatewayClient",
@@ -68,7 +107,7 @@ def test_stage_introspection_does_not_create_database_client(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["run.py", "--pipeline-factory", "example:factory", flag],
+        ["run.py", "--pipeline", "example_pipeline", flag],
     )
 
     assert run_module.main() == 0
@@ -84,17 +123,118 @@ def test_stage_introspection_does_not_create_database_client(
     assert ("stages" in payload["pipelines"][0]) is expect_details
 
 
-def test_etl_execution_still_requires_explicit_profile(monkeypatch):
+def test_manual_etl_defaults_to_test_and_does_not_require_state_uri(
+    monkeypatch,
+    tmp_path,
+):
     pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
-    monkeypatch.setattr(run_module, "_load_pipeline", lambda reference: pipeline)
+    monkeypatch.delenv("WT_SDK_PROFILE", raising=False)
+    monkeypatch.delenv("WT_SDK_ETL_STATE_DB_URI", raising=False)
+
+    class FakeClient:
+        def __init__(self, config):
+            assert config.tables.profile == "test"
+            self.config = config
+
+        def close(self):
+            return None
+
+    class FakeEngine:
+        def __init__(self, client, checkpoint_store=None):
+            assert checkpoint_store is None
+
+        def run_jobs(self, pipeline, job_ids, dry_run=False):
+            assert job_ids == ["job-1"]
+            return RunSummary(
+                pipeline_name=pipeline.name,
+                pipeline_version=pipeline.version,
+                mode=pipeline.mode,
+            )
+
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
+    monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
+    monkeypatch.setattr(run_module, "ETLEngine", FakeEngine)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["run.py", "--pipeline-factory", "example:factory", "--job-id", "job-1"],
+        [
+            "run.py",
+            "--pipeline",
+            "example_pipeline",
+            "--job-id",
+            "job-1",
+            "--dry-run",
+            "--report-dir",
+            str(tmp_path),
+        ],
     )
 
-    with pytest.raises(SystemExit, match="--profile is required"):
-        run_module.main()
+    assert run_module.main() == 0
+
+
+def test_incremental_uses_env_profile_for_test_checkpoint_table(
+    monkeypatch,
+    tmp_path,
+):
+    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def close(self):
+            return None
+
+    class FakeCheckpointStore:
+        def __init__(self, db_uri, table_name):
+            captured["db_uri"] = db_uri
+            captured["table_name"] = table_name
+
+        def verify_ready(self):
+            return None
+
+        def close(self):
+            return None
+
+    class FakeEngine:
+        def __init__(self, client, checkpoint_store=None):
+            assert client.config.tables.profile == "test"
+            assert checkpoint_store is not None
+
+        def run_incremental(self, pipeline, **kwargs):
+            return RunSummary(
+                pipeline_name=pipeline.name,
+                pipeline_version=pipeline.version,
+                mode=pipeline.mode,
+            )
+
+    monkeypatch.setenv("WT_SDK_PROFILE", "test")
+    monkeypatch.setenv("WT_SDK_ETL_STATE_DB_URI", "s3://wind-tunnel-etl")
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
+    monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
+    monkeypatch.setattr(run_module, "DldbCheckpointStore", FakeCheckpointStore)
+    monkeypatch.setattr(run_module, "ETLEngine", FakeEngine)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run.py",
+            "--pipeline",
+            "example_pipeline",
+            "--start-from",
+            "0",
+            "--dry-run",
+            "--report-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert run_module.main() == 0
+    assert captured == {
+        "db_uri": "s3://wind-tunnel-etl",
+        "table_name": "etl_checkpoints_test",
+    }
 
 
 def test_summary_payload_contains_audit_counts_and_failed_row_ids():
@@ -187,7 +327,8 @@ def test_failed_pipeline_prints_report_and_returns_nonzero(
             del pipeline, session_keys, dry_run
             raise ETLRunFailed(summary)
 
-    monkeypatch.setattr(run_module, "_load_pipeline", lambda reference: pipeline)
+    monkeypatch.setenv("WT_SDK_PROFILE", "test")
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
     monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
     monkeypatch.setattr(run_module, "ETLEngine", FakeEngine)
     monkeypatch.setattr(
@@ -195,10 +336,8 @@ def test_failed_pipeline_prints_report_and_returns_nonzero(
         "argv",
         [
             "run.py",
-            "--pipeline-factory",
-            "example:factory",
-            "--profile",
-            "test",
+            "--pipeline",
+            "example_pipeline",
             "--job-id",
             "job-1",
             "--session-id",

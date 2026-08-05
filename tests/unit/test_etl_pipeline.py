@@ -13,9 +13,8 @@ from wt_sdk.etl import (
     StageContext,
     StageTransformError,
     UpdateIsTrainableStage,
-    build_landing_pipeline,
-    build_serving_pipeline,
     build_serving_publish_pipeline,
+    load_pipeline,
 )
 
 
@@ -141,6 +140,29 @@ def test_independent_stage_keeps_factory_declaration_order():
     ]
 
 
+def test_dependency_reorders_stages_even_when_declaration_is_reversed():
+    class FirstStage(ETLStage):
+        name = "first"
+        output_fields = ("search_text",)
+
+        def transform(self, record, context):
+            del record, context
+            return {"search_text": "first"}
+
+    class SecondStage(ETLStage):
+        name = "second"
+        output_fields = ("reference_answer",)
+        dependencies = ("first",)
+
+        def transform(self, record, context):
+            del record, context
+            return {"reference_answer": "second"}
+
+    ordered = PipelineDefinition.validate_dag((SecondStage(), FirstStage()))
+
+    assert [stage.name for stage in ordered] == ["first", "second"]
+
+
 def test_public_validate_dag_rejects_cycle():
     class FirstStage(ETLStage):
         name = "first"
@@ -169,7 +191,7 @@ def test_describe_dag_returns_machine_readable_stage_inventory():
 
     description = pipeline.describe_dag()
 
-    assert description["pipeline_name"] == "serving_publish"
+    assert description["pipeline_name"] == "landing_to_serving_pipeline"
     assert description["execution_order"] == [
         "normalize_claude_messages",
         "build_chosen_trace",
@@ -198,8 +220,8 @@ def test_optional_normalizer_can_skip_opencode_without_blocking_trace():
 
 
 def test_builtin_factories_are_no_argument_cli_factories():
-    serving = build_serving_pipeline()
-    landing = build_landing_pipeline()
+    serving = load_pipeline("landing_to_serving_pipeline")
+    landing = load_pipeline("landing_enrichment_pipeline")
 
     assert [stage.name for stage in serving.ordered_stages] == [
         "build_chosen_trace",

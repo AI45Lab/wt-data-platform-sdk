@@ -2,19 +2,15 @@
 
 Examples:
   python scripts/etl/run.py \
-    --profile test \
-    --pipeline-factory wt_sdk.etl.pipelines:build_landing_pipeline \
-    --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
+    --pipeline landing_enrichment_pipeline landing_to_serving_pipeline \
     --start-from 2026-08-01T00:00:00Z
 
   python scripts/etl/run.py \
-    --profile test \
-    --pipeline-factory wt_sdk.etl.pipelines:build_serving_pipeline \
-    --job-id 'dataset#harness#model#task#date#owner#extra'
+    --pipeline landing_to_serving_pipeline \
+    --job-id job-a job-b
 """
 
 import argparse
-import importlib
 import json
 import re
 from dataclasses import asdict
@@ -34,21 +30,11 @@ from wt_sdk.etl import (
     RecordFailure,
     RunSummary,
     SessionKey,
+    list_pipeline_names,
+    load_pipeline,
+    resolve_checkpoint_table,
     resolve_etl_state_db_uri,
 )
-
-
-def _load_pipeline(reference: str) -> PipelineDefinition:
-    if ":" not in reference:
-        raise ValueError("pipeline factory must use module:callable syntax")
-    module_name, attribute_name = reference.split(":", 1)
-    factory = getattr(importlib.import_module(module_name), attribute_name)
-    if not callable(factory):
-        raise TypeError(f"pipeline factory is not callable: {reference}")
-    pipeline = factory()
-    if not isinstance(pipeline, PipelineDefinition):
-        raise TypeError(f"pipeline factory did not return PipelineDefinition: {reference}")
-    return pipeline
 
 
 def _parse_time(value: str) -> int:
@@ -191,19 +177,25 @@ def _inspection_payload(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run WT landing/serving ETL pipelines")
     parser.add_argument(
-        "--pipeline-factory",
-        action="append",
-        required=True,
-        help="Repeatable module:callable returning PipelineDefinition; order is execution order.",
+        "--pipeline",
+        action="extend",
+        nargs="+",
+        default=None,
+        help="Pipeline short name(s); order is execution order.",
     )
     parser.add_argument(
         "--profile",
         choices=["production", "test"],
         default=None,
         help=(
-            "Required for ETL execution; not needed for --list-stages/--validate-only. "
-            "Production writes need --confirm-production."
+            "Overrides WT_SDK_PROFILE; omitted profile follows the environment or the SDK "
+            "test default. Production writes need --confirm-production."
         ),
+    )
+    parser.add_argument(
+        "--list-pipelines",
+        action="store_true",
+        help="List pipeline names available under wt_sdk/etl/pipelines and exit.",
     )
     parser.add_argument(
         "--list-stages",
@@ -231,8 +223,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--start-time", default=None, help="Manual inclusive range start.")
     parser.add_argument("--end-time", default=None, help="Manual inclusive range end.")
-    parser.add_argument("--job-id", action="append", default=None)
-    parser.add_argument("--session-id", action="append", default=None)
+    parser.add_argument("--job-id", action="extend", nargs="+", default=None)
+    parser.add_argument("--session-id", action="extend", nargs="+", default=None)
+    parser.add_argument(
+        "--session",
+        action="append",
+        nargs=2,
+        metavar=("JOB_ID", "SESSION_ID"),
+        default=None,
+        help="Exact job/session pair; repeat for pairs from different jobs.",
+    )
     parser.add_argument(
         "--source-filter",
         default=None,
@@ -242,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--confirm-production", action="store_true")
     parser.add_argument("--state-db-uri", default=None)
-    parser.add_argument("--checkpoint-table", default="wt_etl_checkpoints")
+    parser.add_argument("--checkpoint-table", default=None)
     parser.add_argument("--report-dir", default="etl_reports")
     return parser
 
@@ -250,8 +250,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
 
+    if args.list_pipelines:
+        print(
+            json.dumps(
+                {"pipelines": list(list_pipeline_names())},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if not args.pipeline:
+        raise SystemExit("--pipeline is required unless --list-pipelines is used")
     try:
-        pipelines = [_load_pipeline(reference) for reference in args.pipeline_factory]
+        pipelines = [load_pipeline(name) for name in args.pipeline]
         _validate_pipeline_order(pipelines)
     except Exception as exc:
         raise SystemExit(f"pipeline validation failed: {exc}") from exc
@@ -264,21 +276,19 @@ def main() -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    if args.profile is None:
-        raise SystemExit(
-            "--profile is required for ETL execution; it is optional only with "
-            "--list-stages or --validate-only"
-        )
     if args.session_id and not args.job_id:
         raise SystemExit("--session-id requires --job-id")
     if args.session_id and len(args.job_id) != 1:
         raise SystemExit("--session-id requires exactly one --job-id")
+    if args.session and (args.job_id or args.session_id):
+        raise SystemExit("--session cannot be combined with --job-id/--session-id")
     if args.end_time and not args.start_time:
         raise SystemExit("--end-time requires --start-time")
     if args.source_filter is not None and not args.source_filter.strip():
         raise SystemExit("--source-filter must be a non-empty WHERE expression")
+    has_job_selection = args.job_id is not None or args.session is not None
     manual_modes = sum(
-        value is not None for value in (args.job_id, args.start_time, args.source_filter)
+        (has_job_selection, args.start_time is not None, args.source_filter is not None)
     )
     if manual_modes > 1:
         raise SystemExit(
@@ -295,7 +305,7 @@ def main() -> int:
         serving_table=args.serving_table,
     )
     targets_production = (
-        args.profile == "production"
+        table_config.profile == "production"
         or table_config.landing_table == DEFAULT_LANDING_TABLE
         or table_config.serving_table == DEFAULT_SERVING_TABLE
     )
@@ -309,11 +319,16 @@ def main() -> int:
     outputs = []
     exit_code = 0
     try:
-        is_incremental = not args.job_id and not args.start_time and not args.source_filter
+        is_incremental = (
+            not has_job_selection and not args.start_time and not args.source_filter
+        )
         if is_incremental:
             checkpoint_store = DldbCheckpointStore(
                 resolve_etl_state_db_uri(args.state_db_uri),
-                table_name=args.checkpoint_table,
+                table_name=resolve_checkpoint_table(
+                    table_config.profile,
+                    args.checkpoint_table,
+                ),
             )
             checkpoint_store.verify_ready()
 
@@ -324,7 +339,13 @@ def main() -> int:
             pipeline_run_id = _new_pipeline_run_id(pipeline, started_at_ms)
             unexpected_failure = False
             try:
-                if args.job_id and args.session_id:
+                if args.session:
+                    summary = engine.run_sessions(
+                        pipeline,
+                        [SessionKey(job_id, session_id) for job_id, session_id in args.session],
+                        dry_run=args.dry_run,
+                    )
+                elif args.job_id and args.session_id:
                     summary = engine.run_sessions(
                         pipeline,
                         [SessionKey(args.job_id[0], session_id) for session_id in args.session_id],

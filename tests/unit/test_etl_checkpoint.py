@@ -1,11 +1,17 @@
+import sys
+
 import pandas as pd
 import pytest
 
-from wt_sdk.etl import Checkpoint, InMemoryCheckpointStore
+import scripts.ops.init_etl_checkpoint_table as init_checkpoint_script
 import wt_sdk.etl.checkpoint as checkpoint_module
+from wt_sdk.etl import Checkpoint, InMemoryCheckpointStore
 from wt_sdk.etl.checkpoint import (
     DldbCheckpointStore,
     ETL_CHECKPOINT_SCHEMA,
+    PRODUCTION_CHECKPOINT_TABLE,
+    TEST_CHECKPOINT_TABLE,
+    resolve_checkpoint_table,
     resolve_etl_state_db_uri,
 )
 
@@ -49,13 +55,20 @@ def test_etl_state_uri_requires_explicit_configuration(monkeypatch):
     assert resolve_etl_state_db_uri("s3://explicit") == "s3://explicit"
 
 
+def test_checkpoint_table_follows_shared_profile_unless_overridden():
+    assert resolve_checkpoint_table("test") == TEST_CHECKPOINT_TABLE
+    assert resolve_checkpoint_table("production") == PRODUCTION_CHECKPOINT_TABLE
+    assert resolve_checkpoint_table("prod") == PRODUCTION_CHECKPOINT_TABLE
+    assert resolve_checkpoint_table("test", "custom_checkpoint") == "custom_checkpoint"
+
+
 def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
     class Record:
         partition_type = ""
 
     class SchemaTable:
         def get(self, table_name):
-            assert table_name == "wt_etl_checkpoints"
+            assert table_name == PRODUCTION_CHECKPOINT_TABLE
             return Record()
 
     class Session:
@@ -66,19 +79,19 @@ def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
             self.frame = pd.DataFrame()
 
         def table_exists(self, table_name):
-            return table_name == "wt_etl_checkpoints"
+            return table_name == PRODUCTION_CHECKPOINT_TABLE
 
         def get_schema(self, table_name):
-            assert table_name == "wt_etl_checkpoints"
+            assert table_name == PRODUCTION_CHECKPOINT_TABLE
             return ETL_CHECKPOINT_SCHEMA
 
         def upsert(self, table_name, columns, datas):
-            assert table_name == "wt_etl_checkpoints"
+            assert table_name == PRODUCTION_CHECKPOINT_TABLE
             assert columns == ["id"]
             self.frame = datas
 
         def filter(self, table_name, query, limit, checkout_latest):
-            assert table_name == "wt_etl_checkpoints"
+            assert table_name == PRODUCTION_CHECKPOINT_TABLE
             assert "serving_publish|1|landing_test|serving_test|3" in query
             assert limit == 1
             assert checkout_latest is True
@@ -121,4 +134,41 @@ def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
     )
 
     assert loaded == checkpoint
-    assert session.tables["wt_etl_checkpoints"] is sentinel
+    assert session.tables[PRODUCTION_CHECKPOINT_TABLE] is sentinel
+
+
+def test_init_script_creates_test_and_production_tables_by_default(
+    monkeypatch,
+    capsys,
+):
+    initialized = []
+
+    class FakeStore:
+        def __init__(self, db_uri, table_name):
+            assert db_uri == "s3://wind-tunnel-etl"
+            self.table_name = table_name
+
+        def initialize(self):
+            initialized.append(self.table_name)
+            return True
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(init_checkpoint_script, "DldbCheckpointStore", FakeStore)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "init_etl_checkpoint_table.py",
+            "--db-uri",
+            "s3://wind-tunnel-etl",
+            "--confirm-create",
+        ],
+    )
+
+    assert init_checkpoint_script.main() == 0
+    assert initialized == [TEST_CHECKPOINT_TABLE, PRODUCTION_CHECKPOINT_TABLE]
+    output = capsys.readouterr().out
+    assert TEST_CHECKPOINT_TABLE in output
+    assert PRODUCTION_CHECKPOINT_TABLE in output

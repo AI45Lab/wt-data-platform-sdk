@@ -34,7 +34,7 @@ WT_SDK_S3_ALLOW_HTTP=true
 AWS_ACCESS_KEY_ID=replace-with-your-access-key
 AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 AWS_EC2_METADATA_DISABLED=true
-WT_SDK_PROFILE=production
+WT_SDK_PROFILE=test
 ```
 
 启动应用前加载配置：
@@ -56,7 +56,7 @@ export WT_SDK_S3_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=replace-with-your-access-key
 export AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 export AWS_EC2_METADATA_DISABLED=true
-export WT_SDK_PROFILE=production
+export WT_SDK_PROFILE=test
 python your_service.py
 ```
 
@@ -73,12 +73,19 @@ services:
 
 `WT_SDK_PROFILE` 用于选择默认逻辑表。显式传入的 `GatewayConfig` 配置以及 `search(table="...")` 等方法参数具有更高优先级。
 
-| Profile | Landing 表 | Serving 表 |
-| --- | --- | --- |
-| `production` 或未配置 | `wind_tunnel_landing` | `wind_tunnel_serving` |
-| `test` | `landing_test` | `serving_test` |
+| Profile | Landing 表 | Serving 表 | ETL checkpoint 表（仅运行 ETL 时使用） |
+| --- | --- | --- | --- |
+| `test` 或未配置 | `landing_test` | `serving_test` | `etl_checkpoints_test` |
+| `production` 或 `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `wind_tunnel_etl_checkpoints` |
 
-设置 `WT_SDK_PROFILE=test` 即可在不修改应用代码的情况下使用测试表。
+未配置 `WT_SDK_PROFILE` 时会安全地默认使用 `test`；访问生产表必须显式配置
+`production` 或 `prod`。
+
+checkpoint 表位于独立的 ETL database 中。只有初始化 checkpoint 表和运行默认增量
+ETL 时，才必须配置 `WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-etl`，或向 ETL 命令传入
+`--state-db-uri`。普通 SDK client、上游写入服务以及按 job/session/时间/filter 定向执行的
+手动 ETL 都不要求、也不会读取该配置；缺少它不会影响 `WT_SDK_PROFILE` 的解析。只有实际
+使用 ETL 状态库时，同一个 profile 才会选择上表中的 checkpoint 表。
 
 `EnvConfigManager` 使用独立的 `WT_SDK_ENV_CONFIG_DB_URI` 数据库访问
 `evaluation_env_config`，不受 `WT_SDK_PROFILE` 影响。上面的 endpoint 和 AWS
@@ -311,6 +318,12 @@ ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_upda
 以及内置的 chosen-trace/tags stage。贡献者必须遵守
 [`wt_sdk/etl/README.md`](wt_sdk/etl/README.md) 中的 stage contract 与接入规范；运维
 入口为 [`scripts/etl/run.py`](scripts/etl/run.py)。
+
+无需连接数据库即可列出当前已注册的 pipeline：
+
+```bash
+python scripts/etl/run.py --list-pipelines
+```
 
 serving 数据发布完成后，正式离线导出请使用 `export_data_batches()`。它默认查询
 serving，在返回第一批数据之前先生成完整的唯一 ID 清单，随后按精确 ID 取数并逐批

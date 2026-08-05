@@ -35,7 +35,7 @@ WT_SDK_S3_ALLOW_HTTP=true
 AWS_ACCESS_KEY_ID=replace-with-your-access-key
 AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 AWS_EC2_METADATA_DISABLED=true
-WT_SDK_PROFILE=production
+WT_SDK_PROFILE=test
 ```
 
 Load it before starting the application:
@@ -57,7 +57,7 @@ export WT_SDK_S3_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=replace-with-your-access-key
 export AWS_SECRET_ACCESS_KEY=replace-with-your-secret-key
 export AWS_EC2_METADATA_DISABLED=true
-export WT_SDK_PROFILE=production
+export WT_SDK_PROFILE=test
 python your_service.py
 ```
 
@@ -72,14 +72,24 @@ services:
 
 ### Table Profiles
 
-WT_SDK_PROFILE selects default logical tables. Explicit GatewayConfig values and method arguments such as search(table="...") take precedence.
+`WT_SDK_PROFILE` selects default logical tables. Explicit `GatewayConfig`
+values and method arguments such as `search(table="...")` take precedence.
 
-| Profile | Landing table | Serving table |
-| --- | --- | --- |
-| production or omitted | wind_tunnel_landing | wind_tunnel_serving |
-| test | landing_test | serving_test |
+| Profile | Landing table | Serving table | ETL checkpoint table (only when ETL runs) |
+| --- | --- | --- | --- |
+| `test` or omitted | `landing_test` | `serving_test` | `etl_checkpoints_test` |
+| `production` or `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `wind_tunnel_etl_checkpoints` |
 
-Set WT_SDK_PROFILE=test to use test tables without changing application code.
+Omitting `WT_SDK_PROFILE` safely defaults to `test`. Production access must be
+selected explicitly with `production` or `prod`.
+
+The checkpoint table is stored in a separate ETL database. Only checkpoint
+initialization and default incremental ETL require either
+`WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-etl` or the ETL command's
+`--state-db-uri` option. Ordinary SDK clients, upstream writers, and targeted
+manual ETL by job/session/time/filter do not require or read this setting.
+Missing it does not affect `WT_SDK_PROFILE` resolution. When the ETL state
+database is used, the same profile selects the checkpoint table shown above.
 
 `EnvConfigManager` uses the separate `WT_SDK_ENV_CONFIG_DB_URI` database for
 `evaluation_env_config`; it is not affected by `WT_SDK_PROFILE`. The endpoint
@@ -325,6 +335,12 @@ manual backfill modes, and the built-in chosen-trace/tag stages. Contributors
 must follow the stage contract and integration guide in
 [`wt_sdk/etl/README.md`](wt_sdk/etl/README.md); operational execution starts at
 [`scripts/etl/run.py`](scripts/etl/run.py).
+
+List the registered pipelines without connecting to any database:
+
+```bash
+python scripts/etl/run.py --list-pipelines
+```
 
 For a formal offline export after serving data has been published, use
 `export_data_batches()`. It defaults to serving, captures a complete unique-ID

@@ -46,6 +46,7 @@ class PipelineRegistry:
 def build_serving_publish_pipeline(
     normalization_stage: ETLStage | None = None,
     *,
+    name: str = "landing_to_serving_pipeline",
     version: str = "1",
 ) -> PipelineDefinition:
     """Build the serving pipeline with an optional provider normalization stage."""
@@ -68,7 +69,7 @@ def build_serving_publish_pipeline(
         return record.get("is_trainable") is True
 
     return PipelineDefinition(
-        name="serving_publish",
+        name=name,
         version=version,
         mode=PipelineMode.SERVING,
         stages=tuple(stages),
