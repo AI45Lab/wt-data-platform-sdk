@@ -10,9 +10,7 @@ from wt_sdk.etl import (
     RecordFailure,
     RunSummary,
     SessionKey,
-    build_serving_publish_pipeline,
 )
-from wt_sdk.etl.tests.unit.test_pipeline import NormalizeClaudeMessagesStage
 
 
 def test_builtin_pipeline_short_name_is_directly_loadable():
@@ -70,6 +68,14 @@ def test_parser_accepts_exact_session_pairs_from_multiple_jobs():
     assert args.session == [["job-1", "session-1"], ["job-2", "session-2"]]
 
 
+def test_parser_defaults_to_zero_settle_delay():
+    args = run_module.build_parser().parse_args(
+        ["--pipeline", "landing_to_serving_pipeline"]
+    )
+
+    assert args.settle_delay_seconds == 0
+
+
 def test_list_pipelines_uses_short_module_names(monkeypatch, capsys):
     monkeypatch.setattr(
         sys,
@@ -97,7 +103,7 @@ def test_stage_introspection_does_not_create_database_client(
     flag,
     expect_details,
 ):
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
     monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
     monkeypatch.setattr(
         run_module,
@@ -116,7 +122,6 @@ def test_stage_introspection_does_not_create_database_client(
     assert payload["valid"] is True
     assert payload["pipeline_count"] == 1
     assert payload["pipelines"][0]["execution_order"] == [
-        "normalize_claude_messages",
         "build_chosen_trace",
         "derive_job_tags",
     ]
@@ -127,7 +132,7 @@ def test_manual_etl_defaults_to_test_and_does_not_require_state_uri(
     monkeypatch,
     tmp_path,
 ):
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
     monkeypatch.delenv("WT_SDK_PROFILE", raising=False)
     monkeypatch.delenv("WT_SDK_ETL_STATE_DB_URI", raising=False)
 
@@ -176,7 +181,7 @@ def test_incremental_uses_env_profile_for_test_checkpoint_table(
     monkeypatch,
     tmp_path,
 ):
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
     captured = {}
 
     class FakeClient:
@@ -203,6 +208,8 @@ def test_incremental_uses_env_profile_for_test_checkpoint_table(
             assert checkpoint_store is not None
 
         def run_incremental(self, pipeline, **kwargs):
+            captured["settle_delay_ms"] = kwargs["settle_delay_ms"]
+            captured["run_started_at_ms"] = kwargs["run_started_at_ms"]
             return RunSummary(
                 pipeline_name=pipeline.name,
                 pipeline_version=pipeline.version,
@@ -211,6 +218,7 @@ def test_incremental_uses_env_profile_for_test_checkpoint_table(
 
     monkeypatch.setenv("WT_SDK_PROFILE", "test")
     monkeypatch.setenv("WT_SDK_ETL_STATE_DB_URI", "s3://wind-tunnel-etl")
+    monkeypatch.setattr(run_module.sdk_time, "now_ms", lambda: 12_000)
     monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
     monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
     monkeypatch.setattr(run_module, "DldbCheckpointStore", FakeCheckpointStore)
@@ -234,7 +242,68 @@ def test_incremental_uses_env_profile_for_test_checkpoint_table(
     assert captured == {
         "db_uri": "s3://wind-tunnel-etl",
         "table_name": "etl_checkpoints_test",
+        "settle_delay_ms": 0,
+        "run_started_at_ms": 12_000,
     }
+
+
+@pytest.mark.parametrize(
+    ("delay_args", "expected_end_ms"),
+    [
+        ([], 12_000),
+        (["--settle-delay-seconds", "2"], 10_000),
+    ],
+)
+def test_open_ended_manual_range_uses_fixed_start_cutoff_and_optional_delay(
+    monkeypatch,
+    tmp_path,
+    delay_args,
+    expected_end_ms,
+):
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def close(self):
+            return None
+
+    class FakeEngine:
+        def __init__(self, client, checkpoint_store=None):
+            assert checkpoint_store is None
+
+        def run_range(self, pipeline, *, start_ms, end_ms, page_size, dry_run):
+            captured.update(start_ms=start_ms, end_ms=end_ms)
+            return RunSummary(
+                pipeline_name=pipeline.name,
+                pipeline_version=pipeline.version,
+                mode=pipeline.mode,
+            )
+
+    monkeypatch.setattr(run_module.sdk_time, "now_ms", lambda: 12_000)
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
+    monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
+    monkeypatch.setattr(run_module, "ETLEngine", FakeEngine)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run.py",
+            "--pipeline",
+            "example_pipeline",
+            "--start-time",
+            "1",
+            "--dry-run",
+            "--report-dir",
+            str(tmp_path),
+            *delay_args,
+        ],
+    )
+
+    assert run_module.main() == 0
+    assert captured == {"start_ms": 1_000, "end_ms": expected_end_ms}
 
 
 def test_summary_payload_contains_audit_counts_and_failed_row_ids():
@@ -292,7 +361,7 @@ def test_failed_pipeline_prints_report_and_returns_nonzero(
     capsys,
     tmp_path,
 ):
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
     summary = RunSummary(
         pipeline_name=pipeline.name,
         pipeline_version=pipeline.version,

@@ -10,10 +10,8 @@ from wt_sdk.etl import (
     PipelineDefinition,
     PipelineMode,
     SessionValidationError,
-    StageContext,
     StageTransformError,
     UpdateIsTrainableStage,
-    build_serving_publish_pipeline,
     load_pipeline,
 )
 
@@ -38,7 +36,7 @@ def _row(**updates):
         "ground_truth_answer": None,
         "reference_answer": None,
         "search_text": None,
-        "agent_model": "claude-3-7-sonnet",
+        "agent_model": "opencode-model",
         "env_name": "test-env",
         "is_session_completed": True,
         "is_trainable": True,
@@ -51,29 +49,6 @@ def _row(**updates):
     }
     row.update(updates)
     return row
-
-
-class NormalizeClaudeMessagesStage(ETLStage):
-    name = "normalize_claude_messages"
-    version = "1"
-    required_fields = ("agent_model", "meta_json")
-    output_fields = ("messages",)
-
-    def applies(self, record, context: StageContext) -> bool:
-        del context
-        return (
-            record.get("is_trainable") is True
-            and "claude" in str(record.get("agent_model") or "").lower()
-        )
-
-    def transform(self, record, context: StageContext):
-        del record, context
-        return {
-            "messages": json.dumps(
-                [{"role": "user", "content": "normalized"}],
-                separators=(",", ":"),
-            )
-        }
 
 
 class SetTrainableStage(ETLStage):
@@ -99,11 +74,10 @@ class ProcessNonTrainableStage(ETLStage):
         return {"search_text": "non-trainable-stage-output"}
 
 
-def test_canonical_serving_pipeline_applies_claude_then_trace_then_tags():
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+def test_canonical_serving_pipeline_builds_trace_then_tags():
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     assert [stage.name for stage in pipeline.ordered_stages] == [
-        "normalize_claude_messages",
         "build_chosen_trace",
         "derive_job_tags",
     ]
@@ -113,11 +87,9 @@ def test_canonical_serving_pipeline_applies_claude_then_trace_then_tags():
     assert result.selected_rows == 1
     assert len(result.serving_records) == 1
     serving = result.serving_records[0]
-    assert json.loads(serving.messages) == [
-        {"role": "user", "content": "normalized"}
-    ]
+    assert json.loads(serving.messages) == [{"role": "user", "content": "raw"}]
     assert json.loads(serving.chosen_trace) == [
-        {"role": "user", "content": "normalized"},
+        {"role": "user", "content": "raw"},
         {"role": "assistant", "content": "answer"},
     ]
     assert serving.tags == ["dataset", "harness", "model", "task"]
@@ -128,14 +100,12 @@ def test_canonical_serving_pipeline_applies_claude_then_trace_then_tags():
 def test_public_validate_dag_returns_topological_order_without_pipeline_run():
     ordered = PipelineDefinition.validate_dag(
         (
-            NormalizeClaudeMessagesStage(),
             BuildChosenTraceStage(),
             DeriveJobTagsStage(),
         )
     )
 
     assert [stage.name for stage in ordered] == [
-        "normalize_claude_messages",
         "build_chosen_trace",
         "derive_job_tags",
     ]
@@ -145,14 +115,12 @@ def test_independent_stage_keeps_factory_declaration_order():
     ordered = PipelineDefinition.validate_dag(
         (
             DeriveJobTagsStage(),
-            NormalizeClaudeMessagesStage(),
             BuildChosenTraceStage(),
         )
     )
 
     assert [stage.name for stage in ordered] == [
         "derive_job_tags",
-        "normalize_claude_messages",
         "build_chosen_trace",
     ]
 
@@ -204,22 +172,21 @@ def test_public_validate_dag_rejects_cycle():
 
 
 def test_describe_dag_returns_machine_readable_stage_inventory():
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     description = pipeline.describe_dag()
 
     assert description["pipeline_name"] == "landing_to_serving_pipeline"
     assert description["execution_order"] == [
-        "normalize_claude_messages",
         "build_chosen_trace",
         "derive_job_tags",
     ]
     assert description["edges"] == []
-    assert description["stages"][1]["output_fields"] == ["chosen_trace"]
+    assert description["stages"][0]["output_fields"] == ["chosen_trace"]
 
 
 def test_canonical_serving_pipeline_skips_row_when_no_stage_applies():
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     result = pipeline.process_session([_row(is_trainable=False)])
 
@@ -267,15 +234,6 @@ def test_landing_pipeline_also_uses_each_stage_applicability_without_shared_filt
     }
 
 
-def test_optional_normalizer_can_skip_opencode_without_blocking_trace():
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
-
-    result = pipeline.process_session([_row(agent_model="opencode-model")])
-
-    assert result.selected_rows == 1
-    assert json.loads(result.serving_records[0].chosen_trace)[0]["content"] == "raw"
-
-
 def test_builtin_factories_are_no_argument_cli_factories():
     serving = load_pipeline("landing_to_serving_pipeline")
     landing = load_pipeline("landing_enrichment_pipeline")
@@ -289,7 +247,7 @@ def test_builtin_factories_are_no_argument_cli_factories():
 
 
 def test_job_tags_are_best_effort_and_invalid_name_becomes_null():
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     result = pipeline.process_session([_row(job_id="not-a-conventional-job")])
 
@@ -297,14 +255,14 @@ def test_job_tags_are_best_effort_and_invalid_name_becomes_null():
 
 
 def test_chosen_trace_rejects_malformed_response_json():
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     with pytest.raises(StageTransformError, match="response contains malformed JSON"):
         pipeline.process_session([_row(response="not-json")])
 
 
 def test_collect_failures_records_row_and_stage_while_continuing_session():
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
     rows = [
         _row(id="bad-row", step_id=0, response="not-json"),
         _row(id="good-row", step_id=1),
@@ -385,19 +343,36 @@ def test_stage_predicate_must_return_bool():
 
 
 def test_applicable_stage_requires_dependencies_to_have_run_for_record():
-    class DependentTraceStage(BuildChosenTraceStage):
-        name = "dependent_trace"
-        dependencies = ("normalize_claude_messages",)
+    class ConditionalSearchStage(ETLStage):
+        name = "conditional_search"
+        output_fields = ("search_text",)
+
+        def applies(self, record, context):
+            del context
+            return record.get("agent_model") == "special-model"
+
+        def transform(self, record, context):
+            del record, context
+            return {"search_text": "prepared"}
+
+    class DependentReferenceStage(ETLStage):
+        name = "dependent_reference"
+        dependencies = ("conditional_search",)
+        output_fields = ("reference_answer",)
+
+        def transform(self, record, context):
+            del record, context
+            return {"reference_answer": "ready"}
 
     pipeline = PipelineDefinition(
         name="dependency_runtime_check",
         version="1",
         mode=PipelineMode.SERVING,
-        stages=(NormalizeClaudeMessagesStage(), DependentTraceStage()),
+        stages=(ConditionalSearchStage(), DependentReferenceStage()),
     )
 
     with pytest.raises(StageTransformError, match="dependencies did not run"):
-        pipeline.process_session([_row(agent_model="gpt-5")])
+        pipeline.process_session([_row(agent_model="ordinary-model")])
 
 
 def test_session_scope_validation_rejects_duplicate_step_id():

@@ -75,8 +75,9 @@ class MockedNormalizeEnvNameStage(ETLStage):
 1. 在 `wt_sdk/etl/stages/<stage_name>.py` 实现 stage，并从 `stages/__init__.py` 导出。
 2. 添加新增stage的单元测试 `wt_sdk/etl/tests/unit/test_<stage_name>.py`，至少测试：适用/不适用、正常patch、
    坏数据、重复执行幂等。若有 dependency，再测试前序 patch 确实被读取。
-3. 把stage显式加入目标 `pipelines/<pipeline_name>.py` 使用的 factory/builder。不要依赖目录
-   自动发现；stage集合或结果语义变化时升级与其相关的pipeline version，确保兼容性解释。
+3. 在目标 `pipelines/<pipeline_name>.py` 的 `PipelineDefinition(stages=(...))` 中显式加入
+   stage。禁止通过其他 builder、注册器或目录自动发现隐藏添加；stage 集合或结果语义变化时
+   升级相关 pipeline version，确保兼容性解释。
 4. 在不连接数据库的情况下检查整条DAG的依赖关系合法性：
 
 ```bash
