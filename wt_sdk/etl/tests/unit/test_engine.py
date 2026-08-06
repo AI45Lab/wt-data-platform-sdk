@@ -106,9 +106,12 @@ class MarkTrainableStage(ETLStage):
     name = "mark_trainable"
     output_fields = ("is_trainable",)
 
-    def transform(self, record, context):
-        del record, context
-        return {"is_trainable": True}
+    def transform_session(self, session, context):
+        del context
+        return {
+            record["id"]: {"is_trainable": True}
+            for record in session
+        }
 
 
 def _checkpoint(store, pipeline, bucket=3):

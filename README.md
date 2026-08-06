@@ -614,6 +614,16 @@ python scripts/ops/cleanup_data.py --table landing_test \
 python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
 
+# Preview and patch filtered landing rows in the test profile
+python scripts/ops/update_table_rows.py --profile test --table landing \
+  --query "job_id = 'job-001' AND session_id = 'session-001'" \
+  --updates '{"is_session_completed": true}' --dry-run
+
+# Patch filtered serving rows in production (exact-table confirmation required)
+python scripts/ops/update_table_rows.py --profile prod --table serving \
+  --query "job_id = 'job-001' AND id = 'record-001'" \
+  --updates '{"is_session_completed": true}'
+
 # Create missing indexes and optimize every existing landing bucket
 python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_landing --all-partitions
@@ -622,6 +632,11 @@ python scripts/ops/maintain_table_indexes.py \
 python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_serving --all-partitions
 ```
+
+`update_table_rows.py` only targets the active landing/serving table selected
+by `--profile`; it does not accept custom or legacy table names. It skips rows
+already at the requested values, refreshes the role-specific SDK timestamp,
+and reports the row count confirmed by a latest-snapshot read after the update.
 
 scripts/dev contains disposable test-table setup helpers. scripts/migrations contains completed historical migrations and is not routine setup. See [scripts/README.md](scripts/README.md) for the full layout.
 

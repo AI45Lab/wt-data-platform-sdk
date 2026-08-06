@@ -1,12 +1,14 @@
-"""Contributor-facing ETL stage contract."""
+"""Contributor-facing, session-level ETL stage contract."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 
 Record = Mapping[str, Any]
-Patch = dict[str, Any]
+Session = tuple[Record, ...]
+RecordPatch = dict[str, Any]
+SessionPatch = dict[str, RecordPatch]
 
 
 @dataclass(frozen=True, order=True)
@@ -19,19 +21,21 @@ class SessionKey:
 
 @dataclass(frozen=True)
 class StageContext:
-    """Read-only context supplied to every stage invocation."""
+    """Read-only execution metadata supplied to one session-stage invocation."""
 
     pipeline_name: str
     pipeline_version: str
     session_key: SessionKey
-    session: Sequence[Record]
 
 
 class ETLStage(ABC):
-    """Pure, deterministic transformation that returns an in-memory patch.
+    """Pure transformation from one immutable session to record patches.
 
-    Subclasses declare metadata as class attributes and must not perform table
-    reads or writes. The engine owns persistence, retries, and checkpointing.
+    Every stage receives the complete working session after all prerequisite
+    stages have finished. Subclasses decide which records to process and return
+    ``{record_id: {field: desired_value}}``. They must not mutate the input or
+    perform I/O; the engine owns validation, patch merging, persistence,
+    retries, and checkpointing.
     """
 
     name: str = ""
@@ -40,13 +44,21 @@ class ETLStage(ABC):
     output_fields: tuple[str, ...] = ()
     dependencies: tuple[str, ...] = ()
 
-    def applies(self, record: Record, context: StageContext) -> bool:
-        """Return whether this stage should run for one record."""
-
-        _ = record, context
-        return True
-
     @abstractmethod
-    def transform(self, record: Record, context: StageContext) -> Patch:
-        """Return only the fields this stage proposes to change."""
+    def transform_session(
+        self,
+        session: Session,
+        context: StageContext,
+    ) -> SessionPatch:
+        """Return desired field patches keyed by existing session record ID."""
 
+
+__all__ = [
+    "ETLStage",
+    "Record",
+    "RecordPatch",
+    "Session",
+    "SessionKey",
+    "SessionPatch",
+    "StageContext",
+]

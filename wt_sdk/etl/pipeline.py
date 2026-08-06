@@ -5,7 +5,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Callable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 from wt_sdk.core.schemas import LANDING_SCHEMA
 from wt_sdk.models import ServingRecord
@@ -16,7 +16,7 @@ from .exceptions import (
     StageTransformError,
 )
 from .models import LandingRowPatch, PipelineMode, RecordFailure, SessionResult
-from .stage import ETLStage, Record, SessionKey, StageContext
+from .stage import ETLStage, Session, SessionKey, SessionPatch, StageContext
 
 
 IMMUTABLE_ETL_FIELDS = {
@@ -28,6 +28,7 @@ IMMUTABLE_ETL_FIELDS = {
     "serving_updated_at",
 }
 ETL_SCHEMA_FIELDS = frozenset(LANDING_SCHEMA.names)
+
 
 @dataclass(frozen=True)
 class PipelineDefinition:
@@ -102,70 +103,49 @@ class PipelineDefinition:
         collect_failures: bool = False,
     ) -> SessionResult:
         ordered_rows, session_key = _validate_and_order_session(rows)
-        original_session = tuple(_freeze(dict(row)) for row in ordered_rows)
+        original_by_id = {str(row["id"]): dict(row) for row in ordered_rows}
+        working_by_id = deepcopy(original_by_id)
+        ordered_ids = tuple(str(row["id"]) for row in ordered_rows)
         context = StageContext(
             pipeline_name=self.name,
             pipeline_version=self.version,
             session_key=session_key,
-            session=original_session,
         )
+        selected_ids: set[str] = set()
+        failure_stage = "__stage_execution__"
+        failure_record_id: str | None = None
 
-        landing_patches: list[LandingRowPatch] = []
-        serving_records: list[ServingRecord] = []
-        failures: list[RecordFailure] = []
-        selected_rows = 0
-        successful_rows = 0
+        try:
+            for stage in self.ordered_stages:
+                failure_stage = stage.name
+                stage_input = _freeze_session(working_by_id, ordered_ids)
+                _validate_stage_inputs(stage, stage_input)
+                try:
+                    proposed = stage.transform_session(stage_input, context)
+                except StageTransformError:
+                    raise
+                except Exception as exc:
+                    raise StageTransformError(
+                        f"stage '{stage.name}' failed for session {session_key}: {exc}"
+                    ) from exc
+                stage_patches = _validate_stage_session_patch(
+                    stage,
+                    proposed,
+                    known_record_ids=set(ordered_ids),
+                )
+                selected_ids.update(stage_patches)
+                for record_id, patch in stage_patches.items():
+                    working_by_id[record_id].update(deepcopy(patch))
 
-        for source_row in ordered_rows:
-            original = dict(source_row)
-            failure_stage = "__stage_selection__"
-            try:
-                working = dict(original)
-                executed_stages: set[str] = set()
-                row_selected = False
-
-                for stage in self.ordered_stages:
-                    failure_stage = stage.name
-                    if not _evaluate_predicate(
-                        stage.applies,
-                        working,
-                        context,
-                        label=f"stage '{stage.name}' applies",
-                    ):
-                        continue
-                    if not row_selected:
-                        selected_rows += 1
-                        row_selected = True
-                    skipped_dependencies = set(stage.dependencies) - executed_stages
-                    if skipped_dependencies:
-                        raise StageTransformError(
-                            f"stage '{stage.name}' applies but its dependencies did not run: "
-                            f"{sorted(skipped_dependencies)} for record {working.get('id')!r}"
-                        )
-                    missing = [
-                        field for field in stage.required_fields if field not in working
-                    ]
-                    if missing:
-                        raise StageTransformError(
-                            f"stage '{stage.name}' missing required fields {missing} "
-                            f"for record {working.get('id')!r}"
-                        )
-                    try:
-                        patch = stage.transform(deepcopy(working), context)
-                    except StageTransformError:
-                        raise
-                    except Exception as exc:
-                        raise StageTransformError(
-                            f"stage '{stage.name}' failed for record "
-                            f"{working.get('id')!r}: {exc}"
-                        ) from exc
-                    _validate_stage_patch(stage, patch)
-                    working.update(patch)
-                    executed_stages.add(stage.name)
-
-                if not row_selected:
+            landing_patches: list[LandingRowPatch] = []
+            serving_records: list[ServingRecord] = []
+            failure_stage = "__output_validation__"
+            for record_id in ordered_ids:
+                if record_id not in selected_ids:
                     continue
-                failure_stage = "__output_validation__"
+                failure_record_id = record_id
+                original = original_by_id[record_id]
+                working = working_by_id[record_id]
                 if self.mode is PipelineMode.LANDING:
                     changed = {
                         key: value
@@ -175,39 +155,44 @@ class PipelineDefinition:
                     if changed:
                         landing_patches.append(
                             LandingRowPatch(
-                                record_id=str(original["id"]),
+                                record_id=record_id,
                                 job_id=session_key.job_id,
                                 session_id=session_key.session_id,
                                 updates=changed,
                             )
                         )
                 else:
-                    working["serving_updated_at"] = None
-                    serving_records.append(ServingRecord(**working))
-            except Exception as exc:
-                if not collect_failures:
-                    raise
-                failures.append(
+                    serving_record = dict(working)
+                    serving_record["serving_updated_at"] = None
+                    serving_records.append(ServingRecord(**serving_record))
+        except Exception as exc:
+            if not collect_failures:
+                raise
+            attributed_record_id = getattr(exc, "record_id", None) or failure_record_id
+            return SessionResult(
+                session_key=session_key,
+                source_rows=len(ordered_rows),
+                selected_rows=len(selected_ids),
+                successful_rows=0,
+                failures=(
                     RecordFailure(
-                        record_id=_optional_record_id(original.get("id")),
+                        record_id=attributed_record_id,
                         job_id=session_key.job_id,
                         session_id=session_key.session_id,
                         stage_name=failure_stage,
                         error_type=type(exc).__name__,
                         message=str(exc),
-                    )
-                )
-                continue
-            successful_rows += 1
+                    ),
+                ),
+            )
 
         return SessionResult(
             session_key=session_key,
             source_rows=len(ordered_rows),
-            selected_rows=selected_rows,
-            successful_rows=successful_rows,
+            selected_rows=len(selected_ids),
+            successful_rows=len(selected_ids),
             landing_patches=tuple(landing_patches),
             serving_records=tuple(serving_records),
-            failures=tuple(failures),
         )
 
 
@@ -305,28 +290,6 @@ def _order_and_validate_stages(stages: Sequence[ETLStage]) -> tuple[ETLStage, ..
     return tuple(ordered)
 
 
-def _evaluate_predicate(
-    predicate: Callable[[Record, StageContext], bool],
-    record: Record,
-    context: StageContext,
-    *,
-    label: str,
-) -> bool:
-    try:
-        result = predicate(deepcopy(record), context)
-    except StageTransformError:
-        raise
-    except Exception as exc:
-        raise StageTransformError(
-            f"{label} failed for record {record.get('id')!r}: {exc}"
-        ) from exc
-    if not isinstance(result, bool):
-        raise StageTransformError(
-            f"{label} must return bool for record {record.get('id')!r}"
-        )
-    return result
-
-
 def _freeze(value: object) -> object:
     """Expose session context as a recursively read-only snapshot."""
 
@@ -339,21 +302,66 @@ def _freeze(value: object) -> object:
     return value
 
 
-def _optional_record_id(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
+def _freeze_session(
+    working_by_id: Mapping[str, Mapping[str, object]],
+    ordered_ids: Sequence[str],
+) -> Session:
+    return tuple(_freeze(dict(working_by_id[record_id])) for record_id in ordered_ids)
 
 
-def _validate_stage_patch(stage: ETLStage, patch: object) -> None:
-    if not isinstance(patch, dict):
-        raise StageTransformError(f"stage '{stage.name}' must return a dict patch")
-    undeclared = set(patch) - set(stage.output_fields)
-    if undeclared:
+def _validate_stage_inputs(stage: ETLStage, session: Session) -> None:
+    for record in session:
+        missing = [field for field in stage.required_fields if field not in record]
+        if missing:
+            raise StageTransformError(
+                f"stage '{stage.name}' missing required fields {missing} "
+                f"for record {record.get('id')!r}",
+                record_id=str(record.get("id")) if record.get("id") is not None else None,
+            )
+
+
+def _validate_stage_session_patch(
+    stage: ETLStage,
+    proposed: object,
+    *,
+    known_record_ids: set[str],
+) -> SessionPatch:
+    if not isinstance(proposed, dict):
         raise StageTransformError(
-            f"stage '{stage.name}' returned undeclared fields: {sorted(undeclared)}"
+            f"stage '{stage.name}' must return a dict keyed by record ID"
         )
+
+    validated: SessionPatch = {}
+    for raw_record_id, raw_patch in proposed.items():
+        if not isinstance(raw_record_id, str) or not raw_record_id.strip():
+            raise StageTransformError(
+                f"stage '{stage.name}' returned an invalid record ID: {raw_record_id!r}"
+            )
+        record_id = raw_record_id.strip()
+        if record_id != raw_record_id:
+            raise StageTransformError(
+                f"stage '{stage.name}' returned a non-canonical record ID: {raw_record_id!r}"
+            )
+        if record_id not in known_record_ids:
+            raise StageTransformError(
+                f"stage '{stage.name}' returned patch for unknown record ID {record_id!r}",
+                record_id=record_id,
+            )
+        if not isinstance(raw_patch, dict) or not raw_patch:
+            raise StageTransformError(
+                f"stage '{stage.name}' must return a non-empty dict patch "
+                f"for record {record_id!r}",
+                record_id=record_id,
+            )
+        undeclared = set(raw_patch) - set(stage.output_fields)
+        if undeclared:
+            raise StageTransformError(
+                f"stage '{stage.name}' returned undeclared fields for record "
+                f"{record_id!r}: {sorted(undeclared)}",
+                record_id=record_id,
+            )
+        validated[record_id] = dict(raw_patch)
+    return validated
 
 
 def _validate_and_order_session(

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from ..exceptions import StageTransformError
-from ..stage import ETLStage, Patch, Record, StageContext
+from ..stage import ETLStage, Record, Session, SessionPatch, StageContext
 
 
 class UpdateIsTrainableStage(ETLStage):
@@ -27,49 +27,27 @@ class UpdateIsTrainableStage(ETLStage):
         "step_id",
         "messages",
         "is_session_completed",
-        "is_trainable",
     )
     output_fields = ("is_trainable",)
     dependencies = ()
 
-    def __init__(self) -> None:
-        # PipelineDefinition invokes a stage once per row while providing the
-        # same immutable StageContext.session. A one-session identity cache
-        # avoids rebuilding the trie for every row without changing semantics.
-        self._cached_session: object | None = None
-        self._cached_trainable_ids: frozenset[str] | None = None
-
-    def applies(self, record: Record, context: StageContext) -> bool:
-        trainable_ids = self._trainable_ids(context)
-        if trainable_ids is None:
-            return False
-        desired = _record_id(record) in trainable_ids
-        return record.get("is_trainable") is not desired
-
-    def transform(self, record: Record, context: StageContext) -> Patch:
-        trainable_ids = self._trainable_ids(context)
-        if trainable_ids is None:
-            raise StageTransformError(
-                "update_is_trainable requires a completed session"
-            )
-        return {"is_trainable": _record_id(record) in trainable_ids}
-
-    def _trainable_ids(
+    def transform_session(
         self,
+        session: Session,
         context: StageContext,
-    ) -> frozenset[str] | None:
-        session = context.session
-        if self._cached_session is session:
-            return self._cached_trainable_ids
+    ) -> SessionPatch:
+        del context
+        if not _is_completed_session(session):
+            return {}
 
-        trainable_ids = (
-            frozenset(_detect_trainable_record_ids(session))
-            if _is_completed_session(session)
-            else None
-        )
-        self._cached_session = session
-        self._cached_trainable_ids = trainable_ids
-        return trainable_ids
+        trainable_ids = _detect_trainable_record_ids(session)
+        patches: SessionPatch = {}
+        for record in session:
+            record_id = _record_id(record)
+            patches[record_id] = {
+                "is_trainable": record_id in trainable_ids,
+            }
+        return patches
 
 
 @dataclass
@@ -152,21 +130,25 @@ def _is_completed_session(session: Sequence[Record]) -> bool:
     if not session:
         raise StageTransformError("session must contain at least one row")
 
-    completed_indexes: list[int] = []
+    completed_records: list[tuple[int, str]] = []
     for index, record in enumerate(session):
+        record_id = _record_id(record)
         value = record.get("is_session_completed")
         if value is not None and not isinstance(value, bool):
             raise StageTransformError(
-                "is_session_completed must be bool or null"
+                "is_session_completed must be bool or null",
+                record_id=record_id,
             )
         if value is True:
-            completed_indexes.append(index)
+            completed_records.append((index, record_id))
 
-    if not completed_indexes:
+    if not completed_records:
         return False
-    if completed_indexes[-1] != len(session) - 1:
+    completed_index, completed_record_id = completed_records[-1]
+    if completed_index != len(session) - 1:
         raise StageTransformError(
-            "is_session_completed must be set on the final session row"
+            "is_session_completed must be set on the final session row",
+            record_id=completed_record_id,
         )
     return True
 
@@ -174,17 +156,20 @@ def _is_completed_session(session: Sequence[Record]) -> bool:
 def _decode_messages(value: object, record_id: str) -> list[Any]:
     if not isinstance(value, str) or not value.strip():
         raise StageTransformError(
-            f"messages must be a non-empty JSON string for record {record_id!r}"
+            f"messages must be a non-empty JSON string for record {record_id!r}",
+            record_id=record_id,
         )
     try:
         messages = json.loads(value)
     except (TypeError, ValueError) as exc:
         raise StageTransformError(
-            f"messages contains malformed JSON for record {record_id!r}"
+            f"messages contains malformed JSON for record {record_id!r}",
+            record_id=record_id,
         ) from exc
     if not isinstance(messages, list):
         raise StageTransformError(
-            f"messages must be a JSON array for record {record_id!r}"
+            f"messages must be a JSON array for record {record_id!r}",
+            record_id=record_id,
         )
     return messages
 
@@ -224,7 +209,9 @@ def _record_id(record: Record) -> str:
 def _step_sort_key(record: Record) -> int:
     value = record.get("step_id")
     if isinstance(value, bool) or not isinstance(value, int):
+        record_id = _record_id(record)
         raise StageTransformError(
-            f"record {_record_id(record)!r} has invalid step_id: {value!r}"
+            f"record {record_id!r} has invalid step_id: {value!r}",
+            record_id=record_id,
         )
     return value

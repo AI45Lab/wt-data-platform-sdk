@@ -1,149 +1,193 @@
 # ETL Stage 贡献指南
 
-这份文档面向只需要贡献一个 stage 的开发者。完整引擎语义和所有运行参数见
+这份文档面向贡献 ETL stage 的开发者。完整运行参数、checkpoint 和运维说明见
 [`README.md`](README.md)。
 
-## 先选择要接入的 pipeline
+## 先选择 pipeline
 
-系统目前有两条 pipeline，开发者应根据 stage 最终要写入的数据生命周期选择其一：
+系统目前有两条 pipeline：
 
-- `landing_enrichment_pipeline`：在 landing 表内原地补充或修正字段。引擎只提交实际发生
-  变化的 patch，并由 SDK 自动刷新 `source_updated_at`。
-- `landing_to_serving_pipeline`：从 landing 读取轨迹，生成面向外部用户的 serving 字段，
-  最终按 `id` upsert 到 serving；它不会修改 landing。
+- `landing_enrichment_pipeline`：读取完整 landing session，在 landing 内原地补充或修正字段。
+  引擎只提交最终实际发生变化的字段，并由 SDK 刷新 `source_updated_at`。
+- `landing_to_serving_pipeline`：读取 enrichment 后的完整 landing session，生成面向外部用户的
+  serving 记录，最终按全局唯一 `id` upsert；它不修改 landing。
 
-先确认 stage 的输出应该持久化到 landing 还是 serving，再把它显式加入对应 pipeline。
-不要因为新增一个 stage 就新建 pipeline；只有整条处理流程具有独立的数据范围、执行模式或
-checkpoint 语义时，才需要和 pipeline owner 讨论新增 pipeline。
+一个 stage 应加入输出生命周期匹配的现有 pipeline。只有数据范围、执行模式或 checkpoint
+语义确实独立时，才讨论新增 pipeline。Pipeline 文件必须在 `stages=(...)` 中显式列出成员，
+禁止隐藏注册或自动发现。
 
-pipeline 不定义共享的业务触发条件。每个 stage 必须在自己的 `applies()` 中完整表达触发
-条件；一条记录只有在至少一个 stage 适用时才会被该 pipeline 持久化。因此，未来要处理
-`is_trainable=False` 或其他条件时，只需新增相应 stage，不需要修改 pipeline 级过滤器。
+## 唯一 Stage contract
 
-## Stage必须遵守的contract
-
-每个stage必须继承 `ETLStage`，声明以下class attributes，并实现两个方法：
+每个 stage 继承 `ETLStage`，声明元数据，并只实现一个业务接口：
 
 ```python
-from wt_sdk.etl import ETLStage, StageContext
+from wt_sdk.etl import ETLStage, Session, SessionPatch, StageContext
 
 
-class MockedNormalizeEnvNameStage(ETLStage):
-    """仅用于说明 stage contract 的 mocked 示例，不是实际业务 stage。"""
+class MockedNormalizeMessagesStage(ETLStage):
+    """仅用于说明 contract 的 mocked 示例，不是实际业务 stage。"""
 
-    name = "mocked_normalize_env_name"       # pipeline 内稳定且唯一
-    version = "1"                            # 结果语义变化时升级
-    required_fields = ("env_name",)          # 读取的 schema 字段
-    output_fields = ("env_name",)            # transform 可能返回的字段
-    dependencies = ()                        # 真正的前序 stage 名称
+    name = "mocked_normalize_messages"
+    version = "1"
+    required_fields = ("id", "messages")
+    output_fields = ("messages",)
+    dependencies = ()
 
-    def applies(self, record, context: StageContext) -> bool:
-        value = record.get("env_name")
-        return isinstance(value, str) and value != value.strip()
-
-    def transform(self, record, context: StageContext) -> dict:
-        return {"env_name": record["env_name"].strip()}
+    def transform_session(
+        self,
+        session: Session,
+        context: StageContext,
+    ) -> SessionPatch:
+        del context
+        patches = {}
+        for record in session:
+            desired_messages = mocked_normalize(record["messages"])
+            if desired_messages != record["messages"]:
+                patches[record["id"]] = {"messages": desired_messages}
+        return patches
 ```
 
-必须满足：
+`session` 是按 `step_id` 排序、递归只读的完整 `(job_id, session_id)` 快照。返回值必须是：
 
-- `applies()` 只能返回 `bool`；`transform()` 只能返回 `dict patch`，且不能包含
-  `output_fields` 之外的字段。
-- 禁止随机数、当前时间、网络、文件、SDK client、
-  dldb/S3 读写；stage 只负责内存转换。所有I/O操作会由ETL框架及引擎处理，stage无需且禁止自己进行任何不可逆的I/O操作。
-- 必须幂等。重复执行、checkpoint 恢复和手动 backfill 都不能持续产生新结果。
-- 不得擅自在stage代码里对 `id`、`job_id`、`session_id`、`created_at`、`xxx_updated_at`等具有明确约束意义的字段进行任何改动。不要手动调用 update/upsert，也不要手动更新时间戳。
-  Landing 实际字段发生变化时，引擎会通过 SDK 自动刷新 `source_updated_at`；serving 写入由
-  SDK 自动刷新 `serving_updated_at`。绕过它会破坏增量 checkpoint 的有效性。
-- JSON schema字段在ETl里的边界是JSON字符串；解析后必须重新序列化，不能返回 Python
+```python
+{
+    "existing-record-id": {
+        "declared_output_field": desired_value,
+    },
+}
+```
+
+Stage 自己决定处理零行、一行或多行。返回 `{}` 表示本 stage 不选择任何行；每个 record patch
+必须非空。不得返回 session 之外的 ID，也不得返回 `output_fields` 之外的字段。
+
+引擎按 DAG 逐个 stage 执行。一个 stage 完整返回并通过校验后，它对所有行的 patches 才会
+统一合并进内存 working session；下一个 stage 收到的是前序 stage 全部处理完成后的新快照。
+同一个 stage 内不会边遍历边改变输入，因此结果不依赖行遍历顺序。
+
+### 不同 pipeline mode 应如何返回
+
+`transform_session()` 返回哪些 record ID，既表达 stage 的业务范围，也决定这些记录是否被该
+pipeline 选中。Landing 和 Serving stage 应遵循不同的返回原则。
+
+**Landing enrichment stage** 应优先表达业务范围内每条记录的最终期望状态。例如
+trainability 可以分析完整 session 后，为业务范围内所有行返回最终布尔值：
+
+```python
+def transform_session(self, session, context):
+    del context
+    trainable_ids = mocked_detect_trainable_ids(session)
+    return {
+        record["id"]: {
+            "is_trainable": record["id"] in trainable_ids,
+        }
+        for record in session
+    }
+```
+
+即使部分返回值与 Landing 当前值相同也没有正确性问题。引擎会在所有 stage 完成后统一比较
+最终 working session 与原始 Landing，只对真实变化调用 `update_landing()`；未变化的行不会
+刷新 `source_updated_at`。Stage 可以提前跳过相同值以减少 `selected_rows` 和内存 patch，
+但这只是可选优化，不能因此漏掉需要从 `True` 改回 `False` 等反向修正。Audit 中
+`selected_rows` 表示 stage 返回过 patch 的记录数，`landing_rows_updated` 才表示实际写入数。
+
+**Landing-to-serving stage** 必须为所有满足该 stage 发布条件的记录返回 patch，即使对应 ID
+可能已经存在于 Serving，或者生成值与 Landing 当前字段相同。Stage 不得查询 Serving、不得
+自行做“是否已经发布”的判断，也不能因为可能重复就跳过；Serving upsert 和 checkpoint 负责
+幂等及崩溃重放。一条记录只要被该 pipeline 的任意 stage 返回 patch，就会使用所有 stage
+合并后的完整 working record 进行 Serving upsert。
+
+## 必须满足的约束
+
+- Stage 必须确定、幂等：相同 session 和 stage version 必须产生相同业务结果。
+- 禁止直接修改传入的 session。只能返回 patches。
+- 禁止网络、文件、SDK client、dldb/S3、数据库写入、当前时间、随机数和其他不可重放副作用。
+- 不得修改 `id`、`job_id`、`session_id`、`created_at`、`source_updated_at`、
+  `serving_updated_at`。不要手动调用 update/upsert 或更新时间戳。
+- `required_fields` 声明 stage 会读取的 schema 字段；`output_fields` 声明唯一允许返回的字段。
+- JSON schema 字段在 ETL 边界是 JSON 字符串；解析后必须重新序列化，不能返回 Python
   `dict/list`。
-- 同一pipeline内一个output field只能由一个stage拥有。坏数据应明确报错；只有业务
-  约定为best effort的字段才返回 `None`。
+- 同一 pipeline 内一个 output field 只能由一个 stage 拥有。
+- 坏数据应抛出明确异常；只有业务明确为 best effort 的输出才返回 `None`。
+- Stage 计算或校验失败时，当前 session 不产生任何业务输出，依赖它的 stage 不会继续执行。
+  已完成的内存 patch 也不会落库。
 
-### Stage之间互相存在前后序依赖时`dependencies` 怎么声明
+Landing pipeline 最终会把所有 stage 的 working session 与最初 landing session 做 diff；只有
+真实变化才调用 `update_landing()`。Serving pipeline 会发布至少被一个 stage 返回 patch 的
+record ID，并使用所有前序 stage 合并后的完整记录。
 
-很简单，直接在你的stage的dependencies里加上这个stage所依赖的stage的名字即可，etl引擎会自动进行依赖关系的有效性验证及执行顺序编排; 无依赖 stage 使用 pipeline 中的声明顺序作为稳定顺序。
-注意：只有当前 stage **必须读取前序 stage 生成的 patch**，或者没有前序结果就不能正确执行时，
-才声明 `dependencies=("mocked_previous_stage",)`。两个 stage 触发条件相同、执行顺序看起来相邻，
-或者更新不同字段，都不构成依赖；这种情况保持 `dependencies=()`留空即可。
+## `dependencies` 的含义
 
-依赖 stage 对某条记录跳过、但当前 stage 又适用时，该记录会失败。因此条件 stage 之间声明
-依赖时，必须保证 downstream 适用的每条记录上 upstream 也会执行。
+只有当前 stage 的结果依赖前序 stage 的完整输出时才声明依赖：
 
-## 从开发到接入步骤
+```python
+class MockedAnalyzeNormalizedSessionStage(ETLStage):
+    name = "mocked_analyze_normalized_session"
+    version = "1"
+    required_fields = ("id", "messages", "is_trainable")
+    output_fields = ("is_trainable",)
+    dependencies = ("mocked_normalize_messages",)
+
+    def transform_session(self, session, context):
+        del context
+        selected_ids = mocked_cross_row_analysis(session)
+        return {
+            record["id"]: {"is_trainable": record["id"] in selected_ids}
+            for record in session
+            if record["is_trainable"] is not (record["id"] in selected_ids)
+        }
+```
+
+这里第二个 stage 看到的 `messages` 已经包含第一个 stage 对整个 session 的全部修改。两个
+stage 条件相似、声明顺序相邻或修改不同字段，不构成依赖。无依赖 stage 使用 pipeline 中的
+声明顺序作为稳定顺序。
+
+## 从开发到接入
 
 1. 在 `wt_sdk/etl/stages/<stage_name>.py` 实现 stage，并从 `stages/__init__.py` 导出。
-2. 添加新增stage的单元测试 `wt_sdk/etl/tests/unit/test_<stage_name>.py`，至少测试：适用/不适用、正常patch、
-   坏数据、重复执行幂等。若有 dependency，再测试前序 patch 确实被读取。
-3. 在目标 `pipelines/<pipeline_name>.py` 的 `PipelineDefinition(stages=(...))` 中显式加入
-   stage。禁止通过其他 builder、注册器或目录自动发现隐藏添加；stage 集合或结果语义变化时
-   升级相关 pipeline version，确保兼容性解释。
-4. 在不连接数据库的情况下检查整条DAG的依赖关系合法性：
+2. 在 `wt_sdk/etl/tests/unit/test_<stage_name>.py` 添加单元测试，至少覆盖：
+   - 空 patch、单行 patch、多行 patch；
+   - 跨行分析；
+   - 坏数据；
+   - 重复执行幂等；
+   - 输入 session 不被修改；
+   - 如有 dependency，验证能看到前序 stage 更新后的完整 session。
+3. 在目标 `pipelines/<pipeline_name>.py` 的 `stages=(...)` 中显式加入 stage。Stage 集合或
+   结果语义变化时升级 pipeline version，使新 checkpoint/backfill 范围可明确管理。
+4. 不连接数据库检查完整 DAG：
 
 ```bash
 python -m wt_sdk.etl.cli.run \
-  --pipeline landing_to_serving_pipeline \
+  --pipeline landing_enrichment_pipeline \
   --validate-only
 
 python -m wt_sdk.etl.cli.run \
-  --pipeline landing_to_serving_pipeline \
+  --pipeline landing_enrichment_pipeline \
   --list-stages
 ```
 
-5. 运行默认单元测试：
+5. 运行完整 hermetic tests：
 
 ```bash
 python -m pytest -q
 ```
 
-## 贡献者自己测试完整 pipeline
+## 贡献者的真实 pipeline 测试
 
-可以，而且每个 stage PR 都应在 `landing_test` 自测“自己的 stage + 该 pipeline 原有
-stages”。推荐使用 `run_sessions()`：它会真实读取 landing、执行 canonical pipeline 并写入
-目标表，但不创建或推进 checkpoint，清理最简单。
+每个 stage PR 都应在 `landing_test` 测试“自己的 stage + 该 pipeline 原有 stages”。优先使用
+`run_sessions()`：它读取真实 landing、执行 canonical pipeline 并写目标表，但不创建或推进
+checkpoint。
 
 测试必须使用 UUID 生成独立的 `job_id/session_id/id`，只操作 `landing_test/serving_test`，
-并在 `finally` 中同时删除、验证两张表。可直接复用
-`wt_sdk.etl.tests.integration.helpers`：
+并在 `finally` 中删除并验证测试数据。可复用
+`wt_sdk.etl.tests.integration.helpers.cleanup_test_trajectory`。
 
 ```python
-import uuid
-
-from wt_sdk import WTGatewayClient
-from wt_sdk.etl import ETLEngine, SessionKey, load_pipeline
-from wt_sdk.etl.tests.integration.helpers import (
-    TEST_TABLE_CONFIG,
-    cleanup_test_trajectory,
+pipeline = load_pipeline("landing_enrichment_pipeline")
+summary = ETLEngine(client).run_sessions(
+    pipeline,
+    [SessionKey(job_id, session_id)],
 )
-
-
-def test_mocked_stage_inside_complete_pipeline():
-    suffix = uuid.uuid4().hex
-    job_id = f"mocked-dataset#mocked-harness#mocked-model#mocked-test#20260805#dev#{suffix}"
-    session_id = f"mocked-session-{suffix}"
-
-    with WTGatewayClient(config=TEST_TABLE_CONFIG) as client:
-        try:
-            client.ingest_landing_batch(
-                make_mocked_test_records(job_id, session_id, suffix)
-            )
-            pipeline = load_pipeline("landing_to_serving_pipeline")
-            summary = ETLEngine(client).run_sessions(
-                pipeline,
-                [SessionKey(job_id, session_id)],
-            )
-            assert summary.failed_rows == 0
-
-            rows = client.query_data(
-                filter_query=f"job_id = '{job_id}'",
-                partition=job_id,
-                table="serving_test",
-                checkout_latest=True,
-            )
-            assert_mocked_stage_output(rows)
-            assert_original_pipeline_stage_outputs(rows)
-        finally:
-            cleanup_test_trajectory(client, job_id)
+assert summary.failed_rows == 0
 ```
 
 真实测试命令：
@@ -154,6 +198,6 @@ WT_SDK_RUN_INTEGRATION=1 python -m pytest -q \
   wt_sdk/etl/tests/integration/test_<stage_name>.py
 ```
 
-不要复制或修改表里的真实行，不要清空整张 test 表。若必须测试 incremental 模式，还要为
-测试 pipeline 使用唯一 name/version，并在 `finally` 删除且验证对应 checkpoint；普通 stage
-接入验收优先使用上面的targeted session模式。
+不要复制或修改表里的真实行，不要清空整张 test 表。若必须测试 incremental，还要使用唯一
+pipeline name/version，并在 `finally` 删除并验证对应 checkpoint；普通 stage 接入优先使用
+targeted session 模式。
