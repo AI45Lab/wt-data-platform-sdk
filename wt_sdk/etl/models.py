@@ -64,6 +64,7 @@ class RunSummary:
     serving_rows_upserted: int = 0
     failures: list[RecordFailure] = field(default_factory=list)
     dirty_sessions: set[SessionKey] = field(default_factory=set)
+    successful_sessions: set[SessionKey] = field(default_factory=set)
 
     def add_session(self, result: SessionResult, *, dry_run: bool) -> None:
         self.sessions_processed += 1
@@ -74,6 +75,8 @@ class RunSummary:
         self.failures.extend(result.failures)
         if result.failures:
             self.sessions_failed += 1
+        else:
+            self.successful_sessions.add(result.session_key)
         self.landing_rows_updated += len(result.landing_patches)
         self.serving_rows_upserted += len(result.serving_records)
         if result.landing_patches and not dry_run:
@@ -106,6 +109,7 @@ class RunSummary:
         self.serving_rows_upserted += other.serving_rows_upserted
         self.failures.extend(other.failures)
         self.dirty_sessions.update(other.dirty_sessions)
+        self.successful_sessions.update(other.successful_sessions)
 
     @property
     def status(self) -> str:

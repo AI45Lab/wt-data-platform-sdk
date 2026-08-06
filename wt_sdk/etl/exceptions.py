@@ -16,17 +16,21 @@ class SessionValidationError(ETLError):
 class StageTransformError(ETLError):
     """Raised when a stage cannot transform otherwise readable source data."""
 
+    def __init__(self, message: str, *, record_id: str | None = None) -> None:
+        self.record_id = record_id
+        super().__init__(message)
+
 
 class CheckpointError(ETLError):
     """Raised when durable checkpoint state is missing or inconsistent."""
 
 
 class ETLRunFailed(ETLError):
-    """Raised after recoverable row failures have been collected for a run."""
+    """Raised after recoverable ETL failures have been collected for a run."""
 
     def __init__(self, summary) -> None:
         self.summary = summary
         super().__init__(
             f"pipeline {summary.pipeline_name!r} completed with "
-            f"{summary.failed_rows} failed row(s)"
+            f"{summary.failed_rows} failure(s)"
         )

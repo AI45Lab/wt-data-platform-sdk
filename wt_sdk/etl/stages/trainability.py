@@ -4,7 +4,7 @@ The landing pipeline is intentionally wired before its business rule is
 available so the contributor only needs to implement this stage and its tests.
 """
 
-from ..stage import ETLStage, Patch, Record, StageContext
+from ..stage import ETLStage, Session, SessionPatch, StageContext
 
 
 class UpdateIsTrainableStage(ETLStage):
@@ -15,19 +15,17 @@ class UpdateIsTrainableStage(ETLStage):
     required_fields = ()
     output_fields = ("is_trainable",)
 
-    def applies(self, record: Record, context: StageContext) -> bool:
-        _ = record, context
-        # TODO(etl-contributor): replace this placeholder with the precise,
-        # deterministic applicability rule for the trainability enrichment.
+    def transform_session(
+        self,
+        session: Session,
+        context: StageContext,
+    ) -> SessionPatch:
+        _ = session, context
+        # TODO(etl-contributor): analyze the complete immutable session and
+        # return {record_id: {"is_trainable": <bool>}} for the rows whose
+        # desired value this stage owns. The engine validates and merges the
+        # result, then refreshes source_updated_at only for a real final diff.
         raise NotImplementedError(
-            "UpdateIsTrainableStage.applies() must be implemented before execution"
-        )
-
-    def transform(self, record: Record, context: StageContext) -> Patch:
-        _ = record, context
-        # TODO(etl-contributor): return only {"is_trainable": <bool>} and keep
-        # the result deterministic/idempotent. The engine performs the diff and
-        # update_landing() refreshes source_updated_at only for a real patch.
-        raise NotImplementedError(
-            "UpdateIsTrainableStage.transform() must be implemented before execution"
+            "UpdateIsTrainableStage.transform_session() must be implemented "
+            "before execution"
         )

@@ -149,6 +149,15 @@ def _validate_pipeline_order(pipelines: list[PipelineDefinition]) -> None:
             raise ValueError("landing pipelines must run before serving pipelines in v1")
 
 
+def _pending_dirty_sessions(
+    dirty_sessions: set[SessionKey],
+    serving_summary: RunSummary,
+) -> set[SessionKey]:
+    """Return handoff sessions not already completed by normal serving discovery."""
+
+    return dirty_sessions - serving_summary.successful_sessions
+
+
 def _inspection_payload(
     pipelines: list[PipelineDefinition],
     *,
@@ -425,12 +434,23 @@ def main() -> int:
                 and pipeline.mode is PipelineMode.SERVING
                 and dirty_sessions
             ):
+                pending_dirty_sessions = _pending_dirty_sessions(
+                    dirty_sessions,
+                    summary,
+                )
                 try:
-                    immediate = engine.run_sessions(
-                        pipeline,
-                        dirty_sessions,
-                        dry_run=args.dry_run,
-                    )
+                    if pending_dirty_sessions:
+                        immediate = engine.run_sessions(
+                            pipeline,
+                            pending_dirty_sessions,
+                            dry_run=args.dry_run,
+                        )
+                    else:
+                        immediate = RunSummary(
+                            pipeline_name=pipeline.name,
+                            pipeline_version=pipeline.version,
+                            mode=pipeline.mode,
+                        )
                 except ETLRunFailed as exc:
                     immediate = exc.summary
                     exit_code = 1
