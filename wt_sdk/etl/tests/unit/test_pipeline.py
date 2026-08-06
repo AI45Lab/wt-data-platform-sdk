@@ -55,23 +55,26 @@ class SetTrainableStage(ETLStage):
     name = "set_trainable"
     output_fields = ("is_trainable",)
 
-    def transform(self, record, context):
-        del record, context
-        return {"is_trainable": True}
+    def transform_session(self, session, context):
+        del context
+        return {
+            record["id"]: {"is_trainable": True}
+            for record in session
+        }
 
 
 class ProcessNonTrainableStage(ETLStage):
     name = "process_non_trainable"
-    required_fields = ("is_trainable",)
+    required_fields = ("id", "is_trainable")
     output_fields = ("search_text",)
 
-    def applies(self, record, context):
+    def transform_session(self, session, context):
         del context
-        return record.get("is_trainable") is False
-
-    def transform(self, record, context):
-        del record, context
-        return {"search_text": "non-trainable-stage-output"}
+        return {
+            record["id"]: {"search_text": "non-trainable-stage-output"}
+            for record in session
+            if record.get("is_trainable") is False
+        }
 
 
 def test_canonical_serving_pipeline_builds_trace_then_tags():
@@ -99,10 +102,7 @@ def test_canonical_serving_pipeline_builds_trace_then_tags():
 
 def test_public_validate_dag_returns_topological_order_without_pipeline_run():
     ordered = PipelineDefinition.validate_dag(
-        (
-            BuildChosenTraceStage(),
-            DeriveJobTagsStage(),
-        )
+        (BuildChosenTraceStage(), DeriveJobTagsStage())
     )
 
     assert [stage.name for stage in ordered] == [
@@ -113,10 +113,7 @@ def test_public_validate_dag_returns_topological_order_without_pipeline_run():
 
 def test_independent_stage_keeps_factory_declaration_order():
     ordered = PipelineDefinition.validate_dag(
-        (
-            DeriveJobTagsStage(),
-            BuildChosenTraceStage(),
-        )
+        (DeriveJobTagsStage(), BuildChosenTraceStage())
     )
 
     assert [stage.name for stage in ordered] == [
@@ -130,18 +127,21 @@ def test_dependency_reorders_stages_even_when_declaration_is_reversed():
         name = "first"
         output_fields = ("search_text",)
 
-        def transform(self, record, context):
-            del record, context
-            return {"search_text": "first"}
+        def transform_session(self, session, context):
+            del context
+            return {record["id"]: {"search_text": "first"} for record in session}
 
     class SecondStage(ETLStage):
         name = "second"
         output_fields = ("reference_answer",)
         dependencies = ("first",)
 
-        def transform(self, record, context):
-            del record, context
-            return {"reference_answer": "second"}
+        def transform_session(self, session, context):
+            del context
+            return {
+                record["id"]: {"reference_answer": "second"}
+                for record in session
+            }
 
     ordered = PipelineDefinition.validate_dag((SecondStage(), FirstStage()))
 
@@ -154,18 +154,18 @@ def test_public_validate_dag_rejects_cycle():
         output_fields = ("search_text",)
         dependencies = ("second",)
 
-        def transform(self, record, context):
-            del record, context
-            return {"search_text": "first"}
+        def transform_session(self, session, context):
+            del session, context
+            return {}
 
     class SecondStage(ETLStage):
         name = "second"
         output_fields = ("reference_answer",)
         dependencies = ("first",)
 
-        def transform(self, record, context):
-            del record, context
-            return {"reference_answer": "second"}
+        def transform_session(self, session, context):
+            del session, context
+            return {}
 
     with pytest.raises(PipelineConfigurationError, match="cycle"):
         PipelineDefinition.validate_dag((FirstStage(), SecondStage()))
@@ -185,16 +185,16 @@ def test_describe_dag_returns_machine_readable_stage_inventory():
     assert description["stages"][0]["output_fields"] == ["chosen_trace"]
 
 
-def test_canonical_serving_pipeline_skips_row_when_no_stage_applies():
-    pipeline = load_pipeline("landing_to_serving_pipeline")
-
-    result = pipeline.process_session([_row(is_trainable=False)])
+def test_canonical_serving_pipeline_skips_session_when_no_stage_selects_rows():
+    result = load_pipeline("landing_to_serving_pipeline").process_session(
+        [_row(is_trainable=False)]
+    )
 
     assert result.selected_rows == 0
     assert result.serving_records == ()
 
 
-def test_serving_pipeline_can_publish_non_trainable_row_from_an_independent_stage():
+def test_serving_pipeline_can_publish_non_trainable_row_from_independent_stage():
     pipeline = PipelineDefinition(
         name="mixed_trigger_serving_pipeline",
         version="1",
@@ -216,7 +216,7 @@ def test_serving_pipeline_can_publish_non_trainable_row_from_an_independent_stag
     assert result.serving_records[0].tags is None
 
 
-def test_landing_pipeline_also_uses_each_stage_applicability_without_shared_filter():
+def test_landing_stage_controls_which_session_rows_it_selects():
     pipeline = PipelineDefinition(
         name="mixed_trigger_landing_pipeline",
         version="1",
@@ -228,7 +228,6 @@ def test_landing_pipeline_also_uses_each_stage_applicability_without_shared_filt
 
     assert result.selected_rows == 1
     assert result.successful_rows == 1
-    assert len(result.landing_patches) == 1
     assert result.landing_patches[0].updates == {
         "search_text": "non-trainable-stage-output"
     }
@@ -247,21 +246,23 @@ def test_builtin_factories_are_no_argument_cli_factories():
 
 
 def test_job_tags_are_best_effort_and_invalid_name_becomes_null():
-    pipeline = load_pipeline("landing_to_serving_pipeline")
-
-    result = pipeline.process_session([_row(job_id="not-a-conventional-job")])
+    result = load_pipeline("landing_to_serving_pipeline").process_session(
+        [_row(job_id="not-a-conventional-job")]
+    )
 
     assert result.serving_records[0].tags is None
 
 
-def test_chosen_trace_rejects_malformed_response_json():
+def test_chosen_trace_rejects_malformed_response_json_with_record_id():
     pipeline = load_pipeline("landing_to_serving_pipeline")
 
-    with pytest.raises(StageTransformError, match="response contains malformed JSON"):
+    with pytest.raises(StageTransformError, match="response contains malformed JSON") as exc:
         pipeline.process_session([_row(response="not-json")])
 
+    assert exc.value.record_id == "row-1"
 
-def test_collect_failures_records_row_and_stage_while_continuing_session():
+
+def test_collect_failure_discards_all_session_outputs():
     pipeline = load_pipeline("landing_to_serving_pipeline")
     rows = [
         _row(id="bad-row", step_id=0, response="not-json"),
@@ -271,15 +272,14 @@ def test_collect_failures_records_row_and_stage_while_continuing_session():
     result = pipeline.process_session(rows, collect_failures=True)
 
     assert result.source_rows == 2
-    assert result.selected_rows == 2
-    assert result.successful_rows == 1
-    assert [record.id for record in result.serving_records] == ["good-row"]
+    assert result.successful_rows == 0
+    assert result.serving_records == ()
     assert len(result.failures) == 1
     assert result.failures[0].record_id == "bad-row"
     assert result.failures[0].stage_name == "build_chosen_trace"
 
 
-def test_landing_pipeline_returns_only_actual_diff():
+def test_landing_pipeline_returns_only_actual_final_diff():
     pipeline = PipelineDefinition(
         name="landing_enrichment",
         version="1",
@@ -290,8 +290,95 @@ def test_landing_pipeline_returns_only_actual_diff():
     unchanged = pipeline.process_session([_row(is_trainable=True)])
     changed = pipeline.process_session([_row(is_trainable=False)])
 
+    assert unchanged.selected_rows == 1
     assert unchanged.landing_patches == ()
     assert changed.landing_patches[0].updates == {"is_trainable": True}
+
+
+def test_each_stage_sees_complete_session_after_previous_stage_barrier():
+    class NormalizeAllMessagesStage(ETLStage):
+        name = "normalize_all_messages"
+        required_fields = ("id", "messages")
+        output_fields = ("messages",)
+
+        def transform_session(self, session, context):
+            del context
+            return {
+                record["id"]: {
+                    "messages": json.dumps(
+                        [
+                            *json.loads(record["messages"]),
+                            {"role": "system", "content": "normalized"},
+                        ]
+                    )
+                }
+                for record in session
+            }
+
+    class AnalyzeNormalizedSessionStage(ETLStage):
+        name = "analyze_normalized_session"
+        required_fields = ("id", "step_id", "messages", "is_trainable")
+        output_fields = ("is_trainable",)
+        dependencies = ("normalize_all_messages",)
+
+        def transform_session(self, session, context):
+            del context
+            assert all(
+                json.loads(record["messages"])[-1]["content"] == "normalized"
+                for record in session
+            )
+            tail_step = max(record["step_id"] for record in session)
+            return {
+                record["id"]: {"is_trainable": record["step_id"] == tail_step}
+                for record in session
+            }
+
+    pipeline = PipelineDefinition(
+        name="session_barrier",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(AnalyzeNormalizedSessionStage(), NormalizeAllMessagesStage()),
+    )
+    rows = [
+        _row(id="row-1", step_id=0, is_trainable=True),
+        _row(id="row-2", step_id=1, is_trainable=False),
+    ]
+
+    result = pipeline.process_session(rows)
+
+    assert [stage.name for stage in pipeline.ordered_stages] == [
+        "normalize_all_messages",
+        "analyze_normalized_session",
+    ]
+    assert result.selected_rows == 2
+    patches = {patch.record_id: patch.updates for patch in result.landing_patches}
+    assert patches["row-1"]["is_trainable"] is False
+    assert patches["row-2"]["is_trainable"] is True
+    assert all(
+        json.loads(patch["messages"])[-1]["content"] == "normalized"
+        for patch in patches.values()
+    )
+
+
+def test_stage_receives_recursively_immutable_session():
+    class MutatingStage(ETLStage):
+        name = "mutating"
+        output_fields = ("search_text",)
+
+        def transform_session(self, session, context):
+            del context
+            session[0]["search_text"] = "illegal"
+            return {}
+
+    pipeline = PipelineDefinition(
+        name="immutable_input",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(MutatingStage(),),
+    )
+
+    with pytest.raises(StageTransformError, match="failed for session"):
+        pipeline.process_session([_row()])
 
 
 def test_pipeline_rejects_conflicting_output_owners():
@@ -312,9 +399,9 @@ def test_pipeline_rejects_fields_outside_unified_schema():
         name = "unknown_output"
         output_fields = ("not_a_real_column",)
 
-        def transform(self, record, context):
-            del record, context
-            return {"not_a_real_column": "value"}
+        def transform_session(self, session, context):
+            del session, context
+            return {}
 
     with pytest.raises(PipelineConfigurationError, match="outside the unified schema"):
         PipelineDefinition(
@@ -325,54 +412,33 @@ def test_pipeline_rejects_fields_outside_unified_schema():
         )
 
 
-def test_stage_predicate_must_return_bool():
-    class InvalidPredicateStage(SetTrainableStage):
-        def applies(self, record, context):
-            del record, context
-            return "yes"
-
-    pipeline = PipelineDefinition(
-        name="invalid_predicate",
-        version="1",
-        mode=PipelineMode.LANDING,
-        stages=(InvalidPredicateStage(),),
-    )
-
-    with pytest.raises(StageTransformError, match="must return bool"):
-        pipeline.process_session([_row()])
-
-
-def test_applicable_stage_requires_dependencies_to_have_run_for_record():
-    class ConditionalSearchStage(ETLStage):
-        name = "conditional_search"
+@pytest.mark.parametrize(
+    ("stage_result", "message"),
+    [
+        ([], "dict keyed by record ID"),
+        ({"unknown": {"search_text": "x"}}, "unknown record ID"),
+        ({"row-1": {}}, "non-empty dict patch"),
+        ({"row-1": {"reference_answer": "x"}}, "undeclared fields"),
+    ],
+)
+def test_session_patch_contract_is_validated(stage_result, message):
+    class InvalidPatchStage(ETLStage):
+        name = "invalid_patch"
         output_fields = ("search_text",)
 
-        def applies(self, record, context):
-            del context
-            return record.get("agent_model") == "special-model"
-
-        def transform(self, record, context):
-            del record, context
-            return {"search_text": "prepared"}
-
-    class DependentReferenceStage(ETLStage):
-        name = "dependent_reference"
-        dependencies = ("conditional_search",)
-        output_fields = ("reference_answer",)
-
-        def transform(self, record, context):
-            del record, context
-            return {"reference_answer": "ready"}
+        def transform_session(self, session, context):
+            del session, context
+            return stage_result
 
     pipeline = PipelineDefinition(
-        name="dependency_runtime_check",
+        name="invalid_patch",
         version="1",
-        mode=PipelineMode.SERVING,
-        stages=(ConditionalSearchStage(), DependentReferenceStage()),
+        mode=PipelineMode.LANDING,
+        stages=(InvalidPatchStage(),),
     )
 
-    with pytest.raises(StageTransformError, match="dependencies did not run"):
-        pipeline.process_session([_row(agent_model="ordinary-model")])
+    with pytest.raises(StageTransformError, match=message):
+        pipeline.process_session([_row()])
 
 
 def test_session_scope_validation_rejects_duplicate_step_id():
@@ -382,18 +448,14 @@ def test_session_scope_validation_rejects_duplicate_step_id():
         mode=PipelineMode.LANDING,
         stages=(SetTrainableStage(),),
     )
-    second = _row(id="row-2")
 
     with pytest.raises(SessionValidationError, match="duplicate step_id"):
-        pipeline.process_session([_row(), second])
+        pipeline.process_session([_row(), _row(id="row-2")])
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [
-        ("step_id", 1.5),
-        ("source_updated_at", None),
-    ],
+    [("step_id", 1.5), ("source_updated_at", None)],
 )
 def test_session_scope_validation_rejects_invalid_cursor_fields(field, value):
     pipeline = PipelineDefinition(

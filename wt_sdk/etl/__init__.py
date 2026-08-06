@@ -22,7 +22,15 @@ from .exceptions import (
 from .models import Checkpoint, PipelineMode, RecordFailure, RunSummary, SessionResult
 from .pipeline import PipelineDefinition
 from .pipelines import list_pipeline_names, load_pipeline
-from .stage import ETLStage, SessionKey, StageContext
+from .stage import (
+    ETLStage,
+    Record,
+    RecordPatch,
+    Session,
+    SessionKey,
+    SessionPatch,
+    StageContext,
+)
 from .stages import BuildChosenTraceStage, DeriveJobTagsStage, UpdateIsTrainableStage
 
 __all__ = [
@@ -41,10 +49,14 @@ __all__ = [
     "PipelineConfigurationError",
     "PipelineDefinition",
     "PipelineMode",
+    "Record",
     "RecordFailure",
+    "RecordPatch",
     "PRODUCTION_CHECKPOINT_TABLE",
     "RunSummary",
     "SessionKey",
+    "Session",
+    "SessionPatch",
     "SessionResult",
     "SessionValidationError",
     "StageContext",

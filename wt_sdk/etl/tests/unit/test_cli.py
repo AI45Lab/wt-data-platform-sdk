@@ -356,6 +356,22 @@ def test_summary_payload_contains_audit_counts_and_failed_row_ids():
     }
 
 
+def test_dirty_handoff_excludes_sessions_already_processed_by_serving():
+    already_processed = SessionKey("job-1", "session-1")
+    needs_handoff = SessionKey("job-2", "session-2")
+    summary = RunSummary(
+        pipeline_name="landing_to_serving_pipeline",
+        pipeline_version="1",
+        mode=PipelineMode.SERVING,
+        successful_sessions={already_processed},
+    )
+
+    assert run_module._pending_dirty_sessions(
+        {already_processed, needs_handoff},
+        summary,
+    ) == {needs_handoff}
+
+
 def test_failed_pipeline_prints_report_and_returns_nonzero(
     monkeypatch,
     capsys,

@@ -173,16 +173,14 @@ class _MockUpdateIsTrainableStage(ETLStage):
     required_fields = ("dataset_type", "is_trainable")
     output_fields = ("is_trainable",)
 
-    def applies(self, record, context):
+    def transform_session(self, session, context):
         del context
-        return (
-            record.get("dataset_type") == "ETL_INCREMENTAL_INTEGRATION_TEST"
+        return {
+            record["id"]: {"is_trainable": True}
+            for record in session
+            if record.get("dataset_type") == "ETL_INCREMENTAL_INTEGRATION_TEST"
             and record.get("is_trainable") is False
-        )
-
-    def transform(self, record, context):
-        del record, context
-        return {"is_trainable": True}
+        }
 
 
 def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
