@@ -31,3 +31,19 @@ python scripts/inspect/query_data.py --table landing_test --count
 ```
 
 Production-changing commands require their own explicit confirmation flags.
+
+Use `update_table_rows.py` for a filtered operational patch against one of the
+four active tables. The profile and role resolve the exact table; custom and
+legacy table names are intentionally unsupported:
+
+```bash
+python scripts/ops/update_table_rows.py \
+  --profile test --table landing \
+  --query "job_id = 'job-123' AND session_id = 'session-1'" \
+  --updates '{"is_session_completed": true}' --dry-run
+```
+
+Remove `--dry-run` to apply the patch. The command skips no-op rows, refreshes
+`source_updated_at` for landing or `serving_updated_at` for serving, requires
+exact-table confirmation unless `--yes` is supplied, and reports the count
+verified through a latest-snapshot read.

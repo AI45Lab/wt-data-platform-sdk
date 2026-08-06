@@ -587,6 +587,16 @@ python scripts/ops/cleanup_data.py --table landing_test \
 python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
 
+# 预览并修改 test profile 中符合条件的 landing 行
+python scripts/ops/update_table_rows.py --profile test --table landing \
+  --query "job_id = 'job-001' AND session_id = 'session-001'" \
+  --updates '{"is_session_completed": true}' --dry-run
+
+# 修改生产 serving 中符合条件的行（需要输入精确表名确认）
+python scripts/ops/update_table_rows.py --profile prod --table serving \
+  --query "job_id = 'job-001' AND id = 'record-001'" \
+  --updates '{"is_session_completed": true}'
+
 # 创建缺失索引并 optimize 所有已有 landing bucket
 python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_landing --all-partitions
@@ -595,6 +605,11 @@ python scripts/ops/maintain_table_indexes.py \
 python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_serving --all-partitions
 ```
+
+`update_table_rows.py` 只会访问 `--profile` 选中的四张 active
+landing/serving 表，不接受自定义表名或 legacy 表。脚本会跳过已经是目标值的
+行、刷新对应表角色的 SDK 时间戳，并在更新后通过 latest snapshot 回读校验，
+返回确认达到目标值的行数。
 
 `scripts/dev` 包含可随时重建的测试表配置脚本。`scripts/migrations` 包含已经执行完成的历史迁移，不属于日常初始化流程。完整目录说明见 [scripts/README.md](scripts/README.md)。
 
