@@ -18,7 +18,6 @@ from wt_sdk.etl import (
     DldbCheckpointStore,
     DeriveJobTagsStage,
     ETLEngine,
-    ETLStage,
     PipelineDefinition,
     PipelineMode,
     SessionKey,
@@ -142,6 +141,7 @@ def _incremental_record(
     step_id: int,
     source_updated_at: int,
     answer: str,
+    is_session_completed: bool,
     is_trainable: bool,
 ) -> LandingRecord:
     return LandingRecord(
@@ -159,28 +159,10 @@ def _incremental_record(
         response=json.dumps({"role": "assistant", "content": answer}),
         agent_model="opencode-integration-test",
         env_name="etl-incremental-integration-test",
-        is_session_completed=False,
+        is_session_completed=is_session_completed,
         is_trainable=is_trainable,
         meta_json=json.dumps({"source": "etl-incremental-integration-test"}),
     )
-
-
-class _MockUpdateIsTrainableStage(ETLStage):
-    """Integration-only stand-in for the pending enrichment contribution."""
-
-    name = "mock_update_is_trainable"
-    version = "1"
-    required_fields = ("dataset_type", "is_trainable")
-    output_fields = ("is_trainable",)
-
-    def transform_session(self, session, context):
-        del context
-        return {
-            record["id"]: {"is_trainable": True}
-            for record in session
-            if record.get("dataset_type") == "ETL_INCREMENTAL_INTEGRATION_TEST"
-            and record.get("is_trainable") is False
-        }
 
 
 def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
@@ -217,6 +199,7 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
                         step_id=0,
                         source_updated_at=initial_timestamp,
                         answer="old-answer-0",
+                        is_session_completed=False,
                         is_trainable=False,
                     ),
                     _incremental_record(
@@ -226,6 +209,7 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
                         step_id=1,
                         source_updated_at=initial_timestamp,
                         answer="old-answer-1",
+                        is_session_completed=False,
                         is_trainable=False,
                     ),
                     _incremental_record(
@@ -235,6 +219,7 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
                         step_id=2,
                         source_updated_at=initial_timestamp,
                         answer="old-answer-2",
+                        is_session_completed=True,
                         is_trainable=False,
                     ),
                 ]
@@ -257,12 +242,7 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
             assert first.selected_rows == 0
             assert first.serving_rows_upserted == 0
 
-            enrichment_pipeline = PipelineDefinition(
-                name="landing_enrichment_pipeline",
-                version="1",
-                mode=PipelineMode.LANDING,
-                stages=(_MockUpdateIsTrainableStage(),),
-            )
+            enrichment_pipeline = load_pipeline("landing_enrichment_pipeline")
             enrichment = engine.run_sessions(
                 enrichment_pipeline,
                 [SessionKey(job_id=job_id, session_id=session_id)],
@@ -283,6 +263,7 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
                         step_id=step_id,
                         source_updated_at=new_timestamp,
                         answer=f"new-answer-{step_id}",
+                        is_session_completed=False,
                         is_trainable=True,
                     )
                     for step_id in range(3, 6)
