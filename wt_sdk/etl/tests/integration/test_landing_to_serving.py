@@ -14,14 +14,15 @@ import wt_sdk._time as sdk_time
 from wt_sdk import LandingRecord, WTGatewayClient
 from wt_sdk.core.schemas import LANDING_PARTITIONS
 from wt_sdk.etl import (
+    BuildChosenTraceStage,
     DldbCheckpointStore,
+    DeriveJobTagsStage,
     ETLEngine,
     ETLStage,
     PipelineDefinition,
     PipelineMode,
     SessionKey,
     TEST_CHECKPOINT_TABLE,
-    build_serving_publish_pipeline,
     load_pipeline,
     resolve_etl_state_db_uri,
 )
@@ -187,9 +188,14 @@ class _MockUpdateIsTrainableStage(ETLStage):
 def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
     suffix = uuid.uuid4().hex
     session_id = f"incremental-session-{suffix}"
-    pipeline = build_serving_publish_pipeline(
+    pipeline = PipelineDefinition(
         name=f"integration_incremental_{suffix}",
         version="1",
+        mode=PipelineMode.SERVING,
+        stages=(
+            BuildChosenTraceStage(),
+            DeriveJobTagsStage(),
+        ),
     )
     checkpoint_store = DldbCheckpointStore(
         resolve_etl_state_db_uri(),
@@ -242,7 +248,6 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
             first_cutoff = initial_timestamp + 1_000
             first = engine.run_incremental(
                 pipeline,
-                settle_delay_ms=0,
                 start_from_ms=initial_timestamp,
                 run_started_at_ms=first_cutoff,
                 run_id=f"first-{suffix}",
@@ -306,7 +311,6 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
 
             second = engine.run_incremental(
                 pipeline,
-                settle_delay_ms=0,
                 run_started_at_ms=second_cutoff,
                 run_id=f"second-{suffix}",
                 buckets=[bucket],

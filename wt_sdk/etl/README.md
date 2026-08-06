@@ -55,8 +55,8 @@ v1 只有一个执行引擎，但支持两类 pipeline：
    `upsert_serving_batch()` 按全局唯一 `id` 幂等发布到 serving。
 
 两类 pipeline 在一个进程内按 **landing 在前、serving 在后** 串行执行。landing
-发生实际变化的 session 会被立即交给后续 serving pipeline，因而不需要等待默认的
-稳定期。若两类 pipeline 分开运行，serving 会在后续增量扫描中凭
+发生实际变化的 session 会被立即交给后续 serving pipeline；即使运维显式配置了稳定延迟，
+同一次命令中的两阶段也会立即衔接。若两类 pipeline 分开运行，serving 会在后续增量扫描中凭
 `source_updated_at` 最终发现变更。
 
 v1 不做以下事情：
@@ -109,8 +109,8 @@ landing enrichment 对下游有意义的字段发生实际变化，就必须使�
 `touch_source_updated_at=True`，让后续 `landing_to_serving_pipeline` 能通过增量扫描发现它。
 
 `landing_to_serving_pipeline` 永远不会修改 landing。它把 landing 的 `source_updated_at`
-原样保留到 serving，并单独刷新 serving 的 `serving_updated_at`。`--force-unsettled` 只把
-本次扫描 cutoff 的稳定延迟设为 0，也不会改变上述写入规则。
+原样保留到 serving，并单独刷新 serving 的 `serving_updated_at`。可选的
+`--settle-delay-seconds` 只影响本次扫描 cutoff，不会改变上述写入规则。
 
 手动模式包括：`--job-id`/`--session-id`、`--session JOB SESSION`、
 `--start-time [--end-time]` 和 `--source-filter`。这些模式都不读写全局 checkpoint；只有默认
@@ -183,11 +183,17 @@ session 的 landing update 或 serving batch upsert 成功后，页游标才推�
 成功后才推进 watermark。进程崩溃后会从持久化的活动窗口恢复，而不是依赖内存状态。
 恢复窗口完成后，同一次正式增量运行会继续追赶到本次启动时计算出的 cutoff。
 
-默认稳定期是 2 小时，单次运行的截止时间在启动时固定为：
+每次命令启动时都会冻结一个固定扫描时间。默认稳定延迟是 `0`，因此默认扫描截止时间就是
+本次命令的启动时间：
 
 ```text
 cutoff = run_started_at - settle_delay
+default: settle_delay = 0, cutoff = run_started_at
 ```
+
+固定 cutoff 不会随着扫描过程继续向后移动；命令启动后新产生的数据由下一次运行处理。
+只有显式传入例如 `--settle-delay-seconds 7200` 时，12:00 启动的命令才会只扫描到 10:00。
+稳定延迟是可选的上游稳定性保护，不是默认行为，也不是只回看最近一段时间。
 
 这里的 watermark 是“这个 pipeline、这个 bucket 已成功处理到哪个
 `source_updated_at`”，不是当前系统时间。首次运行以及以后首次出现的新 HASH bucket 都要
@@ -205,7 +211,8 @@ cutoff = run_started_at - settle_delay
 | 第一次启动持续增量 ETL | `--start-from 2026-08-01T00:00:00Z` | 从该时间 bootstrap；成功后保存/推进每个 bucket checkpoint。 |
 | 后续持续增量 ETL | 不传三种手动入口，也通常不再传 `--start-from` | 从已有 watermark 追到本次固定 cutoff。 |
 | 一次性补某段历史 | `--start-time 2026-08-01T00:00:00Z --end-time 2026-08-02T00:00:00Z` | 处理包含边界的时间范围，不读写全局 checkpoint。 |
-| 从某时刻手动补到稳定 cutoff | `--start-time 2026-08-01T00:00:00Z` | 结束时间取本次 `now - settle delay`，不读写 checkpoint。 |
+| 从某时刻手动补到命令启动时间 | `--start-time 2026-08-01T00:00:00Z` | 未传 `--end-time` 时默认结束于本次固定启动时间，不读写 checkpoint。 |
+| 显式留出两小时稳定期 | `--settle-delay-seconds 7200` | cutoff 为本次固定启动时间减两小时；从 watermark/start 处理到该 cutoff。 |
 
 以下手动模式不读写全局 checkpoint，并天然支持立即执行：
 
@@ -215,7 +222,6 @@ cutoff = run_started_at - settle_delay
 - `--start-time ... [--end-time ...]`
 - `--source-filter "..."`：高级 dldb WHERE predicate，对每个 landing HASH bucket 做
   discovery，再按发现的 `(job_id, session_id)` 加载完整 session；
-- `--force-unsettled`：把当前运行的稳定期设为 0；这是显式接受仍在变化数据的操作。
 
 `--job-id`/`--session-id` 使用空格分隔的 list，也允许重复传参；多个 job 各自只处理部分
 session 时使用可重复的 `--session JOB_ID SESSION_ID`，避免依赖不全局唯一的 session ID 猜测
@@ -293,7 +299,7 @@ run 结构化查询、告警、重试次数和保留周期，再增加单独的 
 | `--landing-table` | 可选，按 profile | 覆盖 source landing 逻辑表名。 | `--landing-table landing_test` |
 | `--serving-table` | 可选，按 profile | 覆盖 serving 目标逻辑表名。 | `--serving-table serving_test` |
 | `--page-size` | 可选，默认 `1000` | 每页轻量 discovery 行数；不是完整 session 截断大小，跨 page 的同一 session 会去重并整组加载。 | `--page-size 500` |
-| `--settle-delay-seconds` | 可选，默认 `7200` | 增量 cutoff 的稳定延迟；无显式 `--end-time` 的时间范围也使用它。 | `--settle-delay-seconds 3600` |
+| `--settle-delay-seconds` | 可选，默认 `0` | 从本次固定启动时间减去的可选稳定延迟；增量模式及未显式传 `--end-time` 的时间范围使用它。 | `--settle-delay-seconds 7200` |
 | `--start-from` | 首次增量/新 bucket 必需 | 首个 checkpoint 的包含式 bootstrap 时间；支持 ISO 8601、epoch 秒或 epoch 毫秒。不能与 job/time-range 模式组合。 | `--start-from 2026-08-01T00:00:00Z` |
 | `--start-time` | 手动时间范围必需 | 按 `source_updated_at` 做包含式 backfill；不推进全局 checkpoint。 | `--start-time 2026-08-04T00:00:00Z` |
 | `--end-time` | 可选 | 手动范围包含式结束时间；必须和 `--start-time` 一起使用。省略时取当前 cutoff。 | `--end-time 2026-08-05T00:00:00Z` |
@@ -301,7 +307,6 @@ run 结构化查询、告警、重试次数和保留周期，再增加单独的 
 | `--session-id` | 可选，接 list | 一个 job 下处理多个 session；要求恰好一个 `--job-id`。 | `--job-id job-a --session-id s1 s2` |
 | `--session JOB_ID SESSION_ID` | 可选，可重复 | 精确指定来自任意多个 job 的 job/session pair。不能与 `--job-id/--session-id` 混用。 | `--session job-a s1 --session job-b s2` |
 | `--source-filter` | 可选 | 高级手动 dldb WHERE 表达式；扫描所有 landing HASH buckets，发现后加载完整 session，不使用 checkpoint。与 job/time 模式互斥。 | `--source-filter "is_trainable = true AND agent_model = 'opencode'"` |
-| `--force-unsettled` | 可选，默认关闭 | 将本次隐式 cutoff 的 settle delay 设为 0；显式接受仍可能变化的数据。定向 job/session 本来就立即执行。 | `--force-unsettled` |
 | `--dry-run` | 可选，默认关闭 | 读取真实 source 并执行 stage `applies/transform` 与 output 校验，但不写 landing、serving 或 checkpoint。 | `--dry-run` |
 | `--confirm-production` | production 写入必需 | 非 dry-run production 执行的二次安全确认。 | `--confirm-production` |
 | `--state-db-uri` | 默认增量模式必需，可用环境变量 | ETL 控制表所在独立 dldb database；也可设置 `WT_SDK_ETL_STATE_DB_URI`。普通 SDK 和手动定向 ETL 不需要。 | `--state-db-uri s3://wind-tunnel-etl` |
@@ -433,4 +438,5 @@ checkpoint 表，因此无需再写 `--profile test`。命令行 `--profile` 仍
 
 生产运行前必须先在 test tables 完成验证，并确认 profile、表名、pipeline version、起始
 watermark 和 state database。`--start-from` 对首次 bootstrap 是包含边界；正常增量窗口是
-`(上次 watermark, 本次 cutoff]`。不要把 `--force-unsettled` 当成定时任务默认参数。
+`(上次 watermark, 本次 cutoff]`。默认 cutoff 等于命令启动时间；只有确认上游需要稳定窗口时
+才显式传入非零 `--settle-delay-seconds`。

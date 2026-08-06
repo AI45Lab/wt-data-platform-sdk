@@ -215,7 +215,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=1000,
         help="Number of lightweight discovery rows per page.",
     )
-    parser.add_argument("--settle-delay-seconds", type=int, default=7200)
+    parser.add_argument(
+        "--settle-delay-seconds",
+        type=int,
+        default=0,
+        help=(
+            "Optional safety lag subtracted from the command's fixed scan cutoff; "
+            "defaults to 0."
+        ),
+    )
     parser.add_argument(
         "--start-from",
         default=None,
@@ -238,7 +246,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Advanced manual dldb WHERE expression; scans all landing HASH buckets.",
     )
-    parser.add_argument("--force-unsettled", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--confirm-production", action="store_true")
     parser.add_argument("--state-db-uri", default=None)
@@ -333,6 +340,7 @@ def main() -> int:
             checkpoint_store.verify_ready()
 
         engine = ETLEngine(client, checkpoint_store=checkpoint_store)
+        scan_started_at_ms = sdk_time.now_ms()
         dirty_sessions: set[SessionKey] = set()
         for pipeline in pipelines:
             started_at_ms = sdk_time.now_ms()
@@ -368,8 +376,8 @@ def main() -> int:
                     end_ms = (
                         _parse_time(args.end_time)
                         if args.end_time
-                        else sdk_time.now_ms()
-                        - (0 if args.force_unsettled else args.settle_delay_seconds * 1000)
+                        else scan_started_at_ms
+                        - args.settle_delay_seconds * 1000
                     )
                     summary = engine.run_range(
                         pipeline,
@@ -381,16 +389,13 @@ def main() -> int:
                 else:
                     summary = engine.run_incremental(
                         pipeline,
-                        settle_delay_ms=(
-                            0
-                            if args.force_unsettled
-                            else args.settle_delay_seconds * 1000
-                        ),
+                        settle_delay_ms=args.settle_delay_seconds * 1000,
                         page_size=args.page_size,
                         start_from_ms=(
                             _parse_time(args.start_from) if args.start_from else None
                         ),
                         dry_run=args.dry_run,
+                        run_started_at_ms=scan_started_at_ms,
                         run_id=pipeline_run_id,
                     )
             except ETLRunFailed as exc:

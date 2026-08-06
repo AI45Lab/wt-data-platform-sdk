@@ -39,7 +39,7 @@ class ETLEngine:
         self,
         pipeline: PipelineDefinition,
         *,
-        settle_delay_ms: int = 2 * 60 * 60 * 1000,
+        settle_delay_ms: int = 0,
         page_size: int = 1000,
         start_from_ms: Optional[int] = None,
         dry_run: bool = False,
