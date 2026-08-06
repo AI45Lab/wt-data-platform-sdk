@@ -22,7 +22,6 @@ from .exceptions import (
 from .models import Checkpoint, PipelineMode, RecordFailure, RunSummary, SessionResult
 from .pipeline import PipelineDefinition
 from .pipelines import list_pipeline_names, load_pipeline
-from .registry import PipelineRegistry, build_serving_publish_pipeline
 from .stage import ETLStage, SessionKey, StageContext
 from .stages import BuildChosenTraceStage, DeriveJobTagsStage, UpdateIsTrainableStage
 
@@ -43,7 +42,6 @@ __all__ = [
     "PipelineDefinition",
     "PipelineMode",
     "RecordFailure",
-    "PipelineRegistry",
     "PRODUCTION_CHECKPOINT_TABLE",
     "RunSummary",
     "SessionKey",
@@ -53,7 +51,6 @@ __all__ = [
     "StageTransformError",
     "TEST_CHECKPOINT_TABLE",
     "UpdateIsTrainableStage",
-    "build_serving_publish_pipeline",
     "list_pipeline_names",
     "load_pipeline",
     "resolve_checkpoint_table",

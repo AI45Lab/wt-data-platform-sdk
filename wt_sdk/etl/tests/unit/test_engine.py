@@ -9,10 +9,10 @@ from wt_sdk.etl import (
     PipelineDefinition,
     PipelineMode,
     SessionKey,
+    load_pipeline,
 )
 
-from wt_sdk.etl.tests.unit.test_pipeline import NormalizeClaudeMessagesStage, _row
-from wt_sdk.etl.registry import build_serving_publish_pipeline
+from wt_sdk.etl.tests.unit.test_pipeline import _row
 
 
 class FakeGatewayClient:
@@ -132,7 +132,7 @@ def test_incremental_serving_run_commits_checkpoint_after_upsert():
     ]
     client = FakeGatewayClient(rows)
     store = InMemoryCheckpointStore()
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
     engine = ETLEngine(client, checkpoint_store=store)
 
     summary = engine.run_incremental(
@@ -163,6 +163,37 @@ def test_incremental_serving_run_commits_checkpoint_after_upsert():
     assert _checkpoint(store, pipeline).committed_until_ms == 6_000
 
 
+def test_incremental_default_cutoff_is_the_frozen_run_start_without_delay():
+    rows = [
+        _row(
+            id="at-cutoff",
+            session_id="at-cutoff-session",
+            source_updated_at=5_000,
+            _bucket=3,
+        ),
+        _row(
+            id="after-cutoff",
+            session_id="after-cutoff-session",
+            source_updated_at=5_001,
+            _bucket=3,
+        ),
+    ]
+    client = FakeGatewayClient(rows)
+    store = InMemoryCheckpointStore()
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    summary = ETLEngine(client, checkpoint_store=store).run_incremental(
+        pipeline,
+        start_from_ms=0,
+        run_started_at_ms=5_000,
+        buckets=[3],
+    )
+
+    assert summary.discovery_rows == 1
+    assert set(client.serving) == {"at-cutoff"}
+    assert _checkpoint(store, pipeline).committed_until_ms == 5_000
+
+
 def test_incremental_can_be_limited_to_selected_hash_buckets():
     rows = [
         _row(
@@ -180,7 +211,7 @@ def test_incremental_can_be_limited_to_selected_hash_buckets():
     ]
     client = FakeGatewayClient(rows)
     store = InMemoryCheckpointStore()
-    pipeline = build_serving_publish_pipeline()
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     summary = ETLEngine(client, checkpoint_store=store).run_incremental(
         pipeline,
@@ -248,10 +279,7 @@ def test_serving_checkpoint_rediscovers_enriched_old_rows_and_new_rows():
     ]
     client = FakeGatewayClient(old_rows)
     store = InMemoryCheckpointStore()
-    serving_pipeline = build_serving_publish_pipeline(
-        name="serving_after_enrichment",
-        version="1",
-    )
+    serving_pipeline = load_pipeline("landing_to_serving_pipeline")
     enrichment_pipeline = PipelineDefinition(
         name="landing_enrichment_pipeline",
         version="1",
@@ -318,7 +346,7 @@ def test_serving_checkpoint_rediscovers_enriched_old_rows_and_new_rows():
 def test_manual_range_does_not_create_or_advance_checkpoint():
     client = FakeGatewayClient([_row(source_updated_at=1_000, _bucket=3)])
     store = InMemoryCheckpointStore()
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
     engine = ETLEngine(client, checkpoint_store=store)
 
     summary = engine.run_range(pipeline, start_ms=0, end_ms=2_000)
@@ -334,7 +362,7 @@ def test_manual_source_filter_loads_each_full_session_only_once_across_pages():
         _row(id="row-3", step_id=0, session_id="session-2", _bucket=3),
     ]
     client = FakeGatewayClient(rows)
-    pipeline = build_serving_publish_pipeline()
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     summary = ETLEngine(client).run_filter(
         pipeline,
@@ -353,7 +381,7 @@ def test_multiple_jobs_are_supported_in_one_manual_run():
     first = _row(id="row-1", job_id="job-a", session_id="session-a", _bucket=3)
     second = _row(id="row-2", job_id="job-b", session_id="session-b", _bucket=4)
     client = FakeGatewayClient([first, second])
-    pipeline = build_serving_publish_pipeline()
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     summary = ETLEngine(client).run_jobs(
         pipeline,
@@ -368,7 +396,7 @@ def test_multiple_jobs_are_supported_in_one_manual_run():
 def test_failed_write_keeps_resumable_active_window_and_does_not_advance_watermark():
     client = FailingServingClient([_row(source_updated_at=1_000, _bucket=3)])
     store = InMemoryCheckpointStore()
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
     engine = ETLEngine(client, checkpoint_store=store)
 
     try:
@@ -409,7 +437,7 @@ def test_targeted_session_uses_job_and_session_scope():
         _row(id="other", session_id="session-2", _bucket=3),
     ]
     client = FakeGatewayClient(rows)
-    pipeline = build_serving_publish_pipeline(NormalizeClaudeMessagesStage())
+    pipeline = load_pipeline("landing_to_serving_pipeline")
 
     summary = ETLEngine(client).run_sessions(
         pipeline,

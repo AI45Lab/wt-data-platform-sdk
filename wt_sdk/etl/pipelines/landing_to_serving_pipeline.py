@@ -1,15 +1,21 @@
-"""OpenCode-ready landing-to-serving publication pipeline."""
+"""Landing-to-serving publication pipeline."""
 
+from ..models import PipelineMode
 from ..pipeline import PipelineDefinition
-from ..registry import build_serving_publish_pipeline
+from ..stages import BuildChosenTraceStage, DeriveJobTagsStage
 
 
 def build_pipeline() -> PipelineDefinition:
-    """Build the current chosen-trace and tags serving pipeline."""
+    """Build the explicitly declared landing-to-serving pipeline."""
 
-    return build_serving_publish_pipeline(
+    return PipelineDefinition(
         name="landing_to_serving_pipeline",
         version="1",
+        mode=PipelineMode.SERVING,
+        stages=(
+            BuildChosenTraceStage(),
+            DeriveJobTagsStage(),
+        ),
     )
 
 
