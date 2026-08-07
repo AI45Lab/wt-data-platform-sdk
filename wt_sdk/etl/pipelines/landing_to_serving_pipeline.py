@@ -2,7 +2,11 @@
 
 from ..models import PipelineMode
 from ..pipeline import PipelineDefinition
-from ..stages import BuildChosenTraceStage, DeriveJobTagsStage
+from ..stages import (
+    BuildChosenTraceStage,
+    BuildSearchTextStage,
+    DeriveJobTagsStage,
+)
 
 
 def build_pipeline() -> PipelineDefinition:
@@ -10,10 +14,11 @@ def build_pipeline() -> PipelineDefinition:
 
     return PipelineDefinition(
         name="landing_to_serving_pipeline",
-        version="1",
+        version="2",
         mode=PipelineMode.SERVING,
         stages=(
             BuildChosenTraceStage(),
+            BuildSearchTextStage(),
             DeriveJobTagsStage(),
         ),
     )

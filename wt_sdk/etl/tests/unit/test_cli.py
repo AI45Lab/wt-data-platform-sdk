@@ -19,6 +19,7 @@ def test_builtin_pipeline_short_name_is_directly_loadable():
     assert pipeline.name == "landing_to_serving_pipeline"
     assert [stage.name for stage in pipeline.ordered_stages] == [
         "build_chosen_trace",
+        "build_search_text",
         "derive_job_tags",
     ]
 
@@ -123,6 +124,7 @@ def test_stage_introspection_does_not_create_database_client(
     assert payload["pipeline_count"] == 1
     assert payload["pipelines"][0]["execution_order"] == [
         "build_chosen_trace",
+        "build_search_text",
         "derive_job_tags",
     ]
     assert ("stages" in payload["pipelines"][0]) is expect_details

@@ -31,10 +31,16 @@ from .stage import (
     SessionPatch,
     StageContext,
 )
-from .stages import BuildChosenTraceStage, DeriveJobTagsStage, UpdateIsTrainableStage
+from .stages import (
+    BuildChosenTraceStage,
+    BuildSearchTextStage,
+    DeriveJobTagsStage,
+    UpdateIsTrainableStage,
+)
 
 __all__ = [
     "BuildChosenTraceStage",
+    "BuildSearchTextStage",
     "Checkpoint",
     "CheckpointError",
     "DEFAULT_CHECKPOINT_TABLE",
