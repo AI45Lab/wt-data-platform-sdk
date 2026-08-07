@@ -102,6 +102,10 @@ database is used, the same profile selects the checkpoint table shown above.
 `evaluation_env_config`; it is not affected by `WT_SDK_PROFILE`. The endpoint
 and AWS credentials above are shared by both databases. An explicit `db_uri=`
 passed to `EnvConfigManager` takes precedence.
+Environment-config reads use `checkout_latest=True` by default so a long-lived
+process can see configs committed by another process after it started.
+The default is backward-compatible with existing callers; pass
+`checkout_latest=False` only when an older snapshot is intentionally acceptable.
 
 ## End-to-End Best Practice
 
@@ -482,6 +486,21 @@ columns. Opaque JSON traces are queried through the ETL-generated `search_text`,
 normal SQL filters, or tags. `stream=True` returns an iterator containing the
 current result frame.
 
+### Environment Configs
+
+Environment configs live in the separate `evaluation_env_config` table selected
+by `WT_SDK_ENV_CONFIG_DB_URI`. Read APIs default to `checkout_latest=True` so a
+long-lived gateway process can see configs written by a launcher process after
+the gateway started.
+
+| Method | Purpose |
+| --- | --- |
+| `get_env_configs(limit, offset=0, filter_query="", *, checkout_latest=True)` | Page through configs with an optional SQL filter. |
+| `get_all_env_configs(*, checkout_latest=True)` | Return all configs sorted by `id`. |
+| `get_env_image_map(*, checkout_latest=True)` | Build `env_name -> image` from the latest config table snapshot. |
+| `get_all_image(*, checkout_latest=True)` | Build `image -> env_name` from rows with non-empty images. |
+| `count(filter_query="", *, checkout_latest=True)` | Count configs, optionally matching a SQL filter. |
+
 ### Index Maintenance
 
 `maintain_table_indexes()` accepts one of the two production or two test table
@@ -582,6 +601,22 @@ shell quotes so spaces and `%` patterns are passed to the script unchanged.
 # Count rows
 python scripts/inspect/query_data.py --table wind_tunnel_landing --count
 
+# Query the separate environment-config table; the script automatically uses
+# WT_SDK_ENV_CONFIG_DB_URI for this table name
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --columns "id,job_id,env_id,env_name,group_id,finished" \
+  --limit 20
+
+# Count environment configs for one job
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" --count
+
+# Dump environment configs to a local JSON file
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --output ./artifacts/job_001_env_configs.json
+
 # Query selected columns
 python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
@@ -629,6 +664,14 @@ python scripts/ops/cleanup_data.py --table landing_test \
 # Delete matching test data
 python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
+
+# Preview dirty env config rows; this table automatically uses WT_SDK_ENV_CONFIG_DB_URI
+python scripts/ops/cleanup_data.py --table evaluation_env_config \
+  --query "job_id = 'gateway'" --dry-run
+
+# Delete dirty env config rows after preview
+python scripts/ops/cleanup_data.py --table evaluation_env_config \
+  --query "job_id = 'gateway'"
 
 # Preview and patch filtered landing rows in the test profile
 python scripts/ops/update_table_rows.py --profile test --table landing \
