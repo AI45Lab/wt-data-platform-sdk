@@ -89,6 +89,10 @@ def _query_test_rows(
     )
 
 
+def _row_timestamps(rows: list[dict[str, object]]) -> dict[object, object]:
+    return {row["id"]: row["source_updated_at"] for row in rows}
+
+
 def test_trainability_stage_inside_canonical_landing_pipeline():
     suffix = f"{uuid.uuid4().hex}_mock_xqer"
     job_id = (
@@ -130,6 +134,18 @@ def test_trainability_stage_inside_canonical_landing_pipeline():
             assert after_first_by_id[non_matching_id] == before_by_id[non_matching_id]
             assert _query_test_rows(client, SERVING_TEST_TABLE, job_id) == []
 
+            print(
+                "\nCanonical landing enrichment first run: "
+                f"failed_rows={first.failed_rows}, "
+                f"landing_rows_updated={first.landing_rows_updated}, "
+                f"matching_is_trainable="
+                f"{after_first_by_id[matching_id]['is_trainable']}, "
+                f"matching_source_updated_at="
+                f"{before_by_id[matching_id]['source_updated_at']}->"
+                f"{after_first_by_id[matching_id]['source_updated_at']}, "
+                "non_matching_unchanged=True, serving_rows=0"
+            )
+
             second = ETLEngine(client).run_sessions(
                 load_pipeline("landing_enrichment_pipeline"),
                 [SessionKey(job_id, session_id)],
@@ -138,11 +154,20 @@ def test_trainability_stage_inside_canonical_landing_pipeline():
             assert second.landing_rows_updated == 0
 
             after_second = _query_test_rows(client, LANDING_TEST_TABLE, job_id)
-            assert {
-                row["id"]: row["source_updated_at"] for row in after_second
-            } == {
-                row["id"]: row["source_updated_at"] for row in after_first
-            }
+            assert _row_timestamps(after_second) == _row_timestamps(after_first)
             assert _query_test_rows(client, SERVING_TEST_TABLE, job_id) == []
+
+            print(
+                "Canonical landing enrichment second run: "
+                f"failed_rows={second.failed_rows}, "
+                f"landing_rows_updated={second.landing_rows_updated}, "
+                "source_updated_at_unchanged=True, serving_rows=0"
+            )
         finally:
             cleanup_test_trajectory(client, job_id)
+            assert _query_test_rows(client, LANDING_TEST_TABLE, job_id) == []
+            assert _query_test_rows(client, SERVING_TEST_TABLE, job_id) == []
+            print(
+                "Canonical landing enrichment cleanup: "
+                "landing_rows=0, serving_rows=0"
+            )

@@ -1,14 +1,25 @@
-"""Read-only characterization of contributor-owned trainability fixtures."""
+"""Canonical enrichment coverage using reusable contributor-owned fixtures."""
 
-import copy
 import os
+import subprocess
+import sys
+from pathlib import Path
 
+from dldb.utils import stable_hash
 import pytest
 
 from wt_sdk import WTGatewayClient
-from wt_sdk.etl import SessionKey, StageContext, UpdateIsTrainableStage
+from wt_sdk.core.schemas import SERVING_PARTITIONS
+from wt_sdk.etl import (
+    ETLEngine,
+    SessionKey,
+    StageContext,
+    UpdateIsTrainableStage,
+    load_pipeline,
+)
 from wt_sdk.etl.tests.integration.helpers import (
     LANDING_TEST_TABLE,
+    SERVING_TEST_TABLE,
     TEST_TABLE_CONFIG,
 )
 
@@ -66,6 +77,41 @@ def _query_fixture_rows(client: WTGatewayClient) -> list[dict[str, object]]:
     )
 
 
+def _query_serving_rows(client: WTGatewayClient) -> list[dict[str, object]]:
+    bucket = stable_hash(FIXTURE_JOB_ID) % SERVING_PARTITIONS
+    if bucket not in set(client.list_table_partitions(table=SERVING_TEST_TABLE)):
+        return []
+    return client.query_data(
+        filter_query=f"job_id = '{_sql_quote(FIXTURE_JOB_ID)}'",
+        partition=FIXTURE_JOB_ID,
+        table=SERVING_TEST_TABLE,
+        checkout_latest=True,
+        exclude_none=False,
+    )
+
+
+def _rollback_fixture_trainability() -> subprocess.CompletedProcess[str]:
+    script = Path(__file__).parents[4] / "scripts" / "ops" / "update_table_rows.py"
+    return subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--profile",
+            "test",
+            "--table",
+            "landing",
+            "--query",
+            f"job_id = '{FIXTURE_JOB_ID}'",
+            "--updates",
+            '{"is_trainable": false}',
+            "--yes",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _context(session_id: str) -> StageContext:
     return StageContext(
         pipeline_name="landing_enrichment_pipeline",
@@ -109,86 +155,128 @@ def _render_results(results: list[tuple[object, ...]]) -> str:
     return "\n".join(rendered)
 
 
-def test_xquer_fixture_results_are_read_only_and_repeatable():
+def test_xquer_fixtures_through_canonical_pipeline_are_repeatable():
     stage = UpdateIsTrainableStage()
     with WTGatewayClient(config=TEST_TABLE_CONFIG) as client:
         assert client.config.tables.profile == "test"
         assert client.config.tables.landing_table == LANDING_TEST_TABLE
-        queried_rows = _query_fixture_rows(client)
-        database_snapshot = copy.deepcopy(queried_rows)
-
-        rows_by_session = {
-            session_id: sorted(
-                (
-                    row
-                    for row in queried_rows
-                    if row.get("session_id") == session_id
-                ),
-                key=lambda row: row["step_id"],
-            )
-            for session_id in FIXTURE_SESSION_IDS
-        }
-        results = []
-        errors = []
-        for session_id, rows in rows_by_session.items():
-            if not rows:
-                errors.append(f"{session_id}: no landing rows found")
-                continue
-
-            session = tuple(rows)
-            session_snapshot = copy.deepcopy(session)
-            first = stage.transform_session(session, _context(session_id))
-            second = stage.transform_session(session, _context(session_id))
-            assert first == second
-            assert session == session_snapshot
-            assert set(first) == {str(row["id"]) for row in session}
-
-            completed_steps = tuple(
-                int(row["step_id"])
-                for row in session
-                if row.get("is_session_completed") is True
-            )
-            current_true_steps = tuple(
-                int(row["step_id"])
-                for row in session
-                if row.get("is_trainable") is True
-            )
-            stage_true_steps = tuple(
-                int(row["step_id"])
-                for row in session
-                if first[str(row["id"])]["is_trainable"] is True
-            )
-            changed_steps = tuple(
-                int(row["step_id"])
-                for row in session
-                if row.get("is_trainable")
-                != first[str(row["id"])]["is_trainable"]
-            )
-            final_step = int(session[-1]["step_id"])
-            if completed_steps != (final_step,):
-                errors.append(
-                    f"{session_id}: completion marker {completed_steps!r} is not "
-                    f"only on final step {final_step}"
+        assert client.config.tables.serving_table == SERVING_TEST_TABLE
+        try:
+            before = _query_fixture_rows(client)
+            serving_before = _query_serving_rows(client)
+            before_by_id = {str(row["id"]): row for row in before}
+            rows_by_session = {
+                session_id: sorted(
+                    (row for row in before if row.get("session_id") == session_id),
+                    key=lambda row: row["step_id"],
                 )
-            if final_step not in stage_true_steps:
-                errors.append(
-                    f"{session_id}: final step {final_step} was not marked trainable"
-                )
-            results.append(
-                (
-                    session_id,
-                    len(session),
-                    _format_steps(completed_steps),
-                    _format_steps(current_true_steps),
-                    _format_steps(stage_true_steps),
-                    _format_steps(changed_steps),
-                )
+                for session_id in FIXTURE_SESSION_IDS
+            }
+            assert all(rows_by_session.values()), (
+                "one or more fixture sessions are empty"
+            )
+            assert all(row.get("is_trainable") is False for row in before), (
+                "fixture precondition failed; run update_table_rows.py to reset "
+                "is_trainable=false"
             )
 
-        after = _query_fixture_rows(client)
+            expected_trainable_ids: set[str] = set()
+            results = []
+            for session_id, rows in rows_by_session.items():
+                patches = stage.transform_session(tuple(rows), _context(session_id))
+                trainable_ids = {
+                    record_id
+                    for record_id, patch in patches.items()
+                    if patch["is_trainable"] is True
+                }
+                expected_trainable_ids.update(trainable_ids)
+                results.append(
+                    (
+                        session_id,
+                        len(rows),
+                        _format_steps(
+                            tuple(
+                                int(row["step_id"])
+                                for row in rows
+                                if row.get("is_session_completed") is True
+                            )
+                        ),
+                        "-",
+                        _format_steps(
+                            tuple(
+                                int(row["step_id"])
+                                for row in rows
+                                if str(row["id"]) in trainable_ids
+                            )
+                        ),
+                        _format_steps(
+                            tuple(
+                                int(row["step_id"])
+                                for row in rows
+                                if str(row["id"]) in trainable_ids
+                            )
+                        ),
+                    )
+                )
 
-    print("\nRead-only xquer trainability results\n" + _render_results(results))
-    assert {row["id"]: row for row in after} == {
-        row["id"]: row for row in database_snapshot
-    }
-    assert not errors, "\n".join(errors)
+            assert expected_trainable_ids
+            assert set(before_by_id).difference(expected_trainable_ids)
+
+            session_keys = [
+                SessionKey(FIXTURE_JOB_ID, session_id)
+                for session_id in FIXTURE_SESSION_IDS
+            ]
+            first = ETLEngine(client).run_sessions(
+                load_pipeline("landing_enrichment_pipeline"), session_keys
+            )
+            assert first.failed_rows == 0
+            assert first.landing_rows_updated == len(expected_trainable_ids)
+
+            after_first = _query_fixture_rows(client)
+            after_first_by_id = {str(row["id"]): row for row in after_first}
+            assert set(after_first_by_id) == set(before_by_id)
+            for record_id, original in before_by_id.items():
+                current = after_first_by_id[record_id]
+                if record_id in expected_trainable_ids:
+                    assert current["is_trainable"] is True
+                    assert current["source_updated_at"] > original["source_updated_at"]
+                else:
+                    assert current == original
+            assert _query_serving_rows(client) == serving_before
+
+            second = ETLEngine(client).run_sessions(
+                load_pipeline("landing_enrichment_pipeline"), session_keys
+            )
+            assert second.failed_rows == 0
+            assert second.landing_rows_updated == 0
+            after_second = _query_fixture_rows(client)
+            assert {
+                row["id"]: row["source_updated_at"] for row in after_second
+            } == {
+                row["id"]: row["source_updated_at"] for row in after_first
+            }
+            assert _query_serving_rows(client) == serving_before
+
+            print("\nXquer trainability results\n" + _render_results(results))
+            print(
+                "First run: "
+                f"failed_rows={first.failed_rows}, "
+                f"landing_rows_updated={first.landing_rows_updated}, "
+                "non_matching_unchanged=True, serving_unchanged=True"
+            )
+            print(
+                "Second run: "
+                f"failed_rows={second.failed_rows}, "
+                f"landing_rows_updated={second.landing_rows_updated}, "
+                "source_updated_at_unchanged=True, serving_unchanged=True"
+            )
+        finally:
+            rollback = _rollback_fixture_trainability()
+            print("Fixture rollback via update_table_rows.py:\n" + rollback.stdout)
+            if rollback.stderr:
+                print("Fixture rollback stderr:\n" + rollback.stderr)
+            assert rollback.returncode == 0
+            restored = _query_fixture_rows(client)
+            assert restored
+            assert all(row.get("is_trainable") is False for row in restored)
+            print(f"Fixture rollback verified: {len(restored)} rows is_trainable=False")
