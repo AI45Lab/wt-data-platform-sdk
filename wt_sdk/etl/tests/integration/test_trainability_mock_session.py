@@ -67,6 +67,7 @@ def _query_fixture_rows(client: WTGatewayClient) -> list[dict[str, object]]:
             "messages",
             "is_session_completed",
             "is_trainable",
+            "meta_json",
         ],
         partition=FIXTURE_JOB_ID,
         order_by="step_id",

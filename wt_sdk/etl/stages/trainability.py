@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -27,6 +28,7 @@ class UpdateIsTrainableStage(ETLStage):
         "step_id",
         "messages",
         "is_session_completed",
+        "meta_json",
     )
     output_fields = ("is_trainable",)
     dependencies = ()
@@ -37,6 +39,8 @@ class UpdateIsTrainableStage(ETLStage):
         context: StageContext,
     ) -> SessionPatch:
         del context
+        if _has_non_200_status_code(session):
+            return {}
         if not _is_completed_session(session):
             return {}
 
@@ -124,6 +128,50 @@ def _detect_trainable_record_ids(session: Sequence[Record]) -> set[str]:
     # Every append-only chain tail contains the complete messages of one
     # structurally separated trajectory.
     return {chain.record_ids[-1] for chain in chains}
+
+
+def _has_non_200_status_code(session: Sequence[Record]) -> bool:
+    """Return whether any row records an explicitly non-200 gateway result."""
+
+    for record in session:
+        metadata = _decode_json_object(record.get("meta_json"))
+        if metadata is None:
+            continue
+
+        metadata_objects = [metadata]
+        for key in ("env_state", "telemetry"):
+            nested = _decode_json_object(metadata.get(key))
+            if nested is not None:
+                metadata_objects.append(nested)
+
+        for item in metadata_objects:
+            if "status_code" in item and not _is_status_code_200(
+                item["status_code"]
+            ):
+                return True
+    return False
+
+
+def _decode_json_object(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, Mapping):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _is_status_code_200(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value == 200
+    if isinstance(value, str):
+        return value.strip() == "200"
+    return False
 
 
 def _is_completed_session(session: Sequence[Record]) -> bool:
