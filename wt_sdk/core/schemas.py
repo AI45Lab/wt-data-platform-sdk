@@ -99,6 +99,7 @@ LANDING_SCALAR_INDEXES = [
     ("source_updated_at", "BTREE"),
     ("is_terminal", "BITMAP"),
     ("is_trainable", "BITMAP"),
+    ("is_session_completed", "BITMAP"),
 ]
 
 # Scalar indexes for serving table
@@ -112,6 +113,7 @@ SERVING_SCALAR_INDEXES = [
     ("dataset_type", "BITMAP"),
     ("is_terminal", "BITMAP"),
     ("is_trainable", "BITMAP"),
+    ("is_session_completed", "BITMAP"),
     ("step_reward", "BTREE"),
     ("reward", "BTREE"),
     ("agent_model", "BTREE"),

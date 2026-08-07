@@ -269,6 +269,7 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("source_updated_at", "BTREE"),
         ("is_terminal", "BITMAP"),
         ("is_trainable", "BITMAP"),
+        ("is_session_completed", "BITMAP"),
     ]
     assert SERVING_SCALAR_INDEXES == [
         ("id", "BTREE"),
@@ -280,6 +281,7 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("dataset_type", "BITMAP"),
         ("is_terminal", "BITMAP"),
         ("is_trainable", "BITMAP"),
+        ("is_session_completed", "BITMAP"),
         ("step_reward", "BTREE"),
         ("reward", "BTREE"),
         ("agent_model", "BTREE"),
