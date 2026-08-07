@@ -1345,8 +1345,40 @@ def test_env_config_manager_logs_timing_and_returns_summary(monkeypatch):
     assert connect_kwargs["db_uri"] == "s3://test-env-config"
     assert len(configs) == 1
     assert returned == summary
+    assert fake_session.filter_calls
+    assert all(call["checkout_latest"] is True for call in fake_session.filter_calls)
     assert any("dldb_timing api=add" in message for message in captured)
     assert any("dldb_timing api=filter" in message for message in captured)
     assert any("dldb_timing api=update" in message for message in captured)
     assert any("dldb_timing api=delete" in message for message in captured)
     assert any("dldb_metrics_summary" in message for message in captured)
+
+
+def test_env_config_manager_allows_stale_snapshot_override(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=True)
+
+    monkeypatch.setattr(
+        env_manager_module.dldb,
+        "connect",
+        lambda db_uri, **kwargs: fake_session,
+    )
+
+    manager = EnvConfigManager(table_name="evaluation_env_config")
+    manager.save_config(
+        {
+            "env_name": "CartPole-v1",
+            "env_id": "env-001",
+            "job_id": "job-001",
+            "finished": False,
+        }
+    )
+
+    configs = manager.get_env_configs(
+        limit=10,
+        offset=0,
+        filter_query="env_id = 'env-001'",
+        checkout_latest=False,
+    )
+
+    assert len(configs) == 1
+    assert fake_session.filter_calls[-1]["checkout_latest"] is False

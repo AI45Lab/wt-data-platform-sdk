@@ -100,6 +100,7 @@ class EnvConfigManager:
         query: str,
         limit: Optional[int] = None,
         columns: Optional[List[str]] = None,
+        checkout_latest: bool = True,
         extra: Optional[Dict[str, Any]] = None,
     ) -> pd.DataFrame:
         effective_query = query if query and query.strip() else "id IS NOT NULL"
@@ -108,10 +109,12 @@ class EnvConfigManager:
             query=effective_query,
             limit=limit,
             columns=columns,
+            checkout_latest=checkout_latest,
         )
         timing = self._extract_dldb_timing_from_df(df) or self._extract_dldb_last_call()
         log_extra = {
             "limit": limit,
+            "checkout_latest": checkout_latest,
             "columns_count": len(columns) if columns else None,
         }
         if extra:
@@ -237,7 +240,9 @@ class EnvConfigManager:
         self,
         limit: int,
         offset: int = 0,
-        filter_query: str = ""
+        filter_query: str = "",
+        *,
+        checkout_latest: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         Fetch environment configs with pagination.
@@ -253,6 +258,9 @@ class EnvConfigManager:
             limit: Maximum number of configs to return
             offset: Number of configs to skip (for pagination)
             filter_query: Optional SQL WHERE clause (e.g., "finished = false")
+            checkout_latest: Read the latest committed dldb/Lance snapshot.
+                Defaults to True so long-lived gateway processes can see
+                configs written by launcher processes started later.
 
         Returns:
             List of config dicts with all fields
@@ -267,12 +275,17 @@ class EnvConfigManager:
             >>> configs = manager.get_env_configs(limit=10, offset=0, filter_query="finished = false")
         """
         try:
-            logger.debug(f"Querying env_configs: limit={limit}, offset={offset}, filter={filter_query}")
+            logger.debug(
+                "Querying env_configs: "
+                f"limit={limit}, offset={offset}, filter={filter_query}, "
+                f"checkout_latest={checkout_latest}"
+            )
 
             # Query LanceDB
             df = self._filter_table(
                 query=filter_query,
                 limit=None,  # Get all, then paginate in memory
+                checkout_latest=checkout_latest,
             )
 
             # Sort by id
@@ -304,7 +317,11 @@ class EnvConfigManager:
             logger.error(f"Failed to fetch env_configs: {e}")
             raise
 
-    def get_all_env_configs(self) -> List[Dict[str, Any]]:
+    def get_all_env_configs(
+        self,
+        *,
+        checkout_latest: bool = True,
+    ) -> List[Dict[str, Any]]:
         """
         Example:
             >>> manager = EnvConfigManager()
@@ -318,6 +335,7 @@ class EnvConfigManager:
             df = self._filter_table(
                 query="",  # No filter
                 limit=None,  # Get all
+                checkout_latest=checkout_latest,
             )
 
             # Sort by id
@@ -371,7 +389,11 @@ class EnvConfigManager:
             logger.error(f"Failed to clean all configs: {e}")
             raise
 
-    def get_env_image_map(self) -> Dict[str, Optional[str]]:
+    def get_env_image_map(
+        self,
+        *,
+        checkout_latest: bool = True,
+    ) -> Dict[str, Optional[str]]:
         """
         Get mapping of env_name -> image.
         Example:
@@ -387,6 +409,7 @@ class EnvConfigManager:
             df = self._filter_table(
                 query="",
                 limit=None,
+                checkout_latest=checkout_latest,
             )
 
             # Sort by id
@@ -414,7 +437,11 @@ class EnvConfigManager:
             logger.error(f"Failed to get env_image map: {e}")
             raise
 
-    def get_all_image(self) -> Dict[str, str]:
+    def get_all_image(
+        self,
+        *,
+        checkout_latest: bool = True,
+    ) -> Dict[str, str]:
         """
         Get mapping of image -> env_name.
         Example:
@@ -430,6 +457,7 @@ class EnvConfigManager:
             df = self._filter_table(
                 query="image IS NOT NULL AND env_name IS NOT NULL",
                 limit=None,
+                checkout_latest=checkout_latest,
             )
 
             # Sort by id
@@ -492,7 +520,12 @@ class EnvConfigManager:
             logger.error(f"Failed to update env_config {env_id}: {e}")
             return False
 
-    def count(self, filter_query: str = "") -> int:
+    def count(
+        self,
+        filter_query: str = "",
+        *,
+        checkout_latest: bool = True,
+    ) -> int:
         """
         Example:
             >>> manager = EnvConfigManager()
@@ -504,6 +537,7 @@ class EnvConfigManager:
             df = self._filter_table(
                 query=filter_query,
                 limit=None,
+                checkout_latest=checkout_latest,
             )
             return len(df)
         except Exception as e:

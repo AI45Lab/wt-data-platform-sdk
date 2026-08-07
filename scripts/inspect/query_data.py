@@ -17,6 +17,9 @@ Usage:
   # Query from custom database
   python scripts/inspect/query_data.py --db-uri s3://my-bucket --table my_table --query "reward > 0.5"
 
+  # Query the separate environment-config database by table name
+  python scripts/inspect/query_data.py --table evaluation_env_config --limit 5
+
   # Query with filter and limit
   python scripts/inspect/query_data.py --table landing_test --query "reward > 0.9" --limit 2
 
@@ -59,7 +62,7 @@ import numpy as np
 
 import dldb
 import pandas as pd
-from wt_sdk.config import default_config
+from wt_sdk.config import default_config, resolve_env_config_db_uri
 
 
 JSON_COLUMNS = {
@@ -70,12 +73,37 @@ JSON_COLUMNS = {
     "meta_json",
 }
 
+ENV_CONFIG_TABLE_NAMES = {"evaluation_env_config"}
+
+
+def _resolve_db_uri(table_name: str, explicit_db_uri: str | None) -> str:
+    """Resolve the database URI for known logical table families."""
+    if explicit_db_uri:
+        return explicit_db_uri
+    if table_name in ENV_CONFIG_TABLE_NAMES:
+        return resolve_env_config_db_uri()
+    return default_config.tables.db_uri
+
+
+def _uses_latest_snapshot_by_default(table_name: str) -> bool:
+    """Use latest reads for cross-process control-plane tables."""
+    return table_name in ENV_CONFIG_TABLE_NAMES
+
+
+def _is_partitioned_schema_record(record) -> bool:
+    """Return whether a dldb schema record describes a partitioned table."""
+    partition_type = str(getattr(record, "partition_type", "") or "").upper()
+    partition_column = str(getattr(record, "partition_column", "") or "").strip()
+    return partition_type in {"VALUE", "HASH"} and bool(partition_column)
+
 
 def _pin_exact_dldb_table(session, table_name: str) -> None:
     """Open the exact logical table by dldb metadata, avoiding prefix collisions."""
     try:
         record = session.schema_table.get(table_name)
         if record is None:
+            return
+        if not _is_partitioned_schema_record(record):
             return
         from dldb.table import open_table_by_partition_type
         session.tables[table_name] = open_table_by_partition_type(
@@ -324,11 +352,14 @@ def main():
     args = parser.parse_args()
 
     # Determine database and table names
-    db_name = args.db_uri or default_config.tables.db_uri
     table_name = args.table
+    db_name = _resolve_db_uri(table_name, args.db_uri)
+    checkout_latest = _uses_latest_snapshot_by_default(table_name)
 
     print(f"Database: {db_name}")
     print(f"Table: {table_name}")
+    if checkout_latest:
+        print("Checkout latest: true")
     print("=" * 80)
 
     # Initialize DLDB session
@@ -373,7 +404,13 @@ def main():
             filtered_count = None
             if requested_query:
                 # Count rows matching the filter
-                result = session.filter(table_name, query=query, limit=None, columns=columns)
+                result = session.filter(
+                    table_name,
+                    query=query,
+                    limit=None,
+                    columns=columns,
+                    checkout_latest=checkout_latest,
+                )
                 filtered_count = len(result)
                 print("=" * 80)
                 print(f"Rows matching filter: {filtered_count}")
@@ -386,6 +423,7 @@ def main():
                         "database": db_name,
                         "table": table_name,
                         "filter": requested_query or None,
+                        "checkout_latest": checkout_latest,
                         "total_rows": total_count,
                         "filtered_rows": filtered_count,
                     },
@@ -410,7 +448,13 @@ def main():
         # Continue with query anyway
 
     try:
-        result = session.filter(table_name, query=query, limit=args.limit, columns=columns)
+        result = session.filter(
+            table_name,
+            query=query,
+            limit=args.limit,
+            columns=columns,
+            checkout_latest=checkout_latest,
+        )
     except Exception as e:
         print(f"Error executing query: {e}")
         session.shutdown()
@@ -424,6 +468,7 @@ def main():
                     "database": db_name,
                     "table": table_name,
                     "filter": requested_query or None,
+                    "checkout_latest": checkout_latest,
                     "total_rows": total_count,
                     "returned_rows": len(result),
                     "rows": _dataframe_to_json_records(result),

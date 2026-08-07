@@ -14,6 +14,9 @@ Usage:
   # Delete from custom database
   python scripts/ops/cleanup_data.py --db-uri s3://my-bucket --table my_table --query "dataset_type = 'SFT'"
 
+  # Delete from the separate environment-config database by table name
+  python scripts/ops/cleanup_data.py --table evaluation_env_config --query "job_id = 'gateway'" --dry-run
+
   # Delete all data from a table (requires --force flag)
   python scripts/ops/cleanup_data.py --table landing_test --force
 
@@ -37,7 +40,31 @@ import argparse
 import sys
 
 import dldb
-from wt_sdk.config import default_config
+from wt_sdk.config import default_config, resolve_env_config_db_uri
+
+
+ENV_CONFIG_TABLE_NAMES = {"evaluation_env_config"}
+
+
+def _resolve_db_uri(table_name: str, explicit_db_uri: str | None) -> str:
+    """Resolve the database URI for known logical table families."""
+    if explicit_db_uri:
+        return explicit_db_uri
+    if table_name in ENV_CONFIG_TABLE_NAMES:
+        return resolve_env_config_db_uri()
+    return default_config.tables.db_uri
+
+
+def _uses_latest_snapshot_by_default(table_name: str) -> bool:
+    """Use latest reads for cross-process control-plane tables."""
+    return table_name in ENV_CONFIG_TABLE_NAMES
+
+
+def _is_partitioned_schema_record(record) -> bool:
+    """Return whether a dldb schema record describes a partitioned table."""
+    partition_type = str(getattr(record, "partition_type", "") or "").upper()
+    partition_column = str(getattr(record, "partition_column", "") or "").strip()
+    return partition_type in {"VALUE", "HASH"} and bool(partition_column)
 
 
 def _pin_exact_dldb_table(session, table_name: str) -> None:
@@ -45,6 +72,8 @@ def _pin_exact_dldb_table(session, table_name: str) -> None:
     try:
         record = session.schema_table.get(table_name)
         if record is None:
+            return
+        if not _is_partitioned_schema_record(record):
             return
         from dldb.table import open_table_by_partition_type
 
@@ -104,9 +133,12 @@ def main():
     else:
         # New format: use --db-uri and --table
         table_name = args.table
-        db_name = args.db_uri or default_config.tables.db_uri
+        db_name = _resolve_db_uri(table_name, args.db_uri)
         print(f"Using database: {db_name}")
         print(f"Using table: {table_name}")
+    checkout_latest = _uses_latest_snapshot_by_default(table_name)
+    if checkout_latest:
+        print("Checkout latest: true")
 
     # Initialize DLDB session
     print(f"Connecting to {db_name}...")
@@ -147,10 +179,19 @@ def main():
 
         # Preview what will be deleted
         try:
-            preview = session.filter(table_name, args.query, limit=5)
+            preview = session.filter(
+                table_name,
+                args.query,
+                limit=5,
+                checkout_latest=checkout_latest,
+            )
             # count_rows doesn't accept filter query, so we count the preview results
             # For accurate count, we need to fetch all matching rows
-            all_matching = session.filter(table_name, args.query)
+            all_matching = session.filter(
+                table_name,
+                args.query,
+                checkout_latest=checkout_latest,
+            )
             delete_count = len(all_matching)
         except Exception as e:
             print(f"Error executing query: {e}")

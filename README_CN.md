@@ -97,6 +97,10 @@ ETL 时，才必须配置 `WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-etl`，或�
 `EnvConfigManager` 使用独立的 `WT_SDK_ENV_CONFIG_DB_URI` 数据库访问
 `evaluation_env_config`，不受 `WT_SDK_PROFILE` 影响。上面的 endpoint 和 AWS
 凭证由两个数据库共用。显式传给 `EnvConfigManager` 的 `db_uri=` 具有更高优先级。
+环境配置读取默认使用 `checkout_latest=True`，因此长期运行的进程可以看到启动后由
+其他进程提交的新配置。
+该默认行为兼容已有调用；只有明确接受旧 snapshot 时才传入
+`checkout_latest=False`。
 
 ## 端到端最佳实践
 
@@ -455,6 +459,21 @@ dldb 当前尚未开放向量搜索。关键词检索默认查询 `search_text`�
 `search_text`、普通 SQL 条件或 tags 查询。设置 `stream=True` 时，会返回包含
 当前结果 DataFrame 的迭代器。
 
+### 环境配置
+
+环境配置位于独立的 `evaluation_env_config` 表中，由
+`WT_SDK_ENV_CONFIG_DB_URI` 选择数据库。读取接口默认使用
+`checkout_latest=True`，因此长期运行的 gateway 进程可以看到 launcher 在它启动后
+写入的新配置。
+
+| 方法 | 用途 |
+| --- | --- |
+| `get_env_configs(limit, offset=0, filter_query="", *, checkout_latest=True)` | 按页读取配置，可选 SQL filter。 |
+| `get_all_env_configs(*, checkout_latest=True)` | 按 `id` 排序返回全部配置。 |
+| `get_env_image_map(*, checkout_latest=True)` | 基于最新 config 表 snapshot 构造 `env_name -> image`。 |
+| `get_all_image(*, checkout_latest=True)` | 基于 image 非空的行构造 `image -> env_name`。 |
+| `count(filter_query="", *, checkout_latest=True)` | 统计配置行数，可选 SQL filter。 |
+
 ### 索引维护
 
 `maintain_table_indexes()` 只接受两张生产表或两张测试表的精确表名，
@@ -555,6 +574,21 @@ python scripts/ops/table_manager.py drop serving_test --partition 42
 # 统计行数
 python scripts/inspect/query_data.py --table wind_tunnel_landing --count
 
+# 查询独立的环境配置表；指定这个表名时脚本会自动使用 WT_SDK_ENV_CONFIG_DB_URI
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --columns "id,job_id,env_id,env_name,group_id,finished" \
+  --limit 20
+
+# 统计某个 job 的环境配置数量
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" --count
+
+# 将环境配置 dump 到本地 JSON 文件
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --output ./artifacts/job_001_env_configs.json
+
 # 查询指定列
 python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
@@ -602,6 +636,14 @@ python scripts/ops/cleanup_data.py --table landing_test \
 # 删除匹配的测试数据
 python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
+
+# 预览 env config 脏数据；该表会自动使用 WT_SDK_ENV_CONFIG_DB_URI
+python scripts/ops/cleanup_data.py --table evaluation_env_config \
+  --query "job_id = 'gateway'" --dry-run
+
+# 预览确认后删除 env config 脏数据
+python scripts/ops/cleanup_data.py --table evaluation_env_config \
+  --query "job_id = 'gateway'"
 
 # 预览并修改 test profile 中符合条件的 landing 行
 python scripts/ops/update_table_rows.py --profile test --table landing \

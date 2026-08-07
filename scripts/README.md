@@ -41,7 +41,39 @@ python scripts/inspect/query_data.py \
   --output ./artifacts/panjia_rows.json
 ```
 
+For the separate environment-config table, specify only the table name; the
+script automatically uses `WT_SDK_ENV_CONFIG_DB_URI` and reads the latest
+snapshot:
+
+```bash
+python scripts/inspect/query_data.py \
+  --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --columns "id,job_id,env_id,env_name,group_id,finished"
+
+python scripts/inspect/query_data.py \
+  --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --output ./artifacts/job_001_env_configs.json
+```
+
 Production-changing commands require their own explicit confirmation flags.
+
+Use `cleanup_data.py` for filtered deletes. `evaluation_env_config`
+automatically uses `WT_SDK_ENV_CONFIG_DB_URI`; landing and serving tables use
+`WT_SDK_DB_URI` unless `--db-uri` is supplied:
+
+```bash
+python scripts/ops/cleanup_data.py \
+  --table evaluation_env_config \
+  --query "job_id = 'gateway'" \
+  --dry-run
+
+python scripts/ops/cleanup_data.py \
+  --table landing_test \
+  --query "job_id = 'gateway'" \
+  --dry-run
+```
 
 Use `update_table_rows.py` for a filtered operational patch against one of the
 four active tables. The profile and role resolve the exact table; custom and
