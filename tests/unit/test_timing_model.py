@@ -685,7 +685,16 @@ def test_keyword_search_defaults_to_search_text_and_rejects_nested_fields(monkey
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
 
     client.search("example")
-    assert fake_session.last_filter_kwargs["query"] == "(search_text LIKE '%example%')"
+    assert fake_session.last_filter_kwargs["query"] == (
+        "(search_text LIKE '%example%' ESCAPE '\\')"
+    )
+    assert fake_session.last_filter_kwargs["checkout_latest"] is True
+
+    client.search("100%_done\\now", checkout_latest=False)
+    assert fake_session.last_filter_kwargs["query"] == (
+        "(search_text LIKE '%100\\%\\_done\\\\now%' ESCAPE '\\')"
+    )
+    assert fake_session.last_filter_kwargs["checkout_latest"] is False
 
     client.search("")
     assert fake_session.last_filter_kwargs["query"] == "id IS NOT NULL"
