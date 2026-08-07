@@ -573,6 +573,11 @@ python scripts/ops/table_manager.py drop serving_test --partition 42
 
 ### Query and Inspect Data
 
+`--query` accepts a standard SQL `WHERE` predicate without the leading
+`WHERE`. Use normal SQL operators such as `=`, `IN (...)`, `LIKE`, `AND`,
+`OR`, comparison operators, and boolean literals. Wrap the whole predicate in
+shell quotes so spaces and `%` patterns are passed to the script unchanged.
+
 ```bash
 # Count rows
 python scripts/inspect/query_data.py --table wind_tunnel_landing --count
@@ -581,13 +586,24 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing --count
 python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
+# Count rows matching a SQL filter
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" --count
+
 # Decode and inspect JSON payload columns without display truncation
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
-# Write results as pretty JSON, expanding JSON payload columns
-python scripts/inspect/query_data.py --table landing_test --limit 1 \
-  --output ./artifacts/landing_sample.json
+# Dump one sample row to a local JSON file, expanding JSON payload columns
+python scripts/inspect/query_data.py --table landing_test \
+  --query "job_id = 'job-001'" --limit 1 \
+  --output ./artifacts/landing_job_001_sample.json
+
+# Dump selected production rows to a local JSON file
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" \
+  --columns "id,job_id,session_id,step_id,source_updated_at" \
+  --output ./artifacts/panjia_trainable_rows.json
 
 # Show expected versus existing scalar indexes by partition
 python scripts/inspect/show_table_indexes.py landing_test

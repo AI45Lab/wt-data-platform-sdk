@@ -546,6 +546,11 @@ python scripts/ops/table_manager.py drop serving_test --partition 42
 
 ### 查询与数据检查
 
+`--query` 接收标准 SQL `WHERE` 条件表达式，但不要写开头的 `WHERE`。
+可以使用普通 SQL 写法，例如 `=`、`IN (...)`、`LIKE`、`AND`、`OR`、
+比较运算符以及 boolean 字面量。命令行里要把完整条件用引号包起来，
+这样空格和 `%` 模糊匹配模式才会原样传给脚本。
+
 ```bash
 # 统计行数
 python scripts/inspect/query_data.py --table wind_tunnel_landing --count
@@ -554,13 +559,24 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing --count
 python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
+# 按 SQL 条件统计行数
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" --count
+
 # 解码并查看 JSON payload 列，同时关闭显示截断
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
-# 将结果写为 pretty JSON，并展开 JSON payload 列
-python scripts/inspect/query_data.py --table landing_test --limit 1 \
-  --output ./artifacts/landing_sample.json
+# dump 一条 sample 到本地 JSON 文件，并展开 JSON payload 列
+python scripts/inspect/query_data.py --table landing_test \
+  --query "job_id = 'job-001'" --limit 1 \
+  --output ./artifacts/landing_job_001_sample.json
+
+# 将符合条件的生产数据 dump 到本地 JSON 文件
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" \
+  --columns "id,job_id,session_id,step_id,source_updated_at" \
+  --output ./artifacts/panjia_trainable_rows.json
 
 # 按分区对比预期标量索引和现有标量索引
 python scripts/inspect/show_table_indexes.py landing_test

@@ -30,6 +30,17 @@ set -a && source .env && set +a
 python scripts/inspect/query_data.py --table landing_test --count
 ```
 
+`scripts/inspect/query_data.py --query` accepts a standard SQL `WHERE`
+predicate without the leading `WHERE`. For example:
+
+```bash
+python scripts/inspect/query_data.py \
+  --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" \
+  --columns "id,job_id,session_id,step_id" \
+  --output ./artifacts/panjia_rows.json
+```
+
 Production-changing commands require their own explicit confirmation flags.
 
 Use `update_table_rows.py` for a filtered operational patch against one of the
