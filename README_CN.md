@@ -388,7 +388,7 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 | `pull_data()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`cursor`、`order_by`、`ascending`、`limit`、`checkout_latest`、`table`、`deserialize_json` | 一次返回一页 DataFrame | 调用方传入、提取并持久化 `created_at` 游标 | Landing | 增量消费、轮询、失败重试、需要可靠 checkpoint 的处理流程 |
 | `iter_data_batches()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`chunk_size`、`order_by`、`ascending`、`table`、`deserialize_json` | 返回迭代器，每次 yield 一个 DataFrame batch | SDK 内部推进 `created_at` 游标，直到数据读完 | Landing | 允许时间戳并列的一次性扫描、回填和离线处理 |
 | `export_data_batches()` | `filter_query`、`batch_size`、`columns`、`table`、`deserialize_json` | 返回迭代器，每次 yield 一个经过校验的 DataFrame manifest batch | SDK 先生成完整唯一 ID 清单，再按精确 ID 取数并校验 | Serving | 要求固定行集合、检测重复 ID、且不能因时间戳游标漏数的正式离线导出 |
-| `search()` | `query`、`limit`、`tags`、`where_sql`、`dataset_type`、`stream`、`table`、`search_fields`、`deserialize_json` | 返回一个 DataFrame；`stream=True` 时返回单个 DataFrame 的迭代器 | 一次有界搜索 | Serving | Dashboard 对 `search_text`、tags 和标量条件的关键词搜索 |
+| `search()` | `query`、`limit`、`tags`、`where_sql`、`dataset_type`、`stream`、`table`、`deserialize_json`、`checkout_latest` | 返回一个 DataFrame；`stream=True` 时返回单个 DataFrame 的迭代器 | 一次有界搜索 | Serving | Dashboard 只对 `search_text` 做关键词搜索，tags、dataset type 和 SQL 条件作为过滤器 |
 
 `query_data()`、`pull_data()` 和 `iter_data_batches()` 默认查询 landing，也可传入
 `table=client.config.tables.serving_table`。`get_by_id()`、`search()` 和
@@ -448,15 +448,14 @@ with WTGatewayClient() as client:
 | `upsert_serving(record)` / `upsert_serving_batch(records)` | ETL 按全局唯一 `id` 发布；保留 `source_updated_at` 并刷新 `serving_updated_at`。 |
 | `query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
-| `search(query, ..., deserialize_json=False)` | 检索 serving 的 `search_text`、tags/SQL 或显式指定的标量字符串字段。 |
+| `search(query, ..., deserialize_json=False, checkout_latest=True)` | 只检索 serving 的 `search_text`，可额外使用 tags、dataset type 或 SQL 条件过滤。 |
 | `get_tags_distribution()` | 返回 serving 标签频次。 |
 | `get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False)` | 默认从 serving 返回一个精简字典，或精确查询一个指定表。 |
 | `pull_data(..., table=None, deserialize_json=False)` / `iter_data_batches(..., table=None, deserialize_json=False)` | 默认读取 landing，或按指定表进行手动单页/自动分批读取。 |
 | `export_data_batches(filter_query="", ..., table=None, deserialize_json=False)` | 默认从 serving 可靠导出固定 ID 清单，并校验每个精确 ID batch。 |
 
-dldb 当前尚未开放向量搜索。关键词检索默认查询 `search_text`；如需检索其他
-字符串列，可显式传入标量 `search_fields`。不透明 JSON trace 应通过 ETL 生成的
-`search_text`、普通 SQL 条件或 tags 查询。设置 `stream=True` 时，会返回包含
+dldb 当前尚未开放向量搜索。关键词检索只查询 ETL 生成的 `search_text`；tags、
+dataset type 和普通 SQL 条件仍可作为过滤器。设置 `stream=True` 时，会返回包含
 当前结果 DataFrame 的迭代器。
 
 ### 环境配置

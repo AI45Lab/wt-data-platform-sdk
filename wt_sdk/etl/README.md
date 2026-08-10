@@ -127,14 +127,15 @@ incremental 模式会使用 checkpoint。
 | Pipeline | 模式 | 当前 stage | 当前状态 |
 | --- | --- | --- | --- |
 | `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable` | 业务逻辑仍为 TODO；实现合入前只能做静态检查，不能真实执行。未来 Claude normalization stage 也接入这里，并在 trainability 前完成。 |
-| `landing_to_serving_pipeline` | landing → serving | `build_chosen_trace`、`build_search_text`、`derive_job_tags` | v2；可用于现有 OpenCode 轨迹，仅处理 `is_trainable is True` 的行。 |
+| `landing_to_serving_pipeline` | landing → serving | `build_chosen_trace`、`derive_job_tags`、`build_search_text` | v3；可用于现有 OpenCode 轨迹，仅处理 `is_trainable is True` 的行。 |
 
-`build_chosen_trace` 将 `messages + response` 写入 `chosen_trace`；`build_search_text` 依赖该
-stage，将 `chosen_trace`、`rejected_trace`、`agent_model` 和 `meta_json` 中非空的字符串按固定
-顺序用换行符拼接到 `search_text`，供 serving 的包含搜索使用。因为 `chosen_trace` 已完整包含
-当前行的 `messages + response`，搜索文本不再重复拼接这两个原始字段；`derive_job_tags` 从
+`build_chosen_trace` 将 `messages + response` 写入 `chosen_trace`；`derive_job_tags` 从
 `job_id` 前四段尽最大努力生成
 `[数据集, harness, 模型, 任务类型]`，无法解析时写 `None`。
+`build_search_text` 依赖前述两个 stage，将 `chosen_trace`、`rejected_trace`、`agent_model`、
+`meta_json`、`dataset_type` 和 `tags` 中非空的文本按固定顺序用换行符拼接到 `search_text`；
+`tags` 按元素逐项拼接。因为 `chosen_trace` 已完整包含当前行的 `messages + response`，搜索文本
+不再重复拼接这两个原始字段。
 Claude messages normalization 不属于 serving pipeline。它应先在 landing enrichment 中完成；
 trainability 若依赖 normalized messages，必须声明对应 dependency。之后 serving pipeline 读取
 已经 enrichment 的 landing session，继续生成 `chosen_trace`、`search_text` 和 `tags`。

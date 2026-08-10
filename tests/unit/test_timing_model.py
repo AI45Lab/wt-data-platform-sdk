@@ -677,7 +677,7 @@ def test_query_data_can_query_named_serving_table(monkeypatch):
     assert fake_session.last_filter_kwargs["order_by"] == "created_at"
 
 
-def test_keyword_search_defaults_to_search_text_and_rejects_nested_fields(monkeypatch):
+def test_keyword_search_only_targets_search_text(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
@@ -698,9 +698,6 @@ def test_keyword_search_defaults_to_search_text_and_rejects_nested_fields(monkey
 
     client.search("")
     assert fake_session.last_filter_kwargs["query"] == "id IS NOT NULL"
-
-    with pytest.raises(ValueError, match="opaque JSON/list field 'chosen_trace'"):
-        client.search("example", search_fields=["chosen_trace"])
 
 
 def test_public_row_read_apis_can_deserialize_json_columns(monkeypatch):
@@ -863,6 +860,7 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
         "source_updated_at",
         "is_terminal",
         "is_trainable",
+        "is_session_completed",
     ]
     assert fake_session.optimized_partitions == [
         {
@@ -905,6 +903,7 @@ def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatc
         ("dataset_type", "BITMAP"),
         ("is_terminal", "BITMAP"),
         ("is_trainable", "BITMAP"),
+        ("is_session_completed", "BITMAP"),
         ("step_reward", "BTREE"),
         ("reward", "BTREE"),
         ("agent_model", "BTREE"),

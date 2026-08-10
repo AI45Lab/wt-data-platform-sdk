@@ -14,12 +14,12 @@ def build_pipeline() -> PipelineDefinition:
 
     return PipelineDefinition(
         name="landing_to_serving_pipeline",
-        version="2",
+        version="3",
         mode=PipelineMode.SERVING,
         stages=(
             BuildChosenTraceStage(),
-            BuildSearchTextStage(),
             DeriveJobTagsStage(),
+            BuildSearchTextStage(),
         ),
     )
 

@@ -116,12 +116,14 @@ def test_landing_to_serving_builds_trace_search_text_and_job_tags():
                 assert row["search_text"].count(answer) == 1
                 assert "opencode-integration-test" in row["search_text"]
                 assert "etl-integration-test" in row["search_text"]
+                assert "ETL_INTEGRATION_TEST" in row["search_text"]
                 assert row["tags"] == [
                     "integration-dataset",
                     "integration-harness",
                     "integration-model",
                     "etl-stage-test",
                 ]
+                assert all(tag in row["search_text"] for tag in row["tags"])
                 assert row["source_updated_at"] is not None
                 assert row["serving_updated_at"] is not None
         finally:

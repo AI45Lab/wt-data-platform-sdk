@@ -411,7 +411,7 @@ metrics summary when enabled.
 | `pull_data()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `cursor`, `order_by`, `ascending`, `limit`, `checkout_latest`, `table`, `deserialize_json` | One DataFrame page | Caller supplies, extracts, and persists the `created_at` cursor | Landing | Incremental consumers, polling, retryable processing, durable checkpoints |
 | `iter_data_batches()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `chunk_size`, `order_by`, `ascending`, `table`, `deserialize_json` | Iterator yielding one DataFrame per batch | SDK advances the `created_at` cursor internally until exhausted | Landing | Convenient one-run scans, backfills, and offline processing where timestamp ties are acceptable |
 | `export_data_batches()` | `filter_query`, `batch_size`, `columns`, `table`, `deserialize_json` | Iterator yielding one validated DataFrame per manifest batch | SDK first captures a complete unique-ID manifest, then fetches and verifies exact IDs | Serving | Formal offline exports requiring a fixed row set, duplicate-ID detection, and no timestamp-cursor gaps |
-| `search()` | `query`, `limit`, `tags`, `where_sql`, `dataset_type`, `stream`, `table`, `search_fields`, `deserialize_json`, `checkout_latest` | One DataFrame, or a one-frame iterator with `stream=True` | One bounded search | Serving | Dashboard keyword search over `search_text`, tags, and scalar filters; LIKE metacharacters are literal and latest snapshot is the default |
+| `search()` | `query`, `limit`, `tags`, `where_sql`, `dataset_type`, `stream`, `table`, `deserialize_json`, `checkout_latest` | One DataFrame, or a one-frame iterator with `stream=True` | One bounded search | Serving | Dashboard keyword search over `search_text`, with tags and scalar filters; LIKE metacharacters are literal and latest snapshot is the default |
 
 `query_data()`, `pull_data()`, and `iter_data_batches()` default to landing and
 accept `table=client.config.tables.serving_table`. `get_by_id()`, `search()`, and
@@ -474,16 +474,15 @@ partitions.
 | upsert_serving(record) / upsert_serving_batch(records) | ETL publication by globally unique `id`; preserve `source_updated_at` and refresh `serving_updated_at`. |
 | query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False) | Query serving with the same filtering and HASH pruning behavior; always return `List[dict]`. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
-| search(query, ..., deserialize_json=False, checkout_latest=True) | Search serving `search_text`, tags/SQL, or explicit scalar string fields; user `%`, `_`, and `\\` characters are treated literally. |
+| search(query, ..., deserialize_json=False, checkout_latest=True) | Search serving `search_text`, optionally constrained by tags/SQL filters; user `%`, `_`, and `\\` characters are treated literally. |
 | get_tags_distribution() | Return serving tag frequencies. |
 | get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False) | Return one compact dictionary from serving by default, or exactly one named table. |
 | pull_data(..., table=None, deserialize_json=False) / iter_data_batches(..., table=None, deserialize_json=False) | Read landing by default, or a named table, with manual-page or automatic-batch iteration. |
 | export_data_batches(filter_query="", ..., table=None, deserialize_json=False) | Reliably export a fixed ID manifest from serving by default; validates each exact-ID batch. |
 
-Vector search is not currently exposed by dldb. Keyword search defaults to
-`search_text`; pass explicit scalar `search_fields` to search other string
-columns. Opaque JSON traces are queried through the ETL-generated `search_text`,
-normal SQL filters, or tags. `stream=True` returns an iterator containing the
+Vector search is not currently exposed by dldb. Keyword search always targets
+the ETL-generated `search_text`; tags, dataset type, and normal SQL conditions
+remain available as filters. `stream=True` returns an iterator containing the
 current result frame.
 
 ### Environment Configs
