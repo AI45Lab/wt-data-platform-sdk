@@ -20,6 +20,7 @@ def test_builtin_pipeline_short_name_is_directly_loadable():
     assert [stage.name for stage in pipeline.ordered_stages] == [
         "build_chosen_trace",
         "derive_job_tags",
+        "build_search_text",
     ]
 
 
@@ -124,6 +125,7 @@ def test_stage_introspection_does_not_create_database_client(
     assert payload["pipelines"][0]["execution_order"] == [
         "build_chosen_trace",
         "derive_job_tags",
+        "build_search_text",
     ]
     assert ("stages" in payload["pipelines"][0]) is expect_details
 

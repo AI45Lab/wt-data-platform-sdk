@@ -97,6 +97,10 @@ ETL 时，才必须配置 `WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-etl`，或�
 `EnvConfigManager` 使用独立的 `WT_SDK_ENV_CONFIG_DB_URI` 数据库访问
 `evaluation_env_config`，不受 `WT_SDK_PROFILE` 影响。上面的 endpoint 和 AWS
 凭证由两个数据库共用。显式传给 `EnvConfigManager` 的 `db_uri=` 具有更高优先级。
+环境配置读取默认使用 `checkout_latest=True`，因此长期运行的进程可以看到启动后由
+其他进程提交的新配置。
+该默认行为兼容已有调用；只有明确接受旧 snapshot 时才传入
+`checkout_latest=False`。
 
 ## 端到端最佳实践
 
@@ -384,7 +388,7 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 | `pull_data()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`cursor`、`order_by`、`ascending`、`limit`、`checkout_latest`、`table`、`deserialize_json` | 一次返回一页 DataFrame | 调用方传入、提取并持久化 `created_at` 游标 | Landing | 增量消费、轮询、失败重试、需要可靠 checkpoint 的处理流程 |
 | `iter_data_batches()` | `dataset_type`、`where_sql`、`start_time`、`end_time`、`chunk_size`、`order_by`、`ascending`、`table`、`deserialize_json` | 返回迭代器，每次 yield 一个 DataFrame batch | SDK 内部推进 `created_at` 游标，直到数据读完 | Landing | 允许时间戳并列的一次性扫描、回填和离线处理 |
 | `export_data_batches()` | `filter_query`、`batch_size`、`columns`、`table`、`deserialize_json` | 返回迭代器，每次 yield 一个经过校验的 DataFrame manifest batch | SDK 先生成完整唯一 ID 清单，再按精确 ID 取数并校验 | Serving | 要求固定行集合、检测重复 ID、且不能因时间戳游标漏数的正式离线导出 |
-| `search()` | `query`、`limit`、`tags`、`where_sql`、`dataset_type`、`stream`、`table`、`search_fields`、`deserialize_json` | 返回一个 DataFrame；`stream=True` 时返回单个 DataFrame 的迭代器 | 一次有界搜索 | Serving | Dashboard 对 `search_text`、tags 和标量条件的关键词搜索 |
+| `search()` | `query`、`limit`、`tags`、`where_sql`、`dataset_type`、`stream`、`table`、`deserialize_json`、`checkout_latest` | 返回一个 DataFrame；`stream=True` 时返回单个 DataFrame 的迭代器 | 一次有界搜索 | Serving | Dashboard 只对 `search_text` 做关键词搜索，tags、dataset type 和 SQL 条件作为过滤器 |
 
 `query_data()`、`pull_data()` 和 `iter_data_batches()` 默认查询 landing，也可传入
 `table=client.config.tables.serving_table`。`get_by_id()`、`search()` 和
@@ -444,16 +448,30 @@ with WTGatewayClient() as client:
 | `upsert_serving(record)` / `upsert_serving_batch(records)` | ETL 按全局唯一 `id` 发布；保留 `source_updated_at` 并刷新 `serving_updated_at`。 |
 | `query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
-| `search(query, ..., deserialize_json=False)` | 检索 serving 的 `search_text`、tags/SQL 或显式指定的标量字符串字段。 |
+| `search(query, ..., deserialize_json=False, checkout_latest=True)` | 只检索 serving 的 `search_text`，可额外使用 tags、dataset type 或 SQL 条件过滤。 |
 | `get_tags_distribution()` | 返回 serving 标签频次。 |
 | `get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False)` | 默认从 serving 返回一个精简字典，或精确查询一个指定表。 |
 | `pull_data(..., table=None, deserialize_json=False)` / `iter_data_batches(..., table=None, deserialize_json=False)` | 默认读取 landing，或按指定表进行手动单页/自动分批读取。 |
 | `export_data_batches(filter_query="", ..., table=None, deserialize_json=False)` | 默认从 serving 可靠导出固定 ID 清单，并校验每个精确 ID batch。 |
 
-dldb 当前尚未开放向量搜索。关键词检索默认查询 `search_text`；如需检索其他
-字符串列，可显式传入标量 `search_fields`。不透明 JSON trace 应通过 ETL 生成的
-`search_text`、普通 SQL 条件或 tags 查询。设置 `stream=True` 时，会返回包含
+dldb 当前尚未开放向量搜索。关键词检索只查询 ETL 生成的 `search_text`；tags、
+dataset type 和普通 SQL 条件仍可作为过滤器。设置 `stream=True` 时，会返回包含
 当前结果 DataFrame 的迭代器。
+
+### 环境配置
+
+环境配置位于独立的 `evaluation_env_config` 表中，由
+`WT_SDK_ENV_CONFIG_DB_URI` 选择数据库。读取接口默认使用
+`checkout_latest=True`，因此长期运行的 gateway 进程可以看到 launcher 在它启动后
+写入的新配置。
+
+| 方法 | 用途 |
+| --- | --- |
+| `get_env_configs(limit, offset=0, filter_query="", *, checkout_latest=True)` | 按页读取配置，可选 SQL filter。 |
+| `get_all_env_configs(*, checkout_latest=True)` | 按 `id` 排序返回全部配置。 |
+| `get_env_image_map(*, checkout_latest=True)` | 基于最新 config 表 snapshot 构造 `env_name -> image`。 |
+| `get_all_image(*, checkout_latest=True)` | 基于 image 非空的行构造 `image -> env_name`。 |
+| `count(filter_query="", *, checkout_latest=True)` | 统计配置行数，可选 SQL filter。 |
 
 ### 索引维护
 
@@ -546,21 +564,52 @@ python scripts/ops/table_manager.py drop serving_test --partition 42
 
 ### 查询与数据检查
 
+`--query` 接收标准 SQL `WHERE` 条件表达式，但不要写开头的 `WHERE`。
+可以使用普通 SQL 写法，例如 `=`、`IN (...)`、`LIKE`、`AND`、`OR`、
+比较运算符以及 boolean 字面量。命令行里要把完整条件用引号包起来，
+这样空格和 `%` 模糊匹配模式才会原样传给脚本。
+
 ```bash
 # 统计行数
 python scripts/inspect/query_data.py --table wind_tunnel_landing --count
+
+# 查询独立的环境配置表；指定这个表名时脚本会自动使用 WT_SDK_ENV_CONFIG_DB_URI
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --columns "id,job_id,env_id,env_name,group_id,finished" \
+  --limit 20
+
+# 统计某个 job 的环境配置数量
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" --count
+
+# 将环境配置 dump 到本地 JSON 文件
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --output ./artifacts/job_001_env_configs.json
 
 # 查询指定列
 python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
+# 按 SQL 条件统计行数
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" --count
+
 # 解码并查看 JSON payload 列，同时关闭显示截断
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
-# 将结果写为 pretty JSON，并展开 JSON payload 列
-python scripts/inspect/query_data.py --table landing_test --limit 1 \
-  --output ./artifacts/landing_sample.json
+# dump 一条 sample 到本地 JSON 文件，并展开 JSON payload 列
+python scripts/inspect/query_data.py --table landing_test \
+  --query "job_id = 'job-001'" --limit 1 \
+  --output ./artifacts/landing_job_001_sample.json
+
+# 将符合条件的生产数据 dump 到本地 JSON 文件
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" \
+  --columns "id,job_id,session_id,step_id,source_updated_at" \
+  --output ./artifacts/panjia_trainable_rows.json
 
 # 按分区对比预期标量索引和现有标量索引
 python scripts/inspect/show_table_indexes.py landing_test
@@ -586,6 +635,14 @@ python scripts/ops/cleanup_data.py --table landing_test \
 # 删除匹配的测试数据
 python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
+
+# 预览 env config 脏数据；该表会自动使用 WT_SDK_ENV_CONFIG_DB_URI
+python scripts/ops/cleanup_data.py --table evaluation_env_config \
+  --query "job_id = 'gateway'" --dry-run
+
+# 预览确认后删除 env config 脏数据
+python scripts/ops/cleanup_data.py --table evaluation_env_config \
+  --query "job_id = 'gateway'"
 
 # 预览并修改 test profile 中符合条件的 landing 行
 python scripts/ops/update_table_rows.py --profile test --table landing \

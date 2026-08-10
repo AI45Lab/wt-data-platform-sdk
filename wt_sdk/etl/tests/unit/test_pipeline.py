@@ -4,6 +4,7 @@ import pytest
 
 from wt_sdk.etl import (
     BuildChosenTraceStage,
+    BuildSearchTextStage,
     DeriveJobTagsStage,
     ETLStage,
     PipelineConfigurationError,
@@ -77,13 +78,15 @@ class ProcessNonTrainableStage(ETLStage):
         }
 
 
-def test_canonical_serving_pipeline_builds_trace_then_tags():
+def test_canonical_serving_pipeline_builds_trace_and_tags_then_search_text():
     pipeline = load_pipeline("landing_to_serving_pipeline")
 
     assert [stage.name for stage in pipeline.ordered_stages] == [
         "build_chosen_trace",
         "derive_job_tags",
+        "build_search_text",
     ]
+    assert pipeline.version == "3"
 
     result = pipeline.process_session([_row()])
 
@@ -95,6 +98,19 @@ def test_canonical_serving_pipeline_builds_trace_then_tags():
         {"role": "user", "content": "raw"},
         {"role": "assistant", "content": "answer"},
     ]
+    assert serving.search_text == "\n".join(
+        [
+            '[{"role":"user","content":"raw"},'
+            '{"role":"assistant","content":"answer"}]',
+            "opencode-model",
+            json.dumps({"provider_messages": []}),
+            "trajectory",
+            "dataset",
+            "harness",
+            "model",
+            "task",
+        ]
+    )
     assert serving.tags == ["dataset", "harness", "model", "task"]
     assert serving.source_updated_at == 1_754_000_000_000
     assert serving.serving_updated_at is None
@@ -180,9 +196,15 @@ def test_describe_dag_returns_machine_readable_stage_inventory():
     assert description["execution_order"] == [
         "build_chosen_trace",
         "derive_job_tags",
+        "build_search_text",
     ]
-    assert description["edges"] == []
+    assert description["edges"] == [
+        {"from": "build_chosen_trace", "to": "build_search_text"},
+        {"from": "derive_job_tags", "to": "build_search_text"},
+    ]
     assert description["stages"][0]["output_fields"] == ["chosen_trace"]
+    assert description["stages"][1]["output_fields"] == ["tags"]
+    assert description["stages"][2]["output_fields"] == ["search_text"]
 
 
 def test_canonical_serving_pipeline_skips_session_when_no_stage_selects_rows():
@@ -240,6 +262,7 @@ def test_builtin_factories_are_no_argument_cli_factories():
     assert [stage.name for stage in serving.ordered_stages] == [
         "build_chosen_trace",
         "derive_job_tags",
+        "build_search_text",
     ]
     assert landing.mode is PipelineMode.LANDING
     assert isinstance(landing.ordered_stages[0], UpdateIsTrainableStage)

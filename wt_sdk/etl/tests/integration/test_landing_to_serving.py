@@ -33,7 +33,7 @@ from wt_sdk.etl.tests.integration.helpers import (
 )
 
 
-def test_landing_to_serving_builds_chosen_trace_and_job_tags():
+def test_landing_to_serving_builds_trace_search_text_and_job_tags():
     suffix = uuid.uuid4().hex
     job_id = (
         "integration-dataset#integration-harness#integration-model#etl-stage-test"
@@ -57,6 +57,9 @@ def test_landing_to_serving_builds_chosen_trace_and_job_tags():
             "content": f"integration answer {step_id}",
         }
         expected_traces[record_id] = [*messages, response]
+        messages_json = json.dumps(messages)
+        response_json = json.dumps(response)
+        meta_json = json.dumps({"source": "etl-integration-test"})
         records.append(
             LandingRecord(
                 dataset_type="ETL_INTEGRATION_TEST",
@@ -68,13 +71,13 @@ def test_landing_to_serving_builds_chosen_trace_and_job_tags():
                 env_id=f"etl-env-{suffix}",
                 job_id=job_id,
                 is_truncated=False,
-                messages=json.dumps(messages),
-                response=json.dumps(response),
+                messages=messages_json,
+                response=response_json,
                 agent_model="opencode-integration-test",
                 env_name="etl-integration-test",
                 is_session_completed=step_id == 1,
                 is_trainable=True,
-                meta_json=json.dumps({"source": "etl-integration-test"}),
+                meta_json=meta_json,
             )
         )
 
@@ -105,12 +108,22 @@ def test_landing_to_serving_builds_chosen_trace_and_job_tags():
             assert len(serving_rows) == 2
             for row in serving_rows:
                 assert json.loads(row["chosen_trace"]) == expected_traces[row["id"]]
+                question = f"integration question {row['step_id']}"
+                answer = f"integration answer {row['step_id']}"
+                assert question in row["search_text"]
+                assert answer in row["search_text"]
+                assert row["search_text"].count(question) == 1
+                assert row["search_text"].count(answer) == 1
+                assert "opencode-integration-test" in row["search_text"]
+                assert "etl-integration-test" in row["search_text"]
+                assert "ETL_INTEGRATION_TEST" in row["search_text"]
                 assert row["tags"] == [
                     "integration-dataset",
                     "integration-harness",
                     "integration-model",
                     "etl-stage-test",
                 ]
+                assert all(tag in row["search_text"] for tag in row["tags"])
                 assert row["source_updated_at"] is not None
                 assert row["serving_updated_at"] is not None
         finally:

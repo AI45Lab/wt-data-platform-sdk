@@ -327,6 +327,16 @@ class WTGatewayClient:
     def _escape_sql_string(self, value: str) -> str:
         return value.replace("'", "''")
 
+    def _escape_sql_like_pattern(self, value: str) -> str:
+        """Escape a literal substring for Lance/DataFusion ``LIKE`` syntax."""
+
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        return self._escape_sql_string(escaped)
+
     def _add_hash_partition_filter_for_raw_value(
         self,
         table_name: str,
@@ -1279,13 +1289,14 @@ class WTGatewayClient:
         dataset_type: str = None,
         stream: bool = False,
         table: Optional[str] = None,
-        search_fields: List[str] = None,
         deserialize_json: bool = False,
+        checkout_latest: bool = True,
     ) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
         """Filter/search rows and return a DataFrame or one-frame iterator.
 
-        Vector search is unsupported. Keyword search defaults to search_text;
-        callers may provide scalar search_fields and optionally decode JSON.
+        Vector search is unsupported. Keyword search always targets search_text.
+        LIKE metacharacters in the query are treated literally. Searches use the
+        latest table snapshot by default for long-lived serving clients.
         """
         table_name = table or self.config.tables.serving_table
         if isinstance(query, list):
@@ -1308,27 +1319,8 @@ class WTGatewayClient:
             filters.append(f"({where_sql})")
 
         if isinstance(query, str) and query.strip():
-            fields_to_search = search_fields or ["search_text"]
-            search_conditions = []
-            opaque_fields = {
-                "messages",
-                "response",
-                "chosen_trace",
-                "rejected_trace",
-                "tags",
-                "blob_manifest",
-            }
-            for field in fields_to_search:
-                if field in opaque_fields:
-                    raise ValueError(
-                        f"Keyword search does not support opaque JSON/list field {field!r}; "
-                        "use tags= for tag filtering or choose a scalar string field."
-                    )
-                escaped_query = self._escape_sql_string(query)
-                search_conditions.append(f"{field} LIKE '%{escaped_query}%'")
-
-            if search_conditions:
-                filters.append(f"({' OR '.join(search_conditions)})")
+            escaped_query = self._escape_sql_like_pattern(query)
+            filters.append(f"(search_text LIKE '%{escaped_query}%' ESCAPE '\\')")
 
         final_filter = " AND ".join(filters) if filters else "id IS NOT NULL"
         partitions = self._resolve_landing_query_partitions(table_name, final_filter)
@@ -1342,6 +1334,7 @@ class WTGatewayClient:
             columns=None,
             partitions=partitions,
             partition_cond=None,
+            checkout_latest=checkout_latest,
             extra={"stream": stream, "dataset_type": dataset_type, "api": "search"},
         )
         if deserialize_json:

@@ -102,6 +102,10 @@ database is used, the same profile selects the checkpoint table shown above.
 `evaluation_env_config`; it is not affected by `WT_SDK_PROFILE`. The endpoint
 and AWS credentials above are shared by both databases. An explicit `db_uri=`
 passed to `EnvConfigManager` takes precedence.
+Environment-config reads use `checkout_latest=True` by default so a long-lived
+process can see configs committed by another process after it started.
+The default is backward-compatible with existing callers; pass
+`checkout_latest=False` only when an older snapshot is intentionally acceptable.
 
 ## End-to-End Best Practice
 
@@ -407,7 +411,7 @@ metrics summary when enabled.
 | `pull_data()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `cursor`, `order_by`, `ascending`, `limit`, `checkout_latest`, `table`, `deserialize_json` | One DataFrame page | Caller supplies, extracts, and persists the `created_at` cursor | Landing | Incremental consumers, polling, retryable processing, durable checkpoints |
 | `iter_data_batches()` | `dataset_type`, `where_sql`, `start_time`, `end_time`, `chunk_size`, `order_by`, `ascending`, `table`, `deserialize_json` | Iterator yielding one DataFrame per batch | SDK advances the `created_at` cursor internally until exhausted | Landing | Convenient one-run scans, backfills, and offline processing where timestamp ties are acceptable |
 | `export_data_batches()` | `filter_query`, `batch_size`, `columns`, `table`, `deserialize_json` | Iterator yielding one validated DataFrame per manifest batch | SDK first captures a complete unique-ID manifest, then fetches and verifies exact IDs | Serving | Formal offline exports requiring a fixed row set, duplicate-ID detection, and no timestamp-cursor gaps |
-| `search()` | `query`, `limit`, `tags`, `where_sql`, `dataset_type`, `stream`, `table`, `search_fields`, `deserialize_json` | One DataFrame, or a one-frame iterator with `stream=True` | One bounded search | Serving | Dashboard keyword search over `search_text`, tags, and scalar filters |
+| `search()` | `query`, `limit`, `tags`, `where_sql`, `dataset_type`, `stream`, `table`, `deserialize_json`, `checkout_latest` | One DataFrame, or a one-frame iterator with `stream=True` | One bounded search | Serving | Dashboard keyword search over `search_text`, with tags and scalar filters; LIKE metacharacters are literal and latest snapshot is the default |
 
 `query_data()`, `pull_data()`, and `iter_data_batches()` default to landing and
 accept `table=client.config.tables.serving_table`. `get_by_id()`, `search()`, and
@@ -470,17 +474,31 @@ partitions.
 | upsert_serving(record) / upsert_serving_batch(records) | ETL publication by globally unique `id`; preserve `source_updated_at` and refresh `serving_updated_at`. |
 | query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False) | Query serving with the same filtering and HASH pruning behavior; always return `List[dict]`. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
-| search(query, ..., deserialize_json=False) | Search serving `search_text`, tags/SQL, or explicit scalar string fields. |
+| search(query, ..., deserialize_json=False, checkout_latest=True) | Search serving `search_text`, optionally constrained by tags/SQL filters; user `%`, `_`, and `\\` characters are treated literally. |
 | get_tags_distribution() | Return serving tag frequencies. |
 | get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False) | Return one compact dictionary from serving by default, or exactly one named table. |
 | pull_data(..., table=None, deserialize_json=False) / iter_data_batches(..., table=None, deserialize_json=False) | Read landing by default, or a named table, with manual-page or automatic-batch iteration. |
 | export_data_batches(filter_query="", ..., table=None, deserialize_json=False) | Reliably export a fixed ID manifest from serving by default; validates each exact-ID batch. |
 
-Vector search is not currently exposed by dldb. Keyword search defaults to
-`search_text`; pass explicit scalar `search_fields` to search other string
-columns. Opaque JSON traces are queried through the ETL-generated `search_text`,
-normal SQL filters, or tags. `stream=True` returns an iterator containing the
+Vector search is not currently exposed by dldb. Keyword search always targets
+the ETL-generated `search_text`; tags, dataset type, and normal SQL conditions
+remain available as filters. `stream=True` returns an iterator containing the
 current result frame.
+
+### Environment Configs
+
+Environment configs live in the separate `evaluation_env_config` table selected
+by `WT_SDK_ENV_CONFIG_DB_URI`. Read APIs default to `checkout_latest=True` so a
+long-lived gateway process can see configs written by a launcher process after
+the gateway started.
+
+| Method | Purpose |
+| --- | --- |
+| `get_env_configs(limit, offset=0, filter_query="", *, checkout_latest=True)` | Page through configs with an optional SQL filter. |
+| `get_all_env_configs(*, checkout_latest=True)` | Return all configs sorted by `id`. |
+| `get_env_image_map(*, checkout_latest=True)` | Build `env_name -> image` from the latest config table snapshot. |
+| `get_all_image(*, checkout_latest=True)` | Build `image -> env_name` from rows with non-empty images. |
+| `count(filter_query="", *, checkout_latest=True)` | Count configs, optionally matching a SQL filter. |
 
 ### Index Maintenance
 
@@ -573,21 +591,53 @@ python scripts/ops/table_manager.py drop serving_test --partition 42
 
 ### Query and Inspect Data
 
+`--query` accepts a standard SQL `WHERE` predicate without the leading
+`WHERE`. Use normal SQL operators such as `=`, `IN (...)`, `LIKE`, `AND`,
+`OR`, comparison operators, and boolean literals. Wrap the whole predicate in
+shell quotes so spaces and `%` patterns are passed to the script unchanged.
+
 ```bash
 # Count rows
 python scripts/inspect/query_data.py --table wind_tunnel_landing --count
+
+# Query the separate environment-config table; the script automatically uses
+# WT_SDK_ENV_CONFIG_DB_URI for this table name
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --columns "id,job_id,env_id,env_name,group_id,finished" \
+  --limit 20
+
+# Count environment configs for one job
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" --count
+
+# Dump environment configs to a local JSON file
+python scripts/inspect/query_data.py --table evaluation_env_config \
+  --query "job_id = 'job-001'" \
+  --output ./artifacts/job_001_env_configs.json
 
 # Query selected columns
 python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
+# Count rows matching a SQL filter
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" --count
+
 # Decode and inspect JSON payload columns without display truncation
 python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
-# Write results as pretty JSON, expanding JSON payload columns
-python scripts/inspect/query_data.py --table landing_test --limit 1 \
-  --output ./artifacts/landing_sample.json
+# Dump one sample row to a local JSON file, expanding JSON payload columns
+python scripts/inspect/query_data.py --table landing_test \
+  --query "job_id = 'job-001'" --limit 1 \
+  --output ./artifacts/landing_job_001_sample.json
+
+# Dump selected production rows to a local JSON file
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%' AND is_trainable = true" \
+  --columns "id,job_id,session_id,step_id,source_updated_at" \
+  --output ./artifacts/panjia_trainable_rows.json
 
 # Show expected versus existing scalar indexes by partition
 python scripts/inspect/show_table_indexes.py landing_test
@@ -613,6 +663,14 @@ python scripts/ops/cleanup_data.py --table landing_test \
 # Delete matching test data
 python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
+
+# Preview dirty env config rows; this table automatically uses WT_SDK_ENV_CONFIG_DB_URI
+python scripts/ops/cleanup_data.py --table evaluation_env_config \
+  --query "job_id = 'gateway'" --dry-run
+
+# Delete dirty env config rows after preview
+python scripts/ops/cleanup_data.py --table evaluation_env_config \
+  --query "job_id = 'gateway'"
 
 # Preview and patch filtered landing rows in the test profile
 python scripts/ops/update_table_rows.py --profile test --table landing \

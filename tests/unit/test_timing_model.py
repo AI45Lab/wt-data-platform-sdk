@@ -677,7 +677,7 @@ def test_query_data_can_query_named_serving_table(monkeypatch):
     assert fake_session.last_filter_kwargs["order_by"] == "created_at"
 
 
-def test_keyword_search_defaults_to_search_text_and_rejects_nested_fields(monkeypatch):
+def test_keyword_search_only_targets_search_text(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
@@ -685,13 +685,19 @@ def test_keyword_search_defaults_to_search_text_and_rejects_nested_fields(monkey
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
 
     client.search("example")
-    assert fake_session.last_filter_kwargs["query"] == "(search_text LIKE '%example%')"
+    assert fake_session.last_filter_kwargs["query"] == (
+        "(search_text LIKE '%example%' ESCAPE '\\')"
+    )
+    assert fake_session.last_filter_kwargs["checkout_latest"] is True
+
+    client.search("100%_done\\now", checkout_latest=False)
+    assert fake_session.last_filter_kwargs["query"] == (
+        "(search_text LIKE '%100\\%\\_done\\\\now%' ESCAPE '\\')"
+    )
+    assert fake_session.last_filter_kwargs["checkout_latest"] is False
 
     client.search("")
     assert fake_session.last_filter_kwargs["query"] == "id IS NOT NULL"
-
-    with pytest.raises(ValueError, match="opaque JSON/list field 'chosen_trace'"):
-        client.search("example", search_fields=["chosen_trace"])
 
 
 def test_public_row_read_apis_can_deserialize_json_columns(monkeypatch):
@@ -854,6 +860,7 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
         "source_updated_at",
         "is_terminal",
         "is_trainable",
+        "is_session_completed",
     ]
     assert fake_session.optimized_partitions == [
         {
@@ -896,6 +903,7 @@ def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatc
         ("dataset_type", "BITMAP"),
         ("is_terminal", "BITMAP"),
         ("is_trainable", "BITMAP"),
+        ("is_session_completed", "BITMAP"),
         ("step_reward", "BTREE"),
         ("reward", "BTREE"),
         ("agent_model", "BTREE"),
@@ -1345,8 +1353,40 @@ def test_env_config_manager_logs_timing_and_returns_summary(monkeypatch):
     assert connect_kwargs["db_uri"] == "s3://test-env-config"
     assert len(configs) == 1
     assert returned == summary
+    assert fake_session.filter_calls
+    assert all(call["checkout_latest"] is True for call in fake_session.filter_calls)
     assert any("dldb_timing api=add" in message for message in captured)
     assert any("dldb_timing api=filter" in message for message in captured)
     assert any("dldb_timing api=update" in message for message in captured)
     assert any("dldb_timing api=delete" in message for message in captured)
     assert any("dldb_metrics_summary" in message for message in captured)
+
+
+def test_env_config_manager_allows_stale_snapshot_override(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=True)
+
+    monkeypatch.setattr(
+        env_manager_module.dldb,
+        "connect",
+        lambda db_uri, **kwargs: fake_session,
+    )
+
+    manager = EnvConfigManager(table_name="evaluation_env_config")
+    manager.save_config(
+        {
+            "env_name": "CartPole-v1",
+            "env_id": "env-001",
+            "job_id": "job-001",
+            "finished": False,
+        }
+    )
+
+    configs = manager.get_env_configs(
+        limit=10,
+        offset=0,
+        filter_query="env_id = 'env-001'",
+        checkout_latest=False,
+    )
+
+    assert len(configs) == 1
+    assert fake_session.filter_calls[-1]["checkout_latest"] is False
