@@ -17,8 +17,10 @@ class UpdateIsTrainableStage(ETLStage):
 
     Inputs are grouped into append-only chains with exact message-prefix
     matching. Each chain tail contains the complete messages of one
-    structurally separated trajectory. This stage records only
-    ``is_trainable`` and assigns no semantic meaning to the topology.
+    structurally separated trajectory. In a multi-chain session, an independent
+    one-record chain at step 1 is treated as harness startup metadata and is not
+    trainable. This stage records only ``is_trainable`` and assigns no semantic
+    meaning to message contents.
     """
 
     name = "update_is_trainable"
@@ -102,9 +104,11 @@ def _detect_trainable_record_ids(session: Sequence[Record]) -> set[str]:
     trie = _MessagePrefixTrie()
     chains: list[_Chain] = []
     latest_record_to_chain: dict[str, int] = {}
+    step_ids: dict[str, int] = {}
 
     for record in ordered:
         record_id = _record_id(record)
+        step_ids[record_id] = _step_sort_key(record)
         messages = _decode_messages(record.get("messages"), record_id)
         fingerprints = [_message_fingerprint(message) for message in messages]
         matched_record_id = trie.longest_eligible_terminal(
@@ -126,8 +130,25 @@ def _detect_trainable_record_ids(session: Sequence[Record]) -> set[str]:
         trie.insert(fingerprints, record_id)
 
     # Every append-only chain tail contains the complete messages of one
-    # structurally separated trajectory.
-    return {chain.record_ids[-1] for chain in chains}
+    # structurally separated trajectory. A singleton step-1 side chain is the
+    # harness startup subagent and carries no trainable trajectory.
+    return {
+        chain.record_ids[-1]
+        for chain in chains
+        if not _is_single_step_startup_chain(chain, step_ids, len(chains))
+    }
+
+
+def _is_single_step_startup_chain(
+    chain: _Chain,
+    step_ids: Mapping[str, int],
+    chain_count: int,
+) -> bool:
+    return (
+        chain_count > 1
+        and len(chain.record_ids) == 1
+        and step_ids[chain.record_ids[0]] == 1
+    )
 
 
 def _has_non_200_status_code(session: Sequence[Record]) -> bool:

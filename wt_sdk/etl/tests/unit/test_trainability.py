@@ -50,6 +50,61 @@ def test_completed_200_session_marks_only_the_append_only_chain_tail():
     }
 
 
+def test_single_step_one_side_chain_is_not_trainable_in_multi_chain_session():
+    startup = {"role": "system", "content": "startup side task"}
+    root_start = {"role": "user", "content": "main task"}
+    root_response = {"role": "assistant", "content": "main response"}
+    session = (
+        _row("startup", 1, [startup], completed=False, status_code=200),
+        _row("root-1", 2, [root_start], completed=False, status_code=200),
+        _row(
+            "root-2",
+            3,
+            [root_start, root_response],
+            completed=True,
+            status_code=200,
+        ),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "startup": {"is_trainable": False},
+        "root-1": {"is_trainable": False},
+        "root-2": {"is_trainable": True},
+    }
+
+
+def test_single_record_root_session_at_step_one_remains_trainable():
+    message = {"role": "user", "content": "main task"}
+    session = (_row("root", 1, [message], completed=True, status_code=200),)
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "root": {"is_trainable": True},
+    }
+
+
+def test_step_one_chain_with_multiple_records_remains_trainable():
+    first = {"role": "user", "content": "main task"}
+    response = {"role": "assistant", "content": "main response"}
+    side = {"role": "user", "content": "independent task"}
+    session = (
+        _row("root-1", 1, [first], completed=False, status_code=200),
+        _row("side", 2, [side], completed=False, status_code=200),
+        _row(
+            "root-2",
+            3,
+            [first, response],
+            completed=True,
+            status_code=200,
+        ),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "root-1": {"is_trainable": False},
+        "side": {"is_trainable": True},
+        "root-2": {"is_trainable": True},
+    }
+
+
 @pytest.mark.parametrize("status_code", [400, 429, 500, 502, 503])
 def test_any_non_200_status_skips_the_entire_session(status_code: int):
     first = {"role": "user", "content": "question"}
