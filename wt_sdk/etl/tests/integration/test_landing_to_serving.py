@@ -323,9 +323,10 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
             )
             # Two old trainable rows moved past the serving watermark when the
             # landing pipeline refreshed source_updated_at. All three new rows
-            # are in the same incremental window.
+            # are in the same incremental window. Discovery therefore sees
+            # five changed rows, then session processing reloads all six rows.
             assert second.discovery_rows == 5
-            assert second.source_rows == 5
+            assert second.source_rows == 6
             assert second.selected_rows == 5
             assert second.serving_rows_upserted == 5
 
