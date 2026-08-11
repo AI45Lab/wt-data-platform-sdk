@@ -73,6 +73,18 @@ v1 不做以下事情：
 
 ## 数据范围与执行语义
 
+### 强制运行前置条件
+
+ETL 的正确运行要求以下约束始终成立：
+
+- `is_session_completed=true` 只能在该 session 的全部数据写入完成后设置；完成后的 session
+  不得继续追加、删除或修改轨迹数据。
+- `source_updated_at` 必须使用单调前进的 Unix epoch 毫秒时间；任何影响下游结果的 landing
+  变更都必须刷新该字段，禁止回填或倒退时间戳。
+- 每次运行开始后新产生、因固定 snapshot 未进入本轮的数据，必须由后续 ETL 重跑覆盖。手动
+  模式必须再次运行相应 job/range，增量模式必须继续从 checkpoint 追赶，不能把单次执行视为
+  持续数据流的最终处理结果。
+
 - 一条完整轨迹的逻辑主键是 `(job_id, session_id)`。`session_id` 不要求全局唯一。
 - 一个 session 内 `id` 必须唯一，`step_id` 必须非空且唯一，记录按 `step_id` 排序。
 - 一个 session 最多对应一个非空 `env_id`。
