@@ -5,6 +5,7 @@ the SDK's supported import API.
 
 - `ops/`: table initialization, cleanup, index maintenance, and table management.
 - `inspect/`: read-only inspection helpers for data, schemas, indexes, tags, and duplicate IDs.
+- `delivery/`: read-only, stateless serving-data export commands intended for external users.
 - `dev/`: helpers for initializing disposable test tables.
 - ETL runtime, commands, tools, and tests all live in
   [`wt_sdk/etl/`](../wt_sdk/etl/); do not add ETL entry points back under `scripts/`.
@@ -29,6 +30,22 @@ script. For local development:
 set -a && source .env && set +a
 python scripts/inspect/query_data.py --table landing_test --count
 ```
+
+External users can export production serving rows as sharded JSONL files with
+the stateless delivery command. It targets `wind_tunnel_serving` by default,
+writes 1,000 rows per file, and excludes the frontend-only `search_text` column
+unless it is explicitly requested. Pass `--table serving_test` for integration
+validation:
+
+```bash
+python scripts/delivery/export_serving_data.py \
+  --filter "dataset_type = 'RL'" \
+  --columns "id,job_id,serving_updated_at,chosen_trace,meta_json,tags" \
+  --output-dir ./exports
+```
+
+See [`delivery/README.md`](delivery/README.md) for output layout, stateless
+incremental semantics, and failure handling.
 
 `scripts/inspect/query_data.py --query` accepts a standard SQL `WHERE`
 predicate without the leading `WHERE`. For example:
