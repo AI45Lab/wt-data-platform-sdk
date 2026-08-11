@@ -147,8 +147,9 @@ def test_manual_etl_defaults_to_test_and_does_not_require_state_uri(
             return None
 
     class FakeEngine:
-        def __init__(self, client, checkpoint_store=None):
+        def __init__(self, client, checkpoint_store=None, session_batch_size=25):
             assert checkpoint_store is None
+            assert session_batch_size == 25
 
         def run_jobs(self, pipeline, job_ids, dry_run=False):
             assert job_ids == ["job-1"]
@@ -205,9 +206,10 @@ def test_incremental_uses_env_profile_for_test_checkpoint_table(
             return None
 
     class FakeEngine:
-        def __init__(self, client, checkpoint_store=None):
+        def __init__(self, client, checkpoint_store=None, session_batch_size=25):
             assert client.config.tables.profile == "test"
             assert checkpoint_store is not None
+            assert session_batch_size == 25
 
         def run_incremental(self, pipeline, **kwargs):
             captured["settle_delay_ms"] = kwargs["settle_delay_ms"]
@@ -273,8 +275,9 @@ def test_open_ended_manual_range_uses_fixed_start_cutoff_and_optional_delay(
             return None
 
     class FakeEngine:
-        def __init__(self, client, checkpoint_store=None):
+        def __init__(self, client, checkpoint_store=None, session_batch_size=25):
             assert checkpoint_store is None
+            assert session_batch_size == 25
 
         def run_range(self, pipeline, *, start_ms, end_ms, page_size, dry_run):
             captured.update(start_ms=start_ms, end_ms=end_ms)
@@ -407,8 +410,9 @@ def test_failed_pipeline_prints_report_and_returns_nonzero(
             return None
 
     class FakeEngine:
-        def __init__(self, client, checkpoint_store=None):
+        def __init__(self, client, checkpoint_store=None, session_batch_size=25):
             del client, checkpoint_store
+            assert session_batch_size == 25
 
         def run_sessions(self, pipeline, session_keys, dry_run=False):
             del pipeline, session_keys, dry_run

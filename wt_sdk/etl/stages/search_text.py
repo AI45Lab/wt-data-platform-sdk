@@ -26,6 +26,7 @@ class BuildSearchTextStage(ETLStage):
     )
     output_fields = ("search_text",)
     dependencies = ("build_chosen_trace", "derive_job_tags")
+    job_discovery_filter = "is_trainable = true"
 
     def transform_session(
         self,

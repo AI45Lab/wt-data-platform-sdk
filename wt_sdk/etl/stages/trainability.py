@@ -34,6 +34,7 @@ class UpdateIsTrainableStage(ETLStage):
     )
     output_fields = ("is_trainable",)
     dependencies = ()
+    job_discovery_filter = "is_session_completed = true"
 
     def transform_session(
         self,

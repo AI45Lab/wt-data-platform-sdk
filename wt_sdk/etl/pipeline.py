@@ -67,6 +67,24 @@ class PipelineDefinition:
     def ordered_stages(self) -> tuple[ETLStage, ...]:
         return self._ordered_stages
 
+    @property
+    def job_discovery_filter(self) -> str | None:
+        """Return a conservative row filter for complete-job discovery.
+
+        A filter is safe only when every stage declares one. The filters are
+        OR-ed because a session must be discovered when any stage could select
+        one of its rows. A missing hint deliberately falls back to scanning all
+        rows in the requested job; stage execution remains the source of truth.
+        """
+
+        filters = [stage.job_discovery_filter for stage in self.ordered_stages]
+        if any(value is None for value in filters):
+            return None
+        unique = tuple(dict.fromkeys(str(value).strip() for value in filters))
+        if len(unique) == 1:
+            return unique[0]
+        return " OR ".join(f"({value})" for value in unique)
+
     def describe_dag(self) -> dict[str, object]:
         """Return a JSON-serializable stage inventory and dependency graph."""
 
@@ -81,6 +99,7 @@ class PipelineDefinition:
                     "required_fields": list(stage.required_fields),
                     "output_fields": list(stage.output_fields),
                     "dependencies": list(stage.dependencies),
+                    "job_discovery_filter": stage.job_discovery_filter,
                 }
             )
             edges.extend(
@@ -219,6 +238,13 @@ def _order_and_validate_stages(stages: Sequence[ETLStage]) -> tuple[ETLStage, ..
         if any(not isinstance(value, str) or not value.strip() for value in metadata_values):
             raise PipelineConfigurationError(
                 f"stage '{stage.name}' field/dependency declarations must be non-empty strings"
+            )
+        if stage.job_discovery_filter is not None and (
+            not isinstance(stage.job_discovery_filter, str)
+            or not stage.job_discovery_filter.strip()
+        ):
+            raise PipelineConfigurationError(
+                f"stage '{stage.name}' job_discovery_filter must be a non-empty string or None"
             )
         if len(set(stage.required_fields)) != len(stage.required_fields):
             raise PipelineConfigurationError(

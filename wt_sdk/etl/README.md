@@ -78,6 +78,11 @@ v1 不做以下事情：
 - 一个 session 最多对应一个非空 `env_id`。
 - discovery 只读取 `id/job_id/session_id/source_updated_at`，发现任意一行变化后再完整
   加载整个 session。这保证 session 级 stage 看见完整轨迹。
+- `--job-id` 模式允许 stage 声明保守的 `job_discovery_filter`：当前 enrichment 用
+  `is_session_completed=true` 发现完整 session，serving 用 `is_trainable=true`。只有 pipeline
+  内每个 stage 都声明安全提示时才收窄，否则退回 job 全量 discovery；提示不是业务 selector。
+- 同一 job 的 session 以有界批次合并读取（默认 25），随后按 `(job_id, session_id)` 拆回完整
+  session。Stage 仍然一次只接收一个 session。
 - Pipeline 按 DAG 逐个 stage 执行。每个 stage 都读取当前完整 working session；它对所有行
   返回的 patches 通过校验并统一合并后，下一个 stage 才开始，因此后序 stage 能看到前序
   stage 对整个 session 的完整结果。
@@ -292,6 +297,10 @@ session 重试。存在 stage/session/record 失败时命令仍会先写 report�
 exit code `1` 结束。一个 stage 失败后，当前 session 不执行下游 stage，也不提交已计算的
 业务 patches。
 
+源表读取遇到明确的临时 S3/HTTP 错误时最多尝试三次并做指数退避。重试耗尽后，failure 归因到
+`__discovery__` 或 `__session_load__`，report 保留失败前已经完成的 session 和行计数，不会再
+退化成全零的 pipeline failure。
+
 增量执行不会越过失败位置提交 page cursor/window watermark；checkpoint 标为 `FAILED`，下次
 运行会安全重放。失败前已经成功的 landing patch/serving upsert 也会重放，因此 stage 和 sink
 必须幂等。不同 HASH bucket 独立提交：一个 bucket 失败不阻止其他 bucket 的安全 checkpoint。
@@ -315,6 +324,7 @@ run 结构化查询、告警、重试次数和保留周期，再增加单独的 
 | `--landing-table` | 可选，按 profile | 覆盖 source landing 逻辑表名。 | `--landing-table landing_test` |
 | `--serving-table` | 可选，按 profile | 覆盖 serving 目标逻辑表名。 | `--serving-table serving_test` |
 | `--page-size` | 可选，默认 `1000` | 每页轻量 discovery 行数；不是完整 session 截断大小，跨 page 的同一 session 会去重并整组加载。 | `--page-size 500` |
+| `--session-batch-size` | 可选，默认 `25` | 每次源表查询合并加载的完整 session 数；stage 仍逐个完整 session 执行。 | `--session-batch-size 25` |
 | `--settle-delay-seconds` | 可选，默认 `0` | 从本次固定启动时间减去的可选稳定延迟；增量模式及未显式传 `--end-time` 的时间范围使用它。 | `--settle-delay-seconds 7200` |
 | `--start-from` | 首次增量/新 bucket 必需 | 首个 checkpoint 的包含式 bootstrap 时间；支持 ISO 8601、epoch 秒或 epoch 毫秒。不能与 job/time-range 模式组合。 | `--start-from 2026-08-01T00:00:00Z` |
 | `--start-time` | 手动时间范围必需 | 按 `source_updated_at` 做包含式 backfill；不推进全局 checkpoint。 | `--start-time 2026-08-04T00:00:00Z` |

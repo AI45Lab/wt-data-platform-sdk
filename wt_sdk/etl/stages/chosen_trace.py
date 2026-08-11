@@ -11,6 +11,7 @@ class BuildChosenTraceStage(ETLStage):
     version = "1"
     required_fields = ("id", "is_trainable", "messages", "response")
     output_fields = ("chosen_trace",)
+    job_discovery_filter = "is_trainable = true"
 
     def transform_session(
         self,

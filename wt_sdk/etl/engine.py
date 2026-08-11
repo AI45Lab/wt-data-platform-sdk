@@ -1,7 +1,10 @@
 """Incremental, range, and targeted execution for ETL pipelines."""
 
+import logging
+import time
+from collections import defaultdict
 from dataclasses import replace
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 from uuid import uuid4
 
 import wt_sdk._time as sdk_time
@@ -21,6 +24,11 @@ from .stage import SessionKey
 
 
 DISCOVERY_COLUMNS = ["id", "job_id", "session_id", "source_updated_at"]
+DEFAULT_SESSION_BATCH_SIZE = 25
+DEFAULT_READ_MAX_ATTEMPTS = 3
+DEFAULT_READ_RETRY_BASE_DELAY_SECONDS = 1.0
+
+logger = logging.getLogger(__name__)
 
 
 class ETLEngine:
@@ -31,9 +39,19 @@ class ETLEngine:
         client: WTGatewayClient,
         *,
         checkpoint_store: Optional[CheckpointStore] = None,
+        session_batch_size: int = DEFAULT_SESSION_BATCH_SIZE,
+        read_max_attempts: int = DEFAULT_READ_MAX_ATTEMPTS,
+        read_retry_base_delay_seconds: float = DEFAULT_READ_RETRY_BASE_DELAY_SECONDS,
     ) -> None:
+        _validate_positive_int(session_batch_size, "session_batch_size")
+        _validate_positive_int(read_max_attempts, "read_max_attempts")
+        if read_retry_base_delay_seconds < 0:
+            raise ValueError("read_retry_base_delay_seconds must be non-negative")
         self.client = client
         self.checkpoint_store = checkpoint_store
+        self.session_batch_size = session_batch_size
+        self.read_max_attempts = read_max_attempts
+        self.read_retry_base_delay_seconds = read_retry_base_delay_seconds
 
     def run_incremental(
         self,
@@ -188,10 +206,12 @@ class ETLEngine:
     ) -> RunSummary:
         """Immediately process explicit sessions without changing checkpoints."""
 
-        summary = self._new_summary(pipeline)
-        for key in sorted(set(session_keys)):
-            result = self._process_one_session(pipeline, key, dry_run=dry_run)
-            summary.add_session(result, dry_run=dry_run)
+        summary = self._process_session_keys(
+            pipeline,
+            session_keys,
+            dry_run=dry_run,
+            refresh_latest=True,
+        )
         if summary.failed_rows:
             raise ETLRunFailed(summary)
         return summary
@@ -209,14 +229,31 @@ class ETLEngine:
         if not normalized_job_id:
             raise ValueError("job_id is required")
         source_table = self.client.config.tables.landing_table
-        rows = self.client.query_data(
-            filter_query=f"job_id = '{_escape_sql(normalized_job_id)}'",
-            columns=["id", "job_id", "session_id"],
-            partition=normalized_job_id,
-            checkout_latest=True,
-            table=source_table,
-            exclude_none=False,
-        )
+        discovery_filters = [f"job_id = '{_escape_sql(normalized_job_id)}'"]
+        if pipeline.job_discovery_filter is not None:
+            discovery_filters.append(f"({pipeline.job_discovery_filter})")
+        summary = self._new_summary(pipeline)
+        try:
+            rows = self._query_source_with_retry(
+                description=f"discover job {normalized_job_id!r}",
+                filter_query=" AND ".join(discovery_filters),
+                columns=["id", "job_id", "session_id"],
+                partition=normalized_job_id,
+                checkout_latest=True,
+                table=source_table,
+                exclude_none=False,
+                deserialize_json=False,
+            )
+        except Exception as exc:
+            summary.add_failure(
+                _read_failure(
+                    SessionKey(normalized_job_id, ""),
+                    "__discovery__",
+                    exc,
+                )
+            )
+            raise ETLRunFailed(summary) from exc
+        summary.discovery_rows += len(rows)
         keys: set[SessionKey] = set()
         discovery_failures: list[RecordFailure] = []
         for row in rows:
@@ -234,10 +271,13 @@ class ETLEngine:
                 )
                 continue
             keys.add(SessionKey(normalized_job_id, session_id))
-        try:
-            summary = self.run_sessions(pipeline, keys, dry_run=dry_run)
-        except ETLRunFailed as exc:
-            summary = exc.summary
+        processed = self._process_session_keys(
+            pipeline,
+            keys,
+            dry_run=dry_run,
+            refresh_latest=False,
+        )
+        summary.merge(processed)
         for failure in discovery_failures:
             summary.add_failure(failure)
         if summary.failed_rows:
@@ -415,23 +455,32 @@ class ETLEngine:
         source_table, _ = self._table_names(pipeline)
         cursor: Optional[str] = None
         processed_sessions: set[SessionKey] = set()
+        refresh_latest = True
 
         while True:
             filters = [f"({filter_query})"]
             if cursor is not None:
                 filters.append(f"id > '{_escape_sql(cursor)}'")
-            page = self.client.query_data(
-                filter_query=" AND ".join(filters),
-                limit=page_size,
-                columns=DISCOVERY_COLUMNS,
-                partition=bucket,
-                order_by="id",
-                ascending=True,
-                checkout_latest=True,
-                table=source_table,
-                exclude_none=False,
-                deserialize_json=False,
-            )
+            try:
+                page = self._query_source_with_retry(
+                    description=f"discover source bucket {bucket}",
+                    filter_query=" AND ".join(filters),
+                    limit=page_size,
+                    columns=DISCOVERY_COLUMNS,
+                    partition=bucket,
+                    order_by="id",
+                    ascending=True,
+                    checkout_latest=refresh_latest,
+                    table=source_table,
+                    exclude_none=False,
+                    deserialize_json=False,
+                )
+            except Exception as exc:
+                summary.add_failure(
+                    _read_failure(SessionKey("", ""), "__discovery__", exc)
+                )
+                break
+            refresh_latest = False
             if not page:
                 break
             summary.discovery_rows += len(page)
@@ -454,10 +503,15 @@ class ETLEngine:
                     continue
                 session_keys.add(SessionKey(job_id=job_id, session_id=session_id))
 
-            for key in sorted(session_keys - processed_sessions):
-                result = self._process_one_session(pipeline, key, dry_run=dry_run)
-                summary.add_session(result, dry_run=dry_run)
-                processed_sessions.add(key)
+            pending = session_keys - processed_sessions
+            batch_summary = self._process_session_keys(
+                pipeline,
+                pending,
+                dry_run=dry_run,
+                refresh_latest=False,
+            )
+            summary.merge(batch_summary)
+            processed_sessions.update(pending)
 
             cursor = str(page[-1]["id"])
             if len(page) < page_size:
@@ -483,6 +537,7 @@ class ETLEngine:
         cursor = last_processed_id
         start_operator = ">=" if include_start else ">"
         processed_sessions: set[SessionKey] = set()
+        refresh_latest = True
 
         while True:
             filters = [
@@ -491,18 +546,26 @@ class ETLEngine:
             ]
             if cursor is not None:
                 filters.append(f"id > '{_escape_sql(cursor)}'")
-            page = self.client.query_data(
-                filter_query=" AND ".join(filters),
-                limit=page_size,
-                columns=DISCOVERY_COLUMNS,
-                partition=bucket,
-                order_by="id",
-                ascending=True,
-                checkout_latest=True,
-                table=source_table,
-                exclude_none=False,
-                deserialize_json=False,
-            )
+            try:
+                page = self._query_source_with_retry(
+                    description=f"discover source bucket {bucket}",
+                    filter_query=" AND ".join(filters),
+                    limit=page_size,
+                    columns=DISCOVERY_COLUMNS,
+                    partition=bucket,
+                    order_by="id",
+                    ascending=True,
+                    checkout_latest=refresh_latest,
+                    table=source_table,
+                    exclude_none=False,
+                    deserialize_json=False,
+                )
+            except Exception as exc:
+                summary.add_failure(
+                    _read_failure(SessionKey("", ""), "__discovery__", exc)
+                )
+                break
+            refresh_latest = False
             if not page:
                 break
             summary.discovery_rows += len(page)
@@ -525,10 +588,15 @@ class ETLEngine:
                     continue
                 session_keys.add(SessionKey(job_id=job_id, session_id=session_id))
 
-            for key in sorted(session_keys - processed_sessions):
-                result = self._process_one_session(pipeline, key, dry_run=dry_run)
-                summary.add_session(result, dry_run=dry_run)
-                processed_sessions.add(key)
+            pending = session_keys - processed_sessions
+            batch_summary = self._process_session_keys(
+                pipeline,
+                pending,
+                dry_run=dry_run,
+                refresh_latest=False,
+            )
+            summary.merge(batch_summary)
+            processed_sessions.update(pending)
 
             cursor = str(page[-1]["id"])
             if on_page_committed is not None and summary.failed_rows == 0:
@@ -545,9 +613,101 @@ class ETLEngine:
         dry_run: bool,
     ) -> SessionResult:
         try:
-            rows = self._load_session(key)
-        except SessionValidationError as exc:
+            rows_by_key = self._load_session_batch((key,), checkout_latest=True)
+            rows = rows_by_key[key]
+        except Exception as exc:
             return _session_failure_result(key, (), exc, "__session_load__")
+        return self._process_loaded_session(pipeline, key, rows, dry_run=dry_run)
+
+    def _process_session_keys(
+        self,
+        pipeline: PipelineDefinition,
+        session_keys: Iterable[SessionKey],
+        *,
+        dry_run: bool,
+        refresh_latest: bool,
+    ) -> RunSummary:
+        """Batch-load sessions while preserving session-at-a-time stage execution."""
+
+        summary = self._new_summary(pipeline)
+        keys_by_job: dict[str, list[SessionKey]] = defaultdict(list)
+        for key in sorted(set(session_keys)):
+            keys_by_job[key.job_id].append(key)
+
+        for job_id in sorted(keys_by_job):
+            checkout_latest = refresh_latest
+            job_keys = keys_by_job[job_id]
+            for offset in range(0, len(job_keys), self.session_batch_size):
+                batch = tuple(job_keys[offset : offset + self.session_batch_size])
+                batch_failed = False
+                try:
+                    rows_by_key = self._load_session_batch(
+                        batch,
+                        checkout_latest=checkout_latest,
+                    )
+                except Exception as exc:
+                    batch_failed = True
+                    for key in batch:
+                        summary.add_session(
+                            _session_failure_result(
+                                key,
+                                (),
+                                exc,
+                                "__session_load__",
+                            ),
+                            dry_run=dry_run,
+                        )
+                    if checkout_latest:
+                        for key in job_keys[offset + len(batch) :]:
+                            summary.add_session(
+                                _session_failure_result(
+                                    key,
+                                    (),
+                                    exc,
+                                    "__session_load__",
+                                ),
+                                dry_run=dry_run,
+                            )
+                else:
+                    for key in batch:
+                        rows = rows_by_key.get(key, [])
+                        if not rows:
+                            result = _session_failure_result(
+                                key,
+                                (),
+                                SessionValidationError(f"session not found: {key}"),
+                                "__session_load__",
+                            )
+                        else:
+                            result = self._process_loaded_session(
+                                pipeline,
+                                key,
+                                rows,
+                                dry_run=dry_run,
+                            )
+                        summary.add_session(result, dry_run=dry_run)
+                checkout_latest = False
+                logger.info(
+                    "ETL session batch completed: pipeline=%s job_id=%s "
+                    "batch_sessions=%d processed_sessions=%d failed_sessions=%d",
+                    pipeline.name,
+                    job_id,
+                    len(batch),
+                    summary.sessions_processed,
+                    summary.sessions_failed,
+                )
+                if batch_failed and refresh_latest and offset == 0:
+                    break
+        return summary
+
+    def _process_loaded_session(
+        self,
+        pipeline: PipelineDefinition,
+        key: SessionKey,
+        rows: Sequence[dict[str, object]],
+        *,
+        dry_run: bool,
+    ) -> SessionResult:
         try:
             result = pipeline.process_session(rows, collect_failures=True)
         except SessionValidationError as exc:
@@ -608,25 +768,78 @@ class ETLEngine:
                 )
         return result
 
-    def _load_session(self, key: SessionKey) -> list[dict[str, object]]:
+    def _load_session_batch(
+        self,
+        keys: Sequence[SessionKey],
+        *,
+        checkout_latest: bool,
+    ) -> dict[SessionKey, list[dict[str, object]]]:
+        if not keys:
+            return {}
+        job_ids = {key.job_id for key in keys}
+        if len(job_ids) != 1:
+            raise ValueError("one session read batch must contain exactly one job_id")
+        job_id = keys[0].job_id
         source_table = self.client.config.tables.landing_table
-        query = (
-            f"job_id = '{_escape_sql(key.job_id)}' "
-            f"AND session_id = '{_escape_sql(key.session_id)}'"
+        session_values = ", ".join(
+            f"'{_escape_sql(key.session_id)}'" for key in keys
         )
-        rows = self.client.query_data(
+        query = (
+            f"job_id = '{_escape_sql(job_id)}' "
+            f"AND session_id IN ({session_values})"
+        )
+        rows = self._query_source_with_retry(
+            description=(
+                f"load {len(keys)} session(s) for job {job_id!r}"
+            ),
             filter_query=query,
-            partition=key.job_id,
-            order_by="step_id",
-            ascending=True,
-            checkout_latest=True,
+            partition=job_id,
+            checkout_latest=checkout_latest,
             table=source_table,
             exclude_none=False,
             deserialize_json=False,
         )
-        if not rows:
-            raise SessionValidationError(f"session not found: {key}")
-        return rows
+        requested = set(keys)
+        grouped: dict[SessionKey, list[dict[str, object]]] = {
+            key: [] for key in keys
+        }
+        for row in rows:
+            row_key = SessionKey(
+                str(row.get("job_id") or "").strip(),
+                str(row.get("session_id") or "").strip(),
+            )
+            if row_key not in requested:
+                raise SessionValidationError(
+                    f"batched session query returned unexpected session: {row_key}"
+                )
+            grouped[row_key].append(row)
+        return grouped
+
+    def _query_source_with_retry(
+        self,
+        *,
+        description: str,
+        **query_kwargs: Any,
+    ) -> list[dict[str, object]]:
+        for attempt in range(1, self.read_max_attempts + 1):
+            try:
+                return self.client.query_data(**query_kwargs)
+            except Exception as exc:
+                if attempt >= self.read_max_attempts or not _is_transient_read_error(exc):
+                    raise
+                delay = self.read_retry_base_delay_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    "Transient ETL source read failed; retrying: operation=%s "
+                    "attempt=%d/%d delay_seconds=%.1f error=%s",
+                    description,
+                    attempt,
+                    self.read_max_attempts,
+                    delay,
+                    exc,
+                )
+                if delay:
+                    time.sleep(delay)
+        raise AssertionError("unreachable read retry state")
 
     def _table_names(self, pipeline: PipelineDefinition) -> tuple[str, str]:
         source = self.client.config.tables.landing_table
@@ -647,8 +860,12 @@ class ETLEngine:
 
 
 def _validate_page_size(page_size: int) -> None:
-    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size <= 0:
-        raise ValueError("page_size must be a positive integer")
+    _validate_positive_int(page_size, "page_size")
+
+
+def _validate_positive_int(value: int, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
 
 
 def _run_id(value: Optional[str]) -> str:
@@ -687,6 +904,55 @@ def _sink_failure(
     )
 
 
+def _read_failure(
+    key: SessionKey,
+    stage_name: str,
+    exc: Exception,
+) -> RecordFailure:
+    return RecordFailure(
+        record_id=None,
+        job_id=key.job_id,
+        session_id=key.session_id,
+        stage_name=stage_name,
+        error_type=type(exc).__name__,
+        message=str(exc),
+    )
+
+
+def _is_transient_read_error(exc: Exception) -> bool:
+    """Best-effort classification for dldb/Lance/S3 transient read failures."""
+
+    message = " ".join(
+        str(item).lower()
+        for item in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None))
+        if item is not None
+    )
+    markers = (
+        "generic s3 error",
+        "error sending request",
+        "request timeout",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection closed",
+        "connection refused",
+        "bad gateway",
+        "service unavailable",
+        "temporarily unavailable",
+        "http status 429",
+        "status code: 429",
+        "http status 500",
+        "status code: 500",
+        "http status 502",
+        "status code: 502",
+        "http status 503",
+        "status code: 503",
+        "http status 504",
+        "status code: 504",
+    )
+    return any(marker in message for marker in markers)
+
+
 def _session_failure_result(
     key: SessionKey,
     rows: Sequence[dict[str, object]],
@@ -714,4 +980,9 @@ def _session_failure_result(
     )
 
 
-__all__ = ["DISCOVERY_COLUMNS", "ETLEngine"]
+__all__ = [
+    "DEFAULT_READ_MAX_ATTEMPTS",
+    "DEFAULT_SESSION_BATCH_SIZE",
+    "DISCOVERY_COLUMNS",
+    "ETLEngine",
+]

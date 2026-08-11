@@ -8,6 +8,7 @@ class DeriveJobTagsStage(ETLStage):
     version = "1"
     required_fields = ("id", "job_id", "is_trainable")
     output_fields = ("tags",)
+    job_discovery_filter = "is_trainable = true"
 
     def transform_session(
         self,

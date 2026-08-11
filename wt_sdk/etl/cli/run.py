@@ -225,6 +225,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of lightweight discovery rows per page.",
     )
     parser.add_argument(
+        "--session-batch-size",
+        type=int,
+        default=25,
+        help=(
+            "Number of complete sessions loaded by one source query; stages still "
+            "execute one complete session at a time."
+        ),
+    )
+    parser.add_argument(
         "--settle-delay-seconds",
         type=int,
         default=0,
@@ -314,6 +323,8 @@ def main() -> int:
         raise SystemExit("--start-from is only valid for default incremental mode")
     if args.settle_delay_seconds < 0:
         raise SystemExit("--settle-delay-seconds must be non-negative")
+    if args.session_batch_size <= 0:
+        raise SystemExit("--session-batch-size must be positive")
 
     table_config = TableConfig(
         profile=args.profile,
@@ -348,7 +359,11 @@ def main() -> int:
             )
             checkpoint_store.verify_ready()
 
-        engine = ETLEngine(client, checkpoint_store=checkpoint_store)
+        engine = ETLEngine(
+            client,
+            checkpoint_store=checkpoint_store,
+            session_batch_size=args.session_batch_size,
+        )
         scan_started_at_ms = sdk_time.now_ms()
         dirty_sessions: set[SessionKey] = set()
         for pipeline in pipelines:

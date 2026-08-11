@@ -1,6 +1,8 @@
 import re
 from types import SimpleNamespace
 
+import pytest
+
 from wt_sdk.etl import (
     ETLEngine,
     ETLRunFailed,
@@ -27,6 +29,7 @@ class FakeGatewayClient:
         self.updated = []
         self.serving = {}
         self.next_update_time = 8_000
+        self.query_calls = []
 
     def list_table_partitions(self, table=None):
         del table
@@ -43,7 +46,14 @@ class FakeGatewayClient:
         ascending=True,
         **kwargs,
     ):
-        del kwargs
+        self.query_calls.append(
+            {
+                "filter_query": filter_query,
+                "partition": partition,
+                "checkout_latest": kwargs.get("checkout_latest"),
+                "columns": columns,
+            }
+        )
         rows = list(self.rows)
         if isinstance(partition, int):
             rows = [row for row in rows if row["_bucket"] == partition]
@@ -53,6 +63,25 @@ class FakeGatewayClient:
             if equal:
                 expected = equal.group(1).replace("''", "'")
                 rows = [row for row in rows if str(row.get(field)) == expected]
+
+        session_in = re.search(r"\bsession_id IN \((.*?)\)", filter_query)
+        if session_in:
+            expected_sessions = {
+                value.replace("''", "'")
+                for value in re.findall(r"'((?:''|[^'])*)'", session_in.group(1))
+            }
+            rows = [
+                row for row in rows
+                if str(row.get("session_id")) in expected_sessions
+            ]
+        if re.search(r"\bis_trainable\s*=\s*true\b", filter_query, re.IGNORECASE):
+            rows = [row for row in rows if row.get("is_trainable") is True]
+        if re.search(
+            r"\bis_session_completed\s*=\s*true\b",
+            filter_query,
+            re.IGNORECASE,
+        ):
+            rows = [row for row in rows if row.get("is_session_completed") is True]
 
         lower = re.search(r"source_updated_at (>=|>) (\d+)", filter_query)
         upper = re.search(r"source_updated_at <= (\d+)", filter_query)
@@ -449,3 +478,165 @@ def test_targeted_session_uses_job_and_session_scope():
 
     assert summary.sessions_processed == 1
     assert set(client.serving) == {"wanted"}
+
+
+def test_job_discovery_uses_stage_hint_and_batches_complete_session_reads():
+    rows = []
+    for session_number in range(3):
+        for step_id in range(2):
+            rows.append(
+                _row(
+                    id=f"row-{session_number}-{step_id}",
+                    session_id=f"session-{session_number}",
+                    step_id=step_id,
+                    is_trainable=session_number < 2,
+                    _bucket=3,
+                )
+            )
+    client = FakeGatewayClient(rows)
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    summary = ETLEngine(client, session_batch_size=2).run_job(
+        pipeline,
+        rows[0]["job_id"],
+        dry_run=True,
+    )
+
+    assert summary.discovery_rows == 4
+    assert summary.sessions_processed == 2
+    assert summary.source_rows == 4
+    assert len(client.query_calls) == 2
+    discovery, batch_load = client.query_calls
+    assert "is_trainable = true" in discovery["filter_query"]
+    assert discovery["checkout_latest"] is True
+    assert "session_id IN" in batch_load["filter_query"]
+    assert batch_load["checkout_latest"] is False
+
+
+def test_landing_job_discovery_reads_only_completed_session_markers():
+    rows = []
+    for session_number in range(3):
+        for step_id in range(2):
+            rows.append(
+                _row(
+                    id=f"row-{session_number}-{step_id}",
+                    session_id=f"session-{session_number}",
+                    step_id=step_id,
+                    is_session_completed=step_id == 1,
+                    _bucket=3,
+                )
+            )
+    client = FakeGatewayClient(rows)
+    pipeline = load_pipeline("landing_enrichment_pipeline")
+
+    summary = ETLEngine(client, session_batch_size=2).run_job(
+        pipeline,
+        rows[0]["job_id"],
+        dry_run=True,
+    )
+
+    assert summary.discovery_rows == 3
+    assert summary.sessions_processed == 3
+    assert summary.source_rows == 6
+    assert "is_session_completed = true" in client.query_calls[0]["filter_query"]
+    assert len(client.query_calls) == 3
+
+
+def test_bucket_scan_refreshes_latest_snapshot_only_once():
+    rows = [
+        _row(id="row-1", session_id="session-1", _bucket=3),
+        _row(id="row-2", session_id="session-2", _bucket=3),
+    ]
+    client = FakeGatewayClient(rows)
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    ETLEngine(client, session_batch_size=1).run_filter(
+        pipeline,
+        "is_trainable = true",
+        page_size=1,
+        dry_run=True,
+    )
+
+    assert sum(call["checkout_latest"] is True for call in client.query_calls) == 1
+    assert client.query_calls[0]["checkout_latest"] is True
+    assert all(
+        call["checkout_latest"] is False
+        for call in client.query_calls[1:]
+    )
+
+
+def test_transient_session_read_is_retried_then_succeeds():
+    class FlakyReadClient(FakeGatewayClient):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.remaining_failures = 2
+
+        def query_data(self, filter_query, **kwargs):
+            if "session_id IN" in filter_query and self.remaining_failures:
+                self.remaining_failures -= 1
+                self.query_calls.append(
+                    {
+                        "filter_query": filter_query,
+                        "partition": kwargs.get("partition"),
+                        "checkout_latest": kwargs.get("checkout_latest"),
+                        "columns": kwargs.get("columns"),
+                    }
+                )
+                raise ValueError("Generic S3 error: error sending request")
+            return super().query_data(filter_query, **kwargs)
+
+    row = _row(id="row-1", session_id="session-1", _bucket=3)
+    client = FlakyReadClient([row])
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    summary = ETLEngine(
+        client,
+        read_max_attempts=3,
+        read_retry_base_delay_seconds=0,
+    ).run_job(pipeline, row["job_id"], dry_run=True)
+
+    assert summary.sessions_processed == 1
+    assert summary.failed_rows == 0
+    assert client.remaining_failures == 0
+    assert len(client.query_calls) == 4
+
+
+def test_exhausted_read_retry_preserves_prior_session_progress():
+    class SecondSessionFailsClient(FakeGatewayClient):
+        def query_data(self, filter_query, **kwargs):
+            if "session_id IN ('session-2')" in filter_query:
+                self.query_calls.append(
+                    {
+                        "filter_query": filter_query,
+                        "partition": kwargs.get("partition"),
+                        "checkout_latest": kwargs.get("checkout_latest"),
+                        "columns": kwargs.get("columns"),
+                    }
+                )
+                raise ValueError("Generic S3 error: request timeout")
+            return super().query_data(filter_query, **kwargs)
+
+    rows = [
+        _row(id="row-1", session_id="session-1", _bucket=3),
+        _row(id="row-2", session_id="session-2", _bucket=3),
+    ]
+    client = SecondSessionFailsClient(rows)
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+    engine = ETLEngine(
+        client,
+        session_batch_size=1,
+        read_max_attempts=3,
+        read_retry_base_delay_seconds=0,
+    )
+
+    with pytest.raises(ETLRunFailed) as caught:
+        engine.run_job(pipeline, rows[0]["job_id"], dry_run=True)
+
+    summary = caught.value.summary
+    assert summary.sessions_processed == 2
+    assert summary.sessions_failed == 1
+    assert summary.source_rows == 1
+    assert summary.successful_rows == 1
+    assert summary.failed_rows == 1
+    assert summary.failures[0].session_id == "session-2"
+    assert summary.failures[0].stage_name == "__session_load__"

@@ -43,6 +43,7 @@ class ETLStage(ABC):
     required_fields: tuple[str, ...] = ()
     output_fields: tuple[str, ...] = ()
     dependencies: tuple[str, ...] = ()
+    job_discovery_filter: str | None = None
 
     @abstractmethod
     def transform_session(
