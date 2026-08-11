@@ -238,6 +238,9 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
                 ]
             )
             old_ids = {f"incremental-old-{suffix}-{index}" for index in range(3)}
+            trainable_old_ids = {
+                f"incremental-old-{suffix}-{index}" for index in (0, 2)
+            }
             new_ids = {f"incremental-new-{suffix}-{index}" for index in range(3, 6)}
 
             engine = ETLEngine(client, checkpoint_store=checkpoint_store)
@@ -261,7 +264,10 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
                 [SessionKey(job_id=job_id, session_id=session_id)],
             )
             assert enrichment.source_rows == 3
-            assert enrichment.landing_rows_updated == 3
+            # The three fixture rows form independent chains. The step-1
+            # singleton is startup metadata, so only the step-0 and step-2
+            # chain tails change from non-trainable to trainable.
+            assert enrichment.landing_rows_updated == 2
             assert enrichment.dirty_sessions == {
                 SessionKey(job_id=job_id, session_id=session_id)
             }
@@ -292,8 +298,15 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
             landing_by_id = {row["id"]: row for row in landing_after_change}
             assert set(landing_by_id) == old_ids | new_ids
             for record_id in old_ids:
-                assert landing_by_id[record_id]["is_trainable"] is True
-                assert landing_by_id[record_id]["source_updated_at"] > first_cutoff
+                if record_id in trainable_old_ids:
+                    assert landing_by_id[record_id]["is_trainable"] is True
+                    assert landing_by_id[record_id]["source_updated_at"] > first_cutoff
+                else:
+                    assert landing_by_id[record_id]["is_trainable"] is False
+                    assert (
+                        landing_by_id[record_id]["source_updated_at"]
+                        == initial_timestamp
+                    )
             for record_id in new_ids:
                 assert landing_by_id[record_id]["is_trainable"] is True
                 assert landing_by_id[record_id]["source_updated_at"] == new_timestamp
@@ -308,13 +321,13 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
                 buckets=[bucket],
                 page_size=2,
             )
-            # All three old rows moved past the serving watermark when the
-            # landing pipeline refreshed source_updated_at, and all three new
-            # rows are in the same incremental window.
-            assert second.discovery_rows == 6
-            assert second.source_rows == 6
-            assert second.selected_rows == 6
-            assert second.serving_rows_upserted == 6
+            # Two old trainable rows moved past the serving watermark when the
+            # landing pipeline refreshed source_updated_at. All three new rows
+            # are in the same incremental window.
+            assert second.discovery_rows == 5
+            assert second.source_rows == 5
+            assert second.selected_rows == 5
+            assert second.serving_rows_upserted == 5
 
             second_serving = client.query_data(
                 filter_query=f"job_id = '{job_id}'",
@@ -322,9 +335,11 @@ def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
                 table=SERVING_TEST_TABLE,
                 checkout_latest=True,
             )
-            assert {row["id"] for row in second_serving} == old_ids | new_ids
+            assert {row["id"] for row in second_serving} == (
+                trainable_old_ids | new_ids
+            )
             second_by_id = {row["id"]: row for row in second_serving}
-            for step_id in range(6):
+            for step_id in (0, 2, 3, 4, 5):
                 prefix = "old" if step_id < 3 else "new"
                 record_id = f"incremental-{prefix}-{suffix}-{step_id}"
                 assert json.loads(second_by_id[record_id]["chosen_trace"])[-1][
