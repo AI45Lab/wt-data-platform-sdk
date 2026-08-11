@@ -49,6 +49,9 @@ incremental semantics, and failure handling.
 
 `scripts/inspect/query_data.py --query` accepts a standard SQL `WHERE`
 predicate without the leading `WHERE`. For example:
+For the four active landing/serving tables, exact `job_id = '...'` filters use
+SDK HASH bucket pruning. Filtered queries and filtered `--count` skip the full
+table count by default; add `--with-total-count` only when needed.
 
 ```bash
 python scripts/inspect/query_data.py \

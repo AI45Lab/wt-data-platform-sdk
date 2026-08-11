@@ -595,10 +595,18 @@ python scripts/ops/table_manager.py drop serving_test --partition 42
 `WHERE`. Use normal SQL operators such as `=`, `IN (...)`, `LIKE`, `AND`,
 `OR`, comparison operators, and boolean literals. Wrap the whole predicate in
 shell quotes so spaces and `%` patterns are passed to the script unchanged.
+For the four active landing/serving tables, exact `job_id = '...'` predicates
+use SDK HASH bucket pruning. Filtered queries and filtered `--count` do not
+compute the full table size by default; add `--with-total-count` only when you
+really need that slower full-table count.
 
 ```bash
 # Count rows
 python scripts/inspect/query_data.py --table wind_tunnel_landing --count
+
+# Count one exact job_id using HASH bucket pruning
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id = 'job-001'" --count
 
 # Query the separate environment-config table; the script automatically uses
 # WT_SDK_ENV_CONFIG_DB_URI for this table name

@@ -568,10 +568,18 @@ python scripts/ops/table_manager.py drop serving_test --partition 42
 可以使用普通 SQL 写法，例如 `=`、`IN (...)`、`LIKE`、`AND`、`OR`、
 比较运算符以及 boolean 字面量。命令行里要把完整条件用引号包起来，
 这样空格和 `%` 模糊匹配模式才会原样传给脚本。
+对四张 active landing/serving 表，精确的 `job_id = '...'` 条件会走
+SDK 的 HASH bucket pruning。带过滤条件的查询和带过滤条件的 `--count`
+默认不再计算全表总行数；只有确实需要较慢的全表统计时才加
+`--with-total-count`。
 
 ```bash
 # 统计行数
 python scripts/inspect/query_data.py --table wind_tunnel_landing --count
+
+# 按精确 job_id 统计，走 HASH bucket pruning
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id = 'job-001'" --count
 
 # 查询独立的环境配置表；指定这个表名时脚本会自动使用 WT_SDK_ENV_CONFIG_DB_URI
 python scripts/inspect/query_data.py --table evaluation_env_config \

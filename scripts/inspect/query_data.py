@@ -2,13 +2,14 @@
 Query script for wind tunnel data tables.
 
 Supports count_rows and flexible filtering with configurable conditions.
-Uses DLDB SDK to properly handle logical tables and their physical partitions.
+Trajectory tables use WTGatewayClient so exact job_id filters can prune HASH
+buckets. Use --with-total-count only when the full table size is needed.
 
 Usage:
   # Query from default database (s3://wind-tunnel-dldb)
   python scripts/inspect/query_data.py --table landing_test
 
-  # Show only row count
+  # Show only filtered row count
   python scripts/inspect/query_data.py --table landing_test --count
 
   # Query with filter
@@ -60,9 +61,19 @@ import sys
 
 import numpy as np
 
-import dldb
 import pandas as pd
-from wt_sdk.config import default_config, resolve_env_config_db_uri
+import dldb
+from wt_sdk.client import WTGatewayClient
+from wt_sdk.config import (
+    DEFAULT_LANDING_TABLE,
+    DEFAULT_SERVING_TABLE,
+    TEST_LANDING_TABLE,
+    TEST_SERVING_TABLE,
+    GatewayConfig,
+    TableConfig,
+    default_config,
+    resolve_env_config_db_uri,
+)
 
 
 JSON_COLUMNS = {
@@ -74,6 +85,12 @@ JSON_COLUMNS = {
 }
 
 ENV_CONFIG_TABLE_NAMES = {"evaluation_env_config"}
+TRAJECTORY_TABLE_NAMES = {
+    DEFAULT_LANDING_TABLE,
+    DEFAULT_SERVING_TABLE,
+    TEST_LANDING_TABLE,
+    TEST_SERVING_TABLE,
+}
 
 
 def _resolve_db_uri(table_name: str, explicit_db_uri: str | None) -> str:
@@ -88,6 +105,39 @@ def _resolve_db_uri(table_name: str, explicit_db_uri: str | None) -> str:
 def _uses_latest_snapshot_by_default(table_name: str) -> bool:
     """Use latest reads for cross-process control-plane tables."""
     return table_name in ENV_CONFIG_TABLE_NAMES
+
+
+def _use_gateway_client(table_name: str) -> bool:
+    """Return whether this table should use SDK partition-pruned reads."""
+    return table_name in TRAJECTORY_TABLE_NAMES
+
+
+def _build_gateway_client(table_name: str, db_uri: str) -> WTGatewayClient:
+    """Create a table-pinned client without relying on WT_SDK_PROFILE."""
+    landing_table = (
+        table_name
+        if table_name in {DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE}
+        else default_config.tables.landing_table
+    )
+    serving_table = (
+        table_name
+        if table_name in {DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE}
+        else default_config.tables.serving_table
+    )
+    return WTGatewayClient(
+        GatewayConfig(
+            s3=default_config.s3,
+            tables=TableConfig(
+                db_uri=db_uri,
+                landing_table=landing_table,
+                serving_table=serving_table,
+            ),
+            dldb_model=default_config.dldb_model,
+            enable_dldb_timing_logs=default_config.enable_dldb_timing_logs,
+            log_dldb_metrics_summary_on_close=default_config.log_dldb_metrics_summary_on_close,
+            dldb_metrics_log_path=default_config.dldb_metrics_log_path,
+        )
+    )
 
 
 def _is_partitioned_schema_record(record) -> bool:
@@ -319,6 +369,20 @@ def _write_json_output(output_path: str, payload: dict) -> Path:
     return path.resolve()
 
 
+def _records_to_dataframe(records: list[dict], columns: list[str] | None) -> pd.DataFrame:
+    """Convert SDK dict rows to a DataFrame while preserving requested columns."""
+    if records:
+        frame = pd.DataFrame(records)
+    else:
+        frame = pd.DataFrame(columns=columns or [])
+    if columns:
+        for column in columns:
+            if column not in frame.columns:
+                frame[column] = None
+        frame = frame.loc[:, columns]
+    return frame
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Query wind tunnel data tables",
@@ -336,6 +400,9 @@ def main():
     # Query options
     parser.add_argument("--count", action="store_true",
                        help="Only show row count")
+    parser.add_argument("--with-total-count", action="store_true",
+                       help="Also compute and print the full table row count. "
+                            "This can be slow on large partitioned tables.")
     parser.add_argument("--query", type=str, default=None,
                        help="Filter query (e.g., \"dataset_type = 'TEST'\")")
     parser.add_argument("--limit", type=int, default=None,
@@ -361,6 +428,133 @@ def main():
     if checkout_latest:
         print("Checkout latest: true")
     print("=" * 80)
+
+    # dldb 1.0 rejects an empty WHERE expression, so use a universal
+    # predicate internally while keeping the CLI output as "(all rows)".
+    requested_query = args.query.strip() if args.query else ""
+    query = requested_query or "1 = 1"
+
+    # Parse columns selection before selecting the fast trajectory path.
+    columns = None
+    if args.columns:
+        columns = [col.strip() for col in args.columns.split(',')]
+
+    if _use_gateway_client(table_name):
+        # Use the SDK client for trajectory tables so exact job_id predicates
+        # are converted to HASH bucket partitions. Avoid the generic script's
+        # historical full-table count before filtered queries.
+        print(f"Filter query: {requested_query if requested_query else '(all rows)'}")
+        if args.limit:
+            print(f"Limit: {args.limit}")
+        print("=" * 80)
+        print(f"Connecting to {db_name} with WTGatewayClient...")
+
+        try:
+            client = _build_gateway_client(table_name, db_name)
+        except Exception as e:
+            print(f"Error connecting to database: {e}")
+            return 1
+
+        try:
+            total_count = None
+            if args.with_total_count or (args.count and not requested_query):
+                total_count = client._count_rows(table_name)
+                print(f"Total rows in table: {total_count}")
+                print("=" * 80)
+
+            if args.count:
+                filtered_count = None
+                if requested_query:
+                    records = client.query_data(
+                        filter_query=query,
+                        limit=None,
+                        columns=columns or ["id"],
+                        table=table_name,
+                        exclude_none=False,
+                        deserialize_json=False,
+                        checkout_latest=checkout_latest,
+                    )
+                    filtered_count = len(records)
+                    print(f"Rows matching filter: {filtered_count}")
+                else:
+                    print("No filter specified, showing total count")
+                if args.output:
+                    output_path = _write_json_output(
+                        args.output,
+                        {
+                            "database": db_name,
+                            "table": table_name,
+                            "filter": requested_query or None,
+                            "checkout_latest": checkout_latest,
+                            "total_rows": total_count,
+                            "filtered_rows": filtered_count,
+                        },
+                    )
+                    print(f"JSON output: {output_path}")
+                print("=" * 80)
+                return 0
+
+            records = client.query_data(
+                filter_query=query,
+                limit=args.limit,
+                columns=columns,
+                table=table_name,
+                exclude_none=False,
+                deserialize_json=False,
+                checkout_latest=checkout_latest,
+            )
+            result = _records_to_dataframe(records, columns)
+        except Exception as e:
+            print(f"Error executing query: {e}")
+            return 1
+        finally:
+            client.close()
+
+        if args.output:
+            try:
+                output_path = _write_json_output(
+                    args.output,
+                    {
+                        "database": db_name,
+                        "table": table_name,
+                        "filter": requested_query or None,
+                        "checkout_latest": checkout_latest,
+                        "total_rows": total_count,
+                        "returned_rows": len(result),
+                        "rows": _dataframe_to_json_records(result),
+                    },
+                )
+            except Exception as e:
+                print(f"Error writing JSON output: {e}")
+                return 1
+            print(f"JSON output: {output_path}")
+        elif len(result) == 0:
+            print("No results found.")
+        else:
+            print(f"\nFound {len(result)} rows:\n")
+            if args.show_nested:
+                display_result = result.copy()
+                for column in JSON_COLUMNS.intersection(display_result.columns):
+                    display_result[column] = display_result[column].map(_parse_embedded_json)
+                with pd.option_context('display.max_colwidth', None, 'display.max_columns', None):
+                    print(display_result.to_string())
+            else:
+                for idx, row in result.iterrows():
+                    print(f"\n--- Row {idx} ---")
+                    for col in result.columns:
+                        val = row[col]
+                        formatted_val = _format_field_value(val, col, args.no_truncate)
+                        if formatted_val.startswith("ChatMessage("):
+                            inner = formatted_val[12:-1]
+                            print(f"  {col}:")
+                            parts = inner.split(", ")
+                            for part in parts:
+                                print(f"    {part}")
+                        elif formatted_val.startswith("[\n"):
+                            print(f"  {col}: {formatted_val}")
+                        else:
+                            print(f"  {col}: {formatted_val}")
+        return 0
 
     # Initialize DLDB session
     print(f"Connecting to {db_name}...")
