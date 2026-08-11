@@ -28,6 +28,7 @@ class FakeGatewayClient:
         )
         self.updated = []
         self.serving = {}
+        self.serving_batches = []
         self.next_update_time = 8_000
         self.query_calls = []
 
@@ -108,14 +109,27 @@ class FakeGatewayClient:
 
     def update_landing(self, filter_query, updates, partition=None):
         del partition
-        record_id = re.search(r"\bid = '([^']+)'", filter_query).group(1)
-        row = next(row for row in self.rows if row["id"] == record_id)
-        row.update(updates)
-        row["source_updated_at"] = self.next_update_time
-        self.updated.append((record_id, dict(updates)))
+        id_in = re.search(r"\bid IN \((.*?)\)", filter_query)
+        if id_in:
+            record_ids = [
+                value.replace("''", "'")
+                for value in re.findall(r"'((?:''|[^'])*)'", id_in.group(1))
+            ]
+        else:
+            record_ids = [
+                re.search(r"\bid = '((?:''|[^'])*)'", filter_query)
+                .group(1)
+                .replace("''", "'")
+            ]
+        for row in self.rows:
+            if row["id"] in record_ids:
+                row.update(updates)
+                row["source_updated_at"] = self.next_update_time
+        self.updated.append((tuple(record_ids), dict(updates)))
         return {"updated": True}
 
     def upsert_serving_batch(self, records):
+        self.serving_batches.append(tuple(record.id for record in records))
         for record in records:
             self.serving[record.id] = record
 
@@ -640,3 +654,98 @@ def test_exhausted_read_retry_preserves_prior_session_progress():
     assert summary.failed_rows == 1
     assert summary.failures[0].session_id == "session-2"
     assert summary.failures[0].stage_name == "__session_load__"
+
+
+def test_landing_sink_coalesces_equal_patches_across_sessions():
+    rows = [
+        _row(
+            id=f"row-{index}",
+            session_id=f"session-{index}",
+            is_trainable=False,
+            _bucket=3,
+        )
+        for index in range(3)
+    ]
+    client = FakeGatewayClient(rows)
+    pipeline = PipelineDefinition(
+        name="landing_batch",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(MarkTrainableStage(),),
+    )
+
+    summary = ETLEngine(
+        client,
+        session_batch_size=3,
+        sink_batch_size=100,
+    ).run_sessions(
+        pipeline,
+        [SessionKey(row["job_id"], row["session_id"]) for row in rows],
+    )
+
+    assert summary.landing_rows_updated == 3
+    assert len(client.updated) == 1
+    assert set(client.updated[0][0]) == {"row-0", "row-1", "row-2"}
+    assert client.updated[0][1] == {"is_trainable": True}
+    assert all(row["is_trainable"] is True for row in client.rows)
+
+
+def test_serving_sink_upserts_records_from_multiple_sessions_in_one_batch():
+    rows = [
+        _row(id=f"row-{index}", session_id=f"session-{index}", _bucket=3)
+        for index in range(3)
+    ]
+    client = FakeGatewayClient(rows)
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    summary = ETLEngine(
+        client,
+        session_batch_size=3,
+        sink_batch_size=100,
+    ).run_sessions(
+        pipeline,
+        [SessionKey(row["job_id"], row["session_id"]) for row in rows],
+    )
+
+    assert summary.serving_rows_upserted == 3
+    assert client.serving_batches == [("row-0", "row-1", "row-2")]
+
+
+def test_serving_sink_batch_is_bounded_and_preserves_partial_progress():
+    class FailSecondServingBatchClient(FakeGatewayClient):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.calls = 0
+
+        def upsert_serving_batch(self, records):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("simulated second serving batch failure")
+            super().upsert_serving_batch(records)
+
+    rows = [
+        _row(id=f"row-{index}", session_id=f"session-{index}", _bucket=3)
+        for index in range(3)
+    ]
+    client = FailSecondServingBatchClient(rows)
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+    engine = ETLEngine(
+        client,
+        session_batch_size=3,
+        sink_batch_size=2,
+    )
+
+    with pytest.raises(ETLRunFailed) as caught:
+        engine.run_sessions(
+            pipeline,
+            [SessionKey(row["job_id"], row["session_id"]) for row in rows],
+        )
+
+    summary = caught.value.summary
+    assert client.calls == 2
+    assert set(client.serving) == {"row-0", "row-1"}
+    assert summary.serving_rows_upserted == 2
+    assert summary.successful_rows == 2
+    assert summary.failed_rows == 1
+    assert summary.failures[0].record_id == "row-2"
+    assert summary.failures[0].stage_name == "__serving_sink__"

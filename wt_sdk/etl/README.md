@@ -83,6 +83,9 @@ v1 不做以下事情：
   内每个 stage 都声明安全提示时才收窄，否则退回 job 全量 discovery；提示不是业务 selector。
 - 同一 job 的 session 以有界批次合并读取（默认 25），随后按 `(job_id, session_id)` 拆回完整
   session。Stage 仍然一次只接收一个 session。
+- 同一读取批次完成全部 session transform 后，内容完全相同的 landing patches 会合并成有界的
+  `job_id + id IN (...)` update；多个 session 的 serving records 也会合并 upsert。默认每个
+  sink 请求最多 100 行。单个 sink 批次失败时仍逐 record 记录 failure，已成功批次可安全重放。
 - Pipeline 按 DAG 逐个 stage 执行。每个 stage 都读取当前完整 working session；它对所有行
   返回的 patches 通过校验并统一合并后，下一个 stage 才开始，因此后序 stage 能看到前序
   stage 对整个 session 的完整结果。
@@ -325,6 +328,7 @@ run 结构化查询、告警、重试次数和保留周期，再增加单独的 
 | `--serving-table` | 可选，按 profile | 覆盖 serving 目标逻辑表名。 | `--serving-table serving_test` |
 | `--page-size` | 可选，默认 `1000` | 每页轻量 discovery 行数；不是完整 session 截断大小，跨 page 的同一 session 会去重并整组加载。 | `--page-size 500` |
 | `--session-batch-size` | 可选，默认 `25` | 每次源表查询合并加载的完整 session 数；stage 仍逐个完整 session 执行。 | `--session-batch-size 25` |
+| `--sink-batch-size` | 可选，默认 `100` | 单次 landing update 或 serving upsert 最多包含的记录数；失败仍逐记录进入 report。 | `--sink-batch-size 100` |
 | `--settle-delay-seconds` | 可选，默认 `0` | 从本次固定启动时间减去的可选稳定延迟；增量模式及未显式传 `--end-time` 的时间范围使用它。 | `--settle-delay-seconds 7200` |
 | `--start-from` | 首次增量/新 bucket 必需 | 首个 checkpoint 的包含式 bootstrap 时间；支持 ISO 8601、epoch 秒或 epoch 毫秒。不能与 job/time-range 模式组合。 | `--start-from 2026-08-01T00:00:00Z` |
 | `--start-time` | 手动时间范围必需 | 按 `source_updated_at` 做包含式 backfill；不推进全局 checkpoint。 | `--start-time 2026-08-04T00:00:00Z` |

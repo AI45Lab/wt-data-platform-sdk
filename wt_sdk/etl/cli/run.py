@@ -234,6 +234,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--sink-batch-size",
+        type=int,
+        default=100,
+        help="Maximum landing patches or serving records in one sink request.",
+    )
+    parser.add_argument(
         "--settle-delay-seconds",
         type=int,
         default=0,
@@ -325,6 +331,8 @@ def main() -> int:
         raise SystemExit("--settle-delay-seconds must be non-negative")
     if args.session_batch_size <= 0:
         raise SystemExit("--session-batch-size must be positive")
+    if args.sink_batch_size <= 0:
+        raise SystemExit("--sink-batch-size must be positive")
 
     table_config = TableConfig(
         profile=args.profile,
@@ -363,6 +371,7 @@ def main() -> int:
             client,
             checkpoint_store=checkpoint_store,
             session_batch_size=args.session_batch_size,
+            sink_batch_size=args.sink_batch_size,
         )
         scan_started_at_ms = sdk_time.now_ms()
         dirty_sessions: set[SessionKey] = set()

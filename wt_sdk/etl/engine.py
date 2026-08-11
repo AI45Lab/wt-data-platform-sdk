@@ -1,5 +1,6 @@
 """Incremental, range, and targeted execution for ETL pipelines."""
 
+import json
 import logging
 import time
 from collections import defaultdict
@@ -25,6 +26,7 @@ from .stage import SessionKey
 
 DISCOVERY_COLUMNS = ["id", "job_id", "session_id", "source_updated_at"]
 DEFAULT_SESSION_BATCH_SIZE = 25
+DEFAULT_SINK_BATCH_SIZE = 100
 DEFAULT_READ_MAX_ATTEMPTS = 3
 DEFAULT_READ_RETRY_BASE_DELAY_SECONDS = 1.0
 
@@ -40,16 +42,19 @@ class ETLEngine:
         *,
         checkpoint_store: Optional[CheckpointStore] = None,
         session_batch_size: int = DEFAULT_SESSION_BATCH_SIZE,
+        sink_batch_size: int = DEFAULT_SINK_BATCH_SIZE,
         read_max_attempts: int = DEFAULT_READ_MAX_ATTEMPTS,
         read_retry_base_delay_seconds: float = DEFAULT_READ_RETRY_BASE_DELAY_SECONDS,
     ) -> None:
         _validate_positive_int(session_batch_size, "session_batch_size")
+        _validate_positive_int(sink_batch_size, "sink_batch_size")
         _validate_positive_int(read_max_attempts, "read_max_attempts")
         if read_retry_base_delay_seconds < 0:
             raise ValueError("read_retry_base_delay_seconds must be non-negative")
         self.client = client
         self.checkpoint_store = checkpoint_store
         self.session_batch_size = session_batch_size
+        self.sink_batch_size = sink_batch_size
         self.read_max_attempts = read_max_attempts
         self.read_retry_base_delay_seconds = read_retry_base_delay_seconds
 
@@ -617,7 +622,10 @@ class ETLEngine:
             rows = rows_by_key[key]
         except Exception as exc:
             return _session_failure_result(key, (), exc, "__session_load__")
-        return self._process_loaded_session(pipeline, key, rows, dry_run=dry_run)
+        result = self._transform_loaded_session(pipeline, key, rows)
+        if dry_run:
+            return result
+        return self._persist_session_batch(pipeline, (result,))[0]
 
     def _process_session_keys(
         self,
@@ -669,6 +677,7 @@ class ETLEngine:
                                 dry_run=dry_run,
                             )
                 else:
+                    transformed: list[SessionResult] = []
                     for key in batch:
                         rows = rows_by_key.get(key, [])
                         if not rows:
@@ -679,12 +688,18 @@ class ETLEngine:
                                 "__session_load__",
                             )
                         else:
-                            result = self._process_loaded_session(
+                            result = self._transform_loaded_session(
                                 pipeline,
                                 key,
                                 rows,
-                                dry_run=dry_run,
                             )
+                        transformed.append(result)
+                    persisted = (
+                        transformed
+                        if dry_run
+                        else self._persist_session_batch(pipeline, transformed)
+                    )
+                    for result in persisted:
                         summary.add_session(result, dry_run=dry_run)
                 checkout_latest = False
                 logger.info(
@@ -700,73 +715,136 @@ class ETLEngine:
                     break
         return summary
 
-    def _process_loaded_session(
+    def _transform_loaded_session(
         self,
         pipeline: PipelineDefinition,
         key: SessionKey,
         rows: Sequence[dict[str, object]],
-        *,
-        dry_run: bool,
     ) -> SessionResult:
         try:
-            result = pipeline.process_session(rows, collect_failures=True)
+            return pipeline.process_session(rows, collect_failures=True)
         except SessionValidationError as exc:
             return _session_failure_result(key, rows, exc, "__session_validation__")
-        if dry_run:
-            return result
 
+    def _persist_session_batch(
+        self,
+        pipeline: PipelineDefinition,
+        results: Sequence[SessionResult],
+    ) -> list[SessionResult]:
         if pipeline.mode is PipelineMode.LANDING:
-            successful_patches = []
-            failures = list(result.failures)
-            successful_rows = result.successful_rows
+            return self._persist_landing_batch(results)
+        return self._persist_serving_batch(results)
+
+    def _persist_landing_batch(
+        self,
+        results: Sequence[SessionResult],
+    ) -> list[SessionResult]:
+        successful_patches: dict[int, list] = defaultdict(list)
+        sink_failures: dict[int, list[RecordFailure]] = defaultdict(list)
+        failed_counts: dict[int, int] = defaultdict(int)
+        grouped: dict[str, list[tuple[int, object]]] = defaultdict(list)
+        updates_by_group: dict[str, dict[str, object]] = {}
+
+        for result_index, result in enumerate(results):
             for patch in result.landing_patches:
+                group_key = json.dumps(
+                    patch.updates,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                updates_by_group[group_key] = patch.updates
+                grouped[group_key].append((result_index, patch))
+
+        for group_key, entries in grouped.items():
+            updates = updates_by_group[group_key]
+            for offset in range(0, len(entries), self.sink_batch_size):
+                chunk = entries[offset : offset + self.sink_batch_size]
+                job_ids = {patch.job_id for _, patch in chunk}
+                if len(job_ids) != 1:
+                    raise ValueError("one landing sink batch must contain one job_id")
+                job_id = next(iter(job_ids))
+                ids = ", ".join(
+                    f"'{_escape_sql(patch.record_id)}'" for _, patch in chunk
+                )
                 query = (
-                    f"job_id = '{_escape_sql(patch.job_id)}' "
-                    f"AND session_id = '{_escape_sql(patch.session_id)}' "
-                    f"AND id = '{_escape_sql(patch.record_id)}'"
+                    f"job_id = '{_escape_sql(job_id)}' "
+                    f"AND id IN ({ids})"
                 )
                 try:
                     self.client.update_landing(
                         query,
-                        patch.updates,
-                        partition=patch.job_id,
+                        updates,
+                        partition=job_id,
                     )
                 except Exception as exc:
-                    failures.append(
+                    for result_index, patch in chunk:
+                        sink_failures[result_index].append(
+                            _sink_failure(
+                                patch.record_id,
+                                results[result_index].session_key,
+                                "__landing_sink__",
+                                exc,
+                            )
+                        )
+                        failed_counts[result_index] += 1
+                else:
+                    for result_index, patch in chunk:
+                        successful_patches[result_index].append(patch)
+
+        return [
+            replace(
+                result,
+                successful_rows=result.successful_rows - failed_counts[index],
+                landing_patches=tuple(successful_patches[index]),
+                failures=tuple((*result.failures, *sink_failures[index])),
+            )
+            for index, result in enumerate(results)
+        ]
+
+    def _persist_serving_batch(
+        self,
+        results: Sequence[SessionResult],
+    ) -> list[SessionResult]:
+        entries = [
+            (result_index, record)
+            for result_index, result in enumerate(results)
+            for record in result.serving_records
+        ]
+        successful_records: dict[int, list] = defaultdict(list)
+        sink_failures: dict[int, list[RecordFailure]] = defaultdict(list)
+        failed_counts: dict[int, int] = defaultdict(int)
+
+        for offset in range(0, len(entries), self.sink_batch_size):
+            chunk = entries[offset : offset + self.sink_batch_size]
+            try:
+                self.client.upsert_serving_batch(
+                    [record for _, record in chunk]
+                )
+            except Exception as exc:
+                for result_index, record in chunk:
+                    sink_failures[result_index].append(
                         _sink_failure(
-                            patch.record_id,
-                            key,
-                            "__landing_sink__",
+                            record.id,
+                            results[result_index].session_key,
+                            "__serving_sink__",
                             exc,
                         )
                     )
-                    successful_rows -= 1
-                else:
-                    successful_patches.append(patch)
-            result = replace(
+                    failed_counts[result_index] += 1
+            else:
+                for result_index, record in chunk:
+                    successful_records[result_index].append(record)
+
+        return [
+            replace(
                 result,
-                successful_rows=successful_rows,
-                landing_patches=tuple(successful_patches),
-                failures=tuple(failures),
+                successful_rows=result.successful_rows - failed_counts[index],
+                serving_records=tuple(successful_records[index]),
+                failures=tuple((*result.failures, *sink_failures[index])),
             )
-        elif result.serving_records:
-            try:
-                self.client.upsert_serving_batch(list(result.serving_records))
-            except Exception as exc:
-                failures = list(result.failures)
-                failures.extend(
-                    _sink_failure(record.id, key, "__serving_sink__", exc)
-                    for record in result.serving_records
-                )
-                result = replace(
-                    result,
-                    successful_rows=(
-                        result.successful_rows - len(result.serving_records)
-                    ),
-                    serving_records=(),
-                    failures=tuple(failures),
-                )
-        return result
+            for index, result in enumerate(results)
+        ]
 
     def _load_session_batch(
         self,
@@ -825,7 +903,10 @@ class ETLEngine:
             try:
                 return self.client.query_data(**query_kwargs)
             except Exception as exc:
-                if attempt >= self.read_max_attempts or not _is_transient_read_error(exc):
+                if (
+                    attempt >= self.read_max_attempts
+                    or not _is_transient_read_error(exc)
+                ):
                     raise
                 delay = self.read_retry_base_delay_seconds * (2 ** (attempt - 1))
                 logger.warning(
@@ -924,7 +1005,11 @@ def _is_transient_read_error(exc: Exception) -> bool:
 
     message = " ".join(
         str(item).lower()
-        for item in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None))
+        for item in (
+            exc,
+            getattr(exc, "__cause__", None),
+            getattr(exc, "__context__", None),
+        )
         if item is not None
     )
     markers = (
@@ -983,6 +1068,7 @@ def _session_failure_result(
 __all__ = [
     "DEFAULT_READ_MAX_ATTEMPTS",
     "DEFAULT_SESSION_BATCH_SIZE",
+    "DEFAULT_SINK_BATCH_SIZE",
     "DISCOVERY_COLUMNS",
     "ETLEngine",
 ]
