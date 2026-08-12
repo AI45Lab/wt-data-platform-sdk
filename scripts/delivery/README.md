@@ -10,6 +10,22 @@ cursor storage, and deduplication between separate invocations.
 
 ## Configuration
 
+Run the command in a dedicated Python 3.10-3.12 environment containing the WT
+Data Platform SDK and its compatible dldb/Lance dependencies. Activate the
+environment provided by your platform administrator. For example, when the
+provided Conda environment is named `wt-dldb-v1`:
+
+```bash
+conda activate wt-dldb-v1
+```
+
+The environment name, environment manager, and installation location are not
+part of the script contract. Users with another compatible environment should
+activate it instead and run the command with that environment's `python`
+executable. If the environment or `conda` command is unavailable, obtain the
+environment setup instructions from the platform administrator before running
+the export.
+
 Load the SDK's normal S3 environment variables before running the command. The
 command pins the logical table to `wind_tunnel_serving` by default; an
 environment-provided table-name override cannot silently redirect it.
@@ -21,7 +37,7 @@ set -a && source .env && set +a
 ## Usage
 
 ```bash
-.venv-dldb-v1/bin/python scripts/delivery/export_serving_data.py \
+python scripts/delivery/export_serving_data.py \
   --filter "dataset_type = 'RL' AND serving_updated_at > 1786377600000" \
   --columns "id,job_id,serving_updated_at,chosen_trace,meta_json,tags" \
   --output-dir ./exports \
@@ -31,7 +47,7 @@ set -a && source .env && set +a
 For real integration validation against the test table, select it explicitly:
 
 ```bash
-.venv-dldb-v1/bin/python scripts/delivery/export_serving_data.py \
+python scripts/delivery/export_serving_data.py \
   --table serving_test \
   --filter "job_id = 'integration-job-id'" \
   --output-dir ./test-exports
@@ -46,7 +62,11 @@ frontend-search field. A caller may still request it explicitly.
 
 The fixed output format is UTF-8 JSONL: one JSON object per line. JSON payload
 columns such as `messages`, `chosen_trace`, and `meta_json` are decoded into
-normal nested JSON values.
+normal nested JSON values. Literal Unicode line/paragraph separator characters
+(`U+2028` and `U+2029`) are written using their standard JSON escape sequences
+so editors do not mistake them for JSONL record boundaries. Standard JSON
+parsers restore the original character values without changing the delivered
+data.
 
 ## Recommended Incremental Usage
 
@@ -66,7 +86,7 @@ If the returned value is `1786377600000`, use it as an inclusive lower bound
 in the next invocation:
 
 ```bash
-.venv-dldb-v1/bin/python scripts/delivery/export_serving_data.py \
+python scripts/delivery/export_serving_data.py \
   --filter "job_id = 'job-001' AND serving_updated_at >= 1786377600000" \
   --columns "id,job_id,serving_updated_at,chosen_trace,meta_json,tags" \
   --output-dir ./exports

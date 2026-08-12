@@ -151,6 +151,25 @@ def test_empty_export_publishes_manifest_without_part_files(tmp_path):
     assert (result / "_SUCCESS").exists()
 
 
+def test_export_escapes_unicode_line_separators_without_changing_parsed_values(tmp_path):
+    original = "before\u2028middle\u2029after"
+    result = export_script.export_serving_data(
+        _FakeClient([pd.DataFrame([{"id": "unicode-separators", "meta_json": original}])]),
+        filter_query="id = 'unicode-separators'",
+        columns=["id", "meta_json"],
+        output_dir=tmp_path,
+        export_id="export-unicode-separators",
+    )
+
+    raw_line = (result / "part-00000.jsonl").read_text(encoding="utf-8")
+
+    assert "\u2028" not in raw_line
+    assert "\u2029" not in raw_line
+    assert "\\u2028" in raw_line
+    assert "\\u2029" in raw_line
+    assert json.loads(raw_line)["meta_json"] == original
+
+
 def test_failed_export_keeps_partial_directory_without_success_marker(tmp_path):
     client = _FakeClient(
         [pd.DataFrame([{"id": "one"}, {"id": "two"}])],

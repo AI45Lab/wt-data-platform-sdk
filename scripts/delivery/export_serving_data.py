@@ -213,6 +213,11 @@ class _JsonlShardWriter:
             separators=(",", ":"),
             allow_nan=False,
         )
+        # U+2028/U+2029 are valid inside JSON strings, but some editors treat
+        # their literal UTF-8 forms as file line terminators. JSON-escape only
+        # these two characters so parsed values remain byte-for-byte identical
+        # as Python strings while each JSONL record stays on one physical line.
+        line = line.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
         self._handle.write(line + "\n")
         self._rows_in_file += 1
         self.total_rows += 1
