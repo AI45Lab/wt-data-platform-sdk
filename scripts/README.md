@@ -52,6 +52,8 @@ predicate without the leading `WHERE`. For example:
 For the four active landing/serving tables, exact `job_id = '...'` filters use
 SDK HASH bucket pruning. Filtered queries and filtered `--count` skip the full
 table count by default; add `--with-total-count` only when needed.
+Use `--distinct` when you need the number and values of unique fields or field
+combinations.
 
 ```bash
 python scripts/inspect/query_data.py \
@@ -59,6 +61,16 @@ python scripts/inspect/query_data.py \
   --query "job_id LIKE '%panjia%' AND is_trainable = true" \
   --columns "id,job_id,session_id,step_id" \
   --output ./artifacts/panjia_rows.json
+
+python scripts/inspect/query_data.py \
+  --table wind_tunnel_landing \
+  --distinct job_id
+
+python scripts/inspect/query_data.py \
+  --table wind_tunnel_landing \
+  --query "job_id = 'job-001'" \
+  --distinct session_id \
+  --count
 ```
 
 For the separate environment-config table, specify only the table name; the

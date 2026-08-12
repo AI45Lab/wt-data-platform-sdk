@@ -572,6 +572,8 @@ python scripts/ops/table_manager.py drop serving_test --partition 42
 SDK 的 HASH bucket pruning。带过滤条件的查询和带过滤条件的 `--count`
 默认不再计算全表总行数；只有确实需要较慢的全表统计时才加
 `--with-total-count`。
+需要查看某个字段或字段组合有多少种不同取值时，使用 `--distinct`；
+脚本只读取这些列，然后在本地做去重统计。
 
 ```bash
 # 统计行数
@@ -580,6 +582,22 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing --count
 # 按精确 job_id 统计，走 HASH bucket pruning
 python scripts/inspect/query_data.py --table wind_tunnel_landing \
   --query "job_id = 'job-001'" --count
+
+# 列出所有不同 job_id 以及 distinct 数量
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --distinct job_id
+
+# 只统计某个 job 里有多少不同 session，不打印全部 session_id
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id = 'job-001'" \
+  --distinct session_id \
+  --count
+
+# 列出不同的 job/session 组合，并 dump 到本地 JSON 文件
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%'" \
+  --distinct "job_id,session_id" \
+  --output ./artifacts/panjia_distinct_sessions.json
 
 # 查询独立的环境配置表；指定这个表名时脚本会自动使用 WT_SDK_ENV_CONFIG_DB_URI
 python scripts/inspect/query_data.py --table evaluation_env_config \

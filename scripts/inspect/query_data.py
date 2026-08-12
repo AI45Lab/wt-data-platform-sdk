@@ -27,6 +27,12 @@ Usage:
   # Select specific columns
   python scripts/inspect/query_data.py --table landing_test --columns "id,dataset_type,agent_model,reward"
 
+  # List distinct values and their count
+  python scripts/inspect/query_data.py --table wind_tunnel_landing --distinct job_id
+
+  # List distinct values after filtering
+  python scripts/inspect/query_data.py --table wind_tunnel_landing --query "job_id = 'job-001'" --distinct session_id
+
   # Show full content (no truncation)
   python scripts/inspect/query_data.py --table landing_test --query "dataset_type = 'TEST'" --limit 1 --no-truncate
 
@@ -164,6 +170,93 @@ def _pin_exact_dldb_table(session, table_name: str) -> None:
         )
     except Exception as exc:
         print(f"Warning: failed to pin exact table '{table_name}': {exc}")
+
+
+def _parse_column_list(raw_columns: str | None) -> list[str] | None:
+    """Parse a comma-separated column list."""
+    if raw_columns is None:
+        return None
+    columns = [column.strip() for column in raw_columns.split(",") if column.strip()]
+    if not columns:
+        raise ValueError("Column list cannot be empty")
+    if any(column == "*" for column in columns):
+        raise ValueError("'*' is not supported here; specify concrete column names")
+    return columns
+
+
+def _distinct_rows(records: list[dict], columns: list[str]) -> list[dict]:
+    """Return stable distinct row combinations for the selected columns."""
+    seen: dict[str, dict] = {}
+    for record in records:
+        row = {
+            column: _to_json_compatible(record.get(column))
+            for column in columns
+        }
+        key = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+        if key not in seen:
+            seen[key] = row
+    return sorted(
+        seen.values(),
+        key=lambda row: json.dumps(row, ensure_ascii=False, sort_keys=True, default=str),
+    )
+
+
+def _print_distinct_rows(distinct_rows: list[dict], columns: list[str]) -> None:
+    """Print distinct rows in a compact readable form."""
+    if not distinct_rows:
+        print("No distinct values found.")
+        return
+
+    if len(columns) == 1:
+        column = columns[0]
+        for row in distinct_rows:
+            print(row.get(column))
+        return
+
+    frame = pd.DataFrame(distinct_rows, columns=columns)
+    with pd.option_context("display.max_colwidth", None, "display.max_columns", None):
+        print(frame.to_string(index=False))
+
+
+def _handle_distinct_result(
+    *,
+    db_name: str,
+    table_name: str,
+    requested_query: str,
+    checkout_latest: bool,
+    distinct_columns: list[str],
+    distinct_rows: list[dict],
+    output_path: str | None,
+    output_limit: int | None,
+    count_only: bool,
+) -> int:
+    """Print or write a SELECT DISTINCT-style result."""
+    displayed_rows = distinct_rows[:output_limit] if output_limit is not None else distinct_rows
+    print(f"Distinct columns: {', '.join(distinct_columns)}")
+    print(f"Distinct count: {len(distinct_rows)}")
+    if output_limit is not None and output_limit < len(distinct_rows):
+        print(f"Returned distinct values: {len(displayed_rows)} (limited)")
+    print("=" * 80)
+
+    if output_path:
+        payload = {
+            "database": db_name,
+            "table": table_name,
+            "filter": requested_query or None,
+            "checkout_latest": checkout_latest,
+            "distinct_columns": distinct_columns,
+            "distinct_count": len(distinct_rows),
+            "returned_values": len(displayed_rows),
+        }
+        if not count_only:
+            payload["values"] = displayed_rows
+        resolved_output_path = _write_json_output(output_path, payload)
+        print(f"JSON output: {resolved_output_path}")
+        return 0
+
+    if not count_only:
+        _print_distinct_rows(displayed_rows, distinct_columns)
+    return 0
 
 
 def _format_content_item(item, max_len=100, truncate=True):
@@ -405,6 +498,10 @@ def main():
                             "This can be slow on large partitioned tables.")
     parser.add_argument("--query", type=str, default=None,
                        help="Filter query (e.g., \"dataset_type = 'TEST'\")")
+    parser.add_argument("--distinct", "--distince", dest="distinct", type=str, default=None,
+                       help="Comma-separated columns to return distinct values for "
+                            "(e.g., 'job_id' or 'job_id,session_id'). "
+                            "--distince is accepted as a compatibility alias.")
     parser.add_argument("--limit", type=int, default=None,
                        help="Limit number of results")
     parser.add_argument("--columns", type=str, default=None,
@@ -434,10 +531,13 @@ def main():
     requested_query = args.query.strip() if args.query else ""
     query = requested_query or "1 = 1"
 
-    # Parse columns selection before selecting the fast trajectory path.
-    columns = None
-    if args.columns:
-        columns = [col.strip() for col in args.columns.split(',')]
+    try:
+        # Parse columns selection before selecting the fast trajectory path.
+        columns = _parse_column_list(args.columns)
+        distinct_columns = _parse_column_list(args.distinct)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
 
     if _use_gateway_client(table_name):
         # Use the SDK client for trajectory tables so exact job_id predicates
@@ -457,10 +557,33 @@ def main():
 
         try:
             total_count = None
-            if args.with_total_count or (args.count and not requested_query):
+            if args.with_total_count or (args.count and not requested_query and not distinct_columns):
                 total_count = client._count_rows(table_name)
                 print(f"Total rows in table: {total_count}")
                 print("=" * 80)
+
+            if distinct_columns:
+                records = client.query_data(
+                    filter_query=query,
+                    limit=None,
+                    columns=distinct_columns,
+                    table=table_name,
+                    exclude_none=False,
+                    deserialize_json=False,
+                    checkout_latest=checkout_latest,
+                )
+                rows = _distinct_rows(records, distinct_columns)
+                return _handle_distinct_result(
+                    db_name=db_name,
+                    table_name=table_name,
+                    requested_query=requested_query,
+                    checkout_latest=checkout_latest,
+                    distinct_columns=distinct_columns,
+                    distinct_rows=rows,
+                    output_path=args.output,
+                    output_limit=args.limit,
+                    count_only=args.count,
+                )
 
             if args.count:
                 filtered_count = None
@@ -585,12 +708,35 @@ def main():
         print(f"Limit: {args.limit}")
     print("=" * 80)
 
-    # Parse columns selection
-    columns = None
-    if args.columns:
-        columns = [col.strip() for col in args.columns.split(',')]
-
     # If only count requested, show count with/without filter
+    if distinct_columns:
+        try:
+            result = session.filter(
+                table_name,
+                query=query,
+                limit=None,
+                columns=distinct_columns,
+                checkout_latest=checkout_latest,
+            )
+            rows = _distinct_rows(_dataframe_to_json_records(result), distinct_columns)
+            return _handle_distinct_result(
+                db_name=db_name,
+                table_name=table_name,
+                requested_query=requested_query,
+                checkout_latest=checkout_latest,
+                distinct_columns=distinct_columns,
+                distinct_rows=rows,
+                output_path=args.output,
+                output_limit=args.limit,
+                count_only=args.count,
+            )
+        except Exception as e:
+            print(f"Error executing distinct query: {e}")
+            session.shutdown()
+            return 1
+        finally:
+            session.shutdown()
+
     if args.count:
         try:
             total_count = session.count_rows(table_name)
