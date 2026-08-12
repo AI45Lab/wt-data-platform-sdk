@@ -62,6 +62,56 @@ class FakeCleanupSession:
         self.shutdown_called = True
 
 
+class FakeGatewayCleanupClient:
+    def __init__(self):
+        self.query_calls = []
+        self.delete_landing_calls = []
+        self.delete_serving_calls = []
+        self.closed = False
+
+    def query_data(
+        self,
+        *,
+        filter_query,
+        limit,
+        columns,
+        table,
+        exclude_none,
+        deserialize_json,
+        checkout_latest,
+    ):
+        self.query_calls.append(
+            {
+                "filter_query": filter_query,
+                "limit": limit,
+                "columns": columns,
+                "table": table,
+                "checkout_latest": checkout_latest,
+            }
+        )
+        if limit == 5:
+            return [
+                {
+                    "id": "record-1",
+                    "job_id": "job-1",
+                    "dataset_type": "RL",
+                    "session_id": "session-1",
+                }
+            ]
+        return [{"id": "record-1"}, {"id": "record-2"}]
+
+    def delete_landing(self, query):
+        self.delete_landing_calls.append(query)
+        return 0
+
+    def delete_serving(self, query):
+        self.delete_serving_calls.append(query)
+        return 0
+
+    def close(self):
+        self.closed = True
+
+
 def test_resolve_db_uri_uses_env_config_database(monkeypatch):
     monkeypatch.setenv("WT_SDK_ENV_CONFIG_DB_URI", "s3://env-config-db")
 
@@ -109,3 +159,37 @@ def test_cleanup_env_config_dry_run_uses_env_db_and_latest(monkeypatch):
     assert len(fake_session.filter_calls) == 2
     assert all(call["checkout_latest"] is True for call in fake_session.filter_calls)
     assert fake_session.shutdown_called is True
+
+
+def test_cleanup_active_table_dry_run_uses_gateway_fast_path(monkeypatch, capsys):
+    fake_client = FakeGatewayCleanupClient()
+
+    def fail_connect(*args, **kwargs):
+        raise AssertionError("active table dry-run should not use raw dldb.connect")
+
+    monkeypatch.setattr(cleanup_data.dldb, "connect", fail_connect)
+    monkeypatch.setattr(cleanup_data, "WTGatewayClient", lambda config: fake_client)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "cleanup_data.py",
+            "--table",
+            "wind_tunnel_serving",
+            "--query",
+            "job_id = 'job-1'",
+            "--dry-run",
+        ],
+    )
+
+    assert cleanup_data.main() == 0
+    assert len(fake_client.query_calls) == 2
+    assert fake_client.query_calls[0]["columns"] == cleanup_data.PREVIEW_COLUMNS
+    assert fake_client.query_calls[0]["limit"] == 5
+    assert fake_client.query_calls[1]["columns"] == ["id"]
+    assert fake_client.query_calls[1]["limit"] is None
+    assert fake_client.delete_landing_calls == []
+    assert fake_client.delete_serving_calls == []
+    assert fake_client.closed is True
+    output = capsys.readouterr().out
+    assert "WTGatewayClient fast path" in output
+    assert "[DRY RUN] Would delete 2 rows" in output

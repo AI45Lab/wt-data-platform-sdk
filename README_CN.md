@@ -635,6 +635,10 @@ python scripts/inspect/check_search_text.py --table wind_tunnel_serving
 
 ### 数据清理与索引
 
+四张 active landing/serving 表的条件清理会对精确 `job_id = '...'` 条件
+使用 SDK HASH bucket pruning；dry-run 只读取轻量 preview/count 列，不拉取
+完整 JSON payload。
+
 ```bash
 # 删除前预览匹配的 landing 数据
 python scripts/ops/cleanup_data.py --table landing_test \

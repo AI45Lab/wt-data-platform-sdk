@@ -40,10 +40,25 @@ import argparse
 import sys
 
 import dldb
-from wt_sdk.config import default_config, resolve_env_config_db_uri
+import pandas as pd
+from wt_sdk.client import WTGatewayClient
+from wt_sdk.config import (
+    DEFAULT_LANDING_TABLE,
+    DEFAULT_SERVING_TABLE,
+    TEST_LANDING_TABLE,
+    TEST_SERVING_TABLE,
+    GatewayConfig,
+    TableConfig,
+    default_config,
+    resolve_env_config_db_uri,
+)
 
 
 ENV_CONFIG_TABLE_NAMES = {"evaluation_env_config"}
+LANDING_TABLE_NAMES = {DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE}
+SERVING_TABLE_NAMES = {DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE}
+TRAJECTORY_TABLE_NAMES = LANDING_TABLE_NAMES | SERVING_TABLE_NAMES
+PREVIEW_COLUMNS = ["id", "job_id", "dataset_type", "session_id", "agent_model", "created_at"]
 
 
 def _resolve_db_uri(table_name: str, explicit_db_uri: str | None) -> str:
@@ -58,6 +73,149 @@ def _resolve_db_uri(table_name: str, explicit_db_uri: str | None) -> str:
 def _uses_latest_snapshot_by_default(table_name: str) -> bool:
     """Use latest reads for cross-process control-plane tables."""
     return table_name in ENV_CONFIG_TABLE_NAMES
+
+
+def _use_gateway_client(table_name: str) -> bool:
+    """Return whether this table should use SDK partition-pruned cleanup."""
+    return table_name in TRAJECTORY_TABLE_NAMES
+
+
+def _table_role(table_name: str) -> str:
+    if table_name in LANDING_TABLE_NAMES:
+        return "landing"
+    if table_name in SERVING_TABLE_NAMES:
+        return "serving"
+    raise ValueError(f"unsupported trajectory table: {table_name}")
+
+
+def _build_gateway_client(table_name: str, db_uri: str) -> WTGatewayClient:
+    """Create a table-pinned client without relying on WT_SDK_PROFILE."""
+    landing_table = (
+        table_name
+        if table_name in LANDING_TABLE_NAMES
+        else default_config.tables.landing_table
+    )
+    serving_table = (
+        table_name
+        if table_name in SERVING_TABLE_NAMES
+        else default_config.tables.serving_table
+    )
+    return WTGatewayClient(
+        GatewayConfig(
+            s3=default_config.s3,
+            tables=TableConfig(
+                db_uri=db_uri,
+                landing_table=landing_table,
+                serving_table=serving_table,
+            ),
+            dldb_model=default_config.dldb_model,
+            enable_dldb_timing_logs=default_config.enable_dldb_timing_logs,
+            log_dldb_metrics_summary_on_close=default_config.log_dldb_metrics_summary_on_close,
+            dldb_metrics_log_path=default_config.dldb_metrics_log_path,
+        )
+    )
+
+
+def _query_trajectory_rows(
+    client: WTGatewayClient,
+    table_name: str,
+    query: str,
+    *,
+    columns: list[str],
+    limit: int | None = None,
+) -> list[dict]:
+    """Query active trajectory tables, treating missing HASH buckets as empty."""
+    try:
+        return client.query_data(
+            filter_query=query,
+            limit=limit,
+            columns=columns,
+            table=table_name,
+            exclude_none=False,
+            deserialize_json=False,
+            checkout_latest=True,
+        )
+    except ValueError as exc:
+        if "partition" in str(exc) and "does not exist" in str(exc):
+            return []
+        raise
+
+
+def _print_preview(records: list[dict]) -> None:
+    if not records:
+        return
+    preview = pd.DataFrame(records)
+    preview_cols = [column for column in PREVIEW_COLUMNS if column in preview.columns]
+    print("\nPreview of rows to be deleted:")
+    print(preview[preview_cols].to_string())
+
+
+def _cleanup_trajectory_table(
+    *,
+    db_name: str,
+    table_name: str,
+    query: str,
+    dry_run: bool,
+) -> int:
+    """Fast filtered cleanup path for active landing/serving tables."""
+    print(f"Filter query: {query}")
+    print("=" * 80)
+    print(
+        "Using WTGatewayClient fast path: skipping full table count and "
+        "counting matches with id-only partition-pruned reads."
+    )
+
+    client = _build_gateway_client(table_name, db_name)
+    try:
+        preview = _query_trajectory_rows(
+            client,
+            table_name,
+            query,
+            columns=PREVIEW_COLUMNS,
+            limit=5,
+        )
+        matching_ids = _query_trajectory_rows(
+            client,
+            table_name,
+            query,
+            columns=["id"],
+            limit=None,
+        )
+        delete_count = len(matching_ids)
+
+        print(f"Rows matching filter: {delete_count}")
+        _print_preview(preview)
+
+        if delete_count == 0:
+            print("\nNo rows to delete.")
+            return 0
+
+        if dry_run:
+            print(f"\n[DRY RUN] Would delete {delete_count} rows")
+            return 0
+
+        try:
+            confirm = input(f"\nDelete {delete_count} rows? (yes/no): ")
+            if confirm.lower() != "yes":
+                print("Aborted.")
+                return 0
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return 0
+
+        role = _table_role(table_name)
+        if role == "landing":
+            deleted = client.delete_landing(query)
+        else:
+            deleted = client.delete_serving(query)
+        print(f"\n✓ Delete submitted for {deleted} rows")
+        print("Tip: verify with scripts/inspect/query_data.py --count if needed.")
+        return 0
+    except Exception as exc:
+        print(f"Error executing query/delete: {exc}")
+        return 1
+    finally:
+        client.close()
 
 
 def _is_partitioned_schema_record(record) -> bool:
@@ -139,6 +297,14 @@ def main():
     checkout_latest = _uses_latest_snapshot_by_default(table_name)
     if checkout_latest:
         print("Checkout latest: true")
+
+    if args.query and _use_gateway_client(table_name):
+        return _cleanup_trajectory_table(
+            db_name=db_name,
+            table_name=table_name,
+            query=args.query,
+            dry_run=args.dry_run,
+        )
 
     # Initialize DLDB session
     print(f"Connecting to {db_name}...")

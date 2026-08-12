@@ -81,7 +81,9 @@ Production-changing commands require their own explicit confirmation flags.
 
 Use `cleanup_data.py` for filtered deletes. `evaluation_env_config`
 automatically uses `WT_SDK_ENV_CONFIG_DB_URI`; landing and serving tables use
-`WT_SDK_DB_URI` unless `--db-uri` is supplied:
+`WT_SDK_DB_URI` unless `--db-uri` is supplied. For the four active
+landing/serving tables, exact `job_id = '...'` filters use SDK HASH bucket
+pruning and dry-runs read only lightweight preview/count columns:
 
 ```bash
 python scripts/ops/cleanup_data.py \

@@ -663,6 +663,10 @@ python scripts/inspect/check_search_text.py --table wind_tunnel_serving
 
 ### Cleanup and Indexes
 
+Filtered cleanup on the four active landing/serving tables uses SDK HASH
+bucket pruning for exact `job_id = '...'` predicates and only reads lightweight
+preview/count columns during dry-runs.
+
 ```bash
 # Preview matching landing data before deletion
 python scripts/ops/cleanup_data.py --table landing_test \
