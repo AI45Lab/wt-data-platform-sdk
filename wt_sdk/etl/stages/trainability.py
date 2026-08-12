@@ -17,10 +17,15 @@ class UpdateIsTrainableStage(ETLStage):
 
     Inputs are grouped into append-only chains with exact message-prefix
     matching. Each chain tail contains the complete messages of one
-    structurally separated trajectory. In a multi-chain session, an independent
-    one-record chain at step 1 is treated as harness startup metadata and is not
-    trainable. This stage records only ``is_trainable`` and assigns no semantic
-    meaning to message contents.
+    structurally separated trajectory. A later strict prefix of an active chain
+    tail is treated as a retry reset, so the abandoned longer row is not a
+    trainable tail. Identical message snapshots are separate occurrences rather
+    than append operations. In a multi-chain session, every independent
+    one-record chain is treated as a one-step subagent and is not trainable.
+    Rows with an explicitly non-200 gateway status are excluded from chain
+    detection without preventing the remaining rows from being processed. This
+    stage copies the final session row's non-null ``reward`` to every trainable
+    chain tail and assigns no semantic meaning to message contents.
     """
 
     name = "update_is_trainable"
@@ -31,8 +36,9 @@ class UpdateIsTrainableStage(ETLStage):
         "messages",
         "is_session_completed",
         "meta_json",
+        "reward",
     )
-    output_fields = ("is_trainable",)
+    output_fields = ("is_trainable", "reward")
     dependencies = ()
     job_discovery_filter = "is_session_completed = true"
 
@@ -42,18 +48,22 @@ class UpdateIsTrainableStage(ETLStage):
         context: StageContext,
     ) -> SessionPatch:
         del context
-        if _has_non_200_status_code(session):
-            return {}
         if not _is_completed_session(session):
             return {}
 
-        trainable_ids = _detect_trainable_record_ids(session)
+        eligible_records = tuple(
+            record for record in session if not _has_non_200_status_code(record)
+        )
+        trainable_ids = _detect_trainable_record_ids(eligible_records)
+        final_reward = session[-1].get("reward")
         patches: SessionPatch = {}
         for record in session:
             record_id = _record_id(record)
-            patches[record_id] = {
-                "is_trainable": record_id in trainable_ids,
-            }
+            is_trainable = record_id in trainable_ids
+            patch: dict[str, object] = {"is_trainable": is_trainable}
+            if is_trainable and final_reward is not None:
+                patch["reward"] = final_reward
+            patches[record_id] = patch
         return patches
 
 
@@ -69,24 +79,60 @@ class _MessagePrefixTrie:
     def __init__(self) -> None:
         self.root = _TrieNode()
 
-    def longest_eligible_terminal(
+    def longest_eligible_strict_prefix_terminal(
         self,
         fingerprints: Sequence[str],
         eligible_record_ids: set[str],
     ) -> str | None:
+        """Find the longest active tail strictly extended by this record."""
+
         node = self.root
-        matched_record_id = _latest_eligible_terminal(
-            node, eligible_record_ids
+        matched_record_id = (
+            _latest_eligible_terminal(node, eligible_record_ids)
+            if fingerprints
+            else None
         )
-        for fingerprint in fingerprints:
+        for index, fingerprint in enumerate(fingerprints):
             child = node.children.get(fingerprint)
             if child is None:
                 break
             node = child
+            if index == len(fingerprints) - 1:
+                break
             candidate = _latest_eligible_terminal(node, eligible_record_ids)
             if candidate is not None:
                 matched_record_id = candidate
         return matched_record_id
+
+    def latest_eligible_strict_descendant(
+        self,
+        fingerprints: Sequence[str],
+        eligible_record_ids: set[str],
+        record_positions: Mapping[str, int],
+    ) -> str | None:
+        """Find the latest active tail that strictly extends ``fingerprints``."""
+
+        node = self.root
+        for fingerprint in fingerprints:
+            node = node.children.get(fingerprint)
+            if node is None:
+                return None
+
+        candidates: list[str] = []
+        pending = list(node.children.values())
+        while pending:
+            descendant = pending.pop()
+            candidates.extend(
+                record_id
+                for record_id in descendant.terminal_record_ids
+                if record_id in eligible_record_ids
+            )
+            pending.extend(descendant.children.values())
+        return max(
+            candidates,
+            key=record_positions.__getitem__,
+            default=None,
+        )
 
     def insert(self, fingerprints: Sequence[str], record_id: str) -> None:
         node = self.root
@@ -105,17 +151,24 @@ def _detect_trainable_record_ids(session: Sequence[Record]) -> set[str]:
     trie = _MessagePrefixTrie()
     chains: list[_Chain] = []
     latest_record_to_chain: dict[str, int] = {}
-    step_ids: dict[str, int] = {}
+    record_positions: dict[str, int] = {}
 
-    for record in ordered:
+    for position, record in enumerate(ordered):
         record_id = _record_id(record)
-        step_ids[record_id] = _step_sort_key(record)
+        record_positions[record_id] = position
         messages = _decode_messages(record.get("messages"), record_id)
         fingerprints = [_message_fingerprint(message) for message in messages]
-        matched_record_id = trie.longest_eligible_terminal(
+        active_record_ids = set(latest_record_to_chain)
+        matched_record_id = trie.latest_eligible_strict_descendant(
             fingerprints,
-            set(latest_record_to_chain),
+            active_record_ids,
+            record_positions,
         )
+        if matched_record_id is None:
+            matched_record_id = trie.longest_eligible_strict_prefix_terminal(
+                fingerprints,
+                active_record_ids,
+            )
 
         if matched_record_id is not None:
             chain_index = latest_record_to_chain[matched_record_id]
@@ -131,46 +184,40 @@ def _detect_trainable_record_ids(session: Sequence[Record]) -> set[str]:
         trie.insert(fingerprints, record_id)
 
     # Every append-only chain tail contains the complete messages of one
-    # structurally separated trajectory. A singleton step-1 side chain is the
-    # harness startup subagent and carries no trainable trajectory.
+    # structurally separated trajectory. In a multi-chain session, a singleton
+    # side chain is a one-step subagent and carries no trainable trajectory.
     return {
         chain.record_ids[-1]
         for chain in chains
-        if not _is_single_step_startup_chain(chain, step_ids, len(chains))
+        if not _is_single_record_side_chain(chain, len(chains))
     }
 
 
-def _is_single_step_startup_chain(
+def _is_single_record_side_chain(
     chain: _Chain,
-    step_ids: Mapping[str, int],
     chain_count: int,
 ) -> bool:
-    return (
-        chain_count > 1
-        and len(chain.record_ids) == 1
-        and step_ids[chain.record_ids[0]] == 1
-    )
+    return chain_count > 1 and len(chain.record_ids) == 1
 
 
-def _has_non_200_status_code(session: Sequence[Record]) -> bool:
-    """Return whether any row records an explicitly non-200 gateway result."""
+def _has_non_200_status_code(record: Record) -> bool:
+    """Return whether one row records an explicitly non-200 gateway result."""
 
-    for record in session:
-        metadata = _decode_json_object(record.get("meta_json"))
-        if metadata is None:
-            continue
+    metadata = _decode_json_object(record.get("meta_json"))
+    if metadata is None:
+        return False
 
-        metadata_objects = [metadata]
-        for key in ("env_state", "telemetry"):
-            nested = _decode_json_object(metadata.get(key))
-            if nested is not None:
-                metadata_objects.append(nested)
+    metadata_objects = [metadata]
+    for key in ("env_state", "telemetry"):
+        nested = _decode_json_object(metadata.get(key))
+        if nested is not None:
+            metadata_objects.append(nested)
 
-        for item in metadata_objects:
-            if "status_code" in item and not _is_status_code_200(
-                item["status_code"]
-            ):
-                return True
+    for item in metadata_objects:
+        if "status_code" in item and not _is_status_code_200(
+            item["status_code"]
+        ):
+            return True
     return False
 
 
