@@ -875,6 +875,39 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
     ]
 
 
+def test_index_maintenance_pins_exact_table_before_listing_indexes(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    calls = []
+    monkeypatch.setattr(
+        client,
+        "_pin_exact_dldb_table",
+        lambda table_name: calls.append(("pin", table_name)),
+    )
+    original_list_indices = fake_session.list_indices
+
+    def list_indices(table_name, partition=None):
+        calls.append(("list_indices", table_name))
+        return original_list_indices(table_name, partition=partition)
+
+    monkeypatch.setattr(fake_session, "list_indices", list_indices)
+
+    client.maintain_table_indexes(
+        "landing_test",
+        partitions=["job-123"],
+        columns=["id"],
+        optimize=False,
+    )
+
+    assert calls[:2] == [
+        ("pin", "landing_test"),
+        ("list_indices", "landing_test"),
+    ]
+
+
 def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)

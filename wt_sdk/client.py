@@ -1452,6 +1452,14 @@ class WTGatewayClient:
                 f"expected one of: {', '.join(supported)}"
             )
 
+        # dldb's lazy table lookup uses a physical-table prefix scan. Without
+        # pinning the exact information-schema record first, a table such as
+        # ``wind_tunnel_landing`` can be opened as
+        # ``wind_tunnel_landing_legacy`` and fail with a partition-type
+        # mismatch. Index listing, creation, and optimization all use the
+        # session table cache, so pin once before any of those operations.
+        self._pin_exact_dldb_table(table_name)
+
         metadata = self._get_partition_metadata_for_table(table_name, fallback_key)
         if str(metadata.get("partition_type") or "").upper() != "HASH":
             raise ValueError(
