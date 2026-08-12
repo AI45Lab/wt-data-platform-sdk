@@ -48,6 +48,36 @@ The fixed output format is UTF-8 JSONL: one JSON object per line. JSON payload
 columns such as `messages`, `chosen_trace`, and `meta_json` are decoded into
 normal nested JSON values.
 
+## Recommended Incremental Usage
+
+The command does not keep a checkpoint. To pull only newly published serving
+rows on a later invocation, callers should include both `id` and
+`serving_updated_at` in `--columns` and persist the maximum
+`serving_updated_at` found across all part files from the completed export.
+
+For example, obtain the maximum timestamp from one specific successful export:
+
+```bash
+jq -s 'map(.serving_updated_at) | max' \
+  ./exports/export-20260811T103015000000Z-a3f92c01/part-*.jsonl
+```
+
+If the returned value is `1786377600000`, use it as an inclusive lower bound
+in the next invocation:
+
+```bash
+.venv-dldb-v1/bin/python scripts/delivery/export_serving_data.py \
+  --filter "job_id = 'job-001' AND serving_updated_at >= 1786377600000" \
+  --columns "id,job_id,serving_updated_at,chosen_trace,meta_json,tags" \
+  --output-dir ./exports
+```
+
+Use `>=` rather than `>` because multiple records may share the same
+millisecond timestamp. This deliberately re-exports records on the boundary;
+the caller should deduplicate them by `id`. Always compute the maximum from all
+part files in one completed directory, and do not combine part files from
+different export directories.
+
 ## Output and Failure Handling
 
 A successful invocation publishes a new directory:
