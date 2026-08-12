@@ -111,3 +111,38 @@ def test_partitioned_schema_record_detection():
     assert not query_data._is_partitioned_schema_record(
         SimpleNamespace(partition_type="", partition_column="")
     )
+
+
+def test_parse_column_list_rejects_empty_and_wildcard():
+    assert query_data._parse_column_list("job_id, session_id") == ["job_id", "session_id"]
+    assert query_data._parse_column_list(None) is None
+
+    for raw_columns in ("", " , ", "*"):
+        try:
+            query_data._parse_column_list(raw_columns)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected {raw_columns!r} to be rejected")
+
+
+def test_distinct_rows_counts_single_and_composite_values():
+    records = [
+        {"job_id": "job-a", "session_id": "s1"},
+        {"job_id": "job-a", "session_id": "s1"},
+        {"job_id": "job-a", "session_id": "s2"},
+        {"job_id": "job-b", "session_id": "s1"},
+        {"job_id": None, "session_id": "s3"},
+    ]
+
+    assert query_data._distinct_rows(records, ["job_id"]) == [
+        {"job_id": "job-a"},
+        {"job_id": "job-b"},
+        {"job_id": None},
+    ]
+    assert query_data._distinct_rows(records, ["job_id", "session_id"]) == [
+        {"job_id": "job-a", "session_id": "s1"},
+        {"job_id": "job-a", "session_id": "s2"},
+        {"job_id": "job-b", "session_id": "s1"},
+        {"job_id": None, "session_id": "s3"},
+    ]

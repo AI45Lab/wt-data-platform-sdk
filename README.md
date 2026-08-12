@@ -599,6 +599,8 @@ For the four active landing/serving tables, exact `job_id = '...'` predicates
 use SDK HASH bucket pruning. Filtered queries and filtered `--count` do not
 compute the full table size by default; add `--with-total-count` only when you
 really need that slower full-table count.
+Use `--distinct` to list unique values or unique column combinations; it reads
+only the selected columns and computes uniqueness in the script.
 
 ```bash
 # Count rows
@@ -607,6 +609,22 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing --count
 # Count one exact job_id using HASH bucket pruning
 python scripts/inspect/query_data.py --table wind_tunnel_landing \
   --query "job_id = 'job-001'" --count
+
+# List all distinct job IDs and their count
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --distinct job_id
+
+# Count distinct sessions inside one job without printing every value
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id = 'job-001'" \
+  --distinct session_id \
+  --count
+
+# List distinct job/session combinations and dump them to JSON
+python scripts/inspect/query_data.py --table wind_tunnel_landing \
+  --query "job_id LIKE '%panjia%'" \
+  --distinct "job_id,session_id" \
+  --output ./artifacts/panjia_distinct_sessions.json
 
 # Query the separate environment-config table; the script automatically uses
 # WT_SDK_ENV_CONFIG_DB_URI for this table name
