@@ -27,7 +27,6 @@ dependencies = [
     "pydantic>=2.5.0",
     "loguru>=0.7.2",
     "pandas>=2.3.3",
-    "s3fs>=2024.0.0",
     "boto3>=1.34.0",
     "prometheus-client>=0.20.0",
 ]
