@@ -185,3 +185,5 @@ logs/
 .claude/
 tmp/
 AGENTS.md
+artifacts
+external_delivery
