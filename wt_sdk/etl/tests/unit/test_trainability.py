@@ -127,7 +127,7 @@ def test_single_record_root_session_at_step_one_remains_trainable():
     }
 
 
-def test_completion_marker_before_max_step_returns_no_patches():
+def test_completion_marker_before_max_step_raises_stage_error():
     first = {"role": "user", "content": "question"}
     response = {"role": "assistant", "content": "answer"}
     session = (
@@ -135,7 +135,13 @@ def test_completion_marker_before_max_step_returns_no_patches():
         _row("row-2", 2, [first, response], completed=False, status_code=200),
     )
 
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {}
+    with pytest.raises(
+        StageTransformError,
+        match="is_session_completed must be set on the maximum step_id record",
+    ) as exc:
+        UpdateIsTrainableStage().transform_session(session, _context())
+
+    assert exc.value.record_id == "row-1"
 
 
 def test_multiple_completion_markers_raise_stage_error():

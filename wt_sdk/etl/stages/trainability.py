@@ -253,6 +253,7 @@ def _is_completed_session(session: Sequence[Record]) -> bool:
         raise StageTransformError("session must contain at least one row")
 
     completed_step_id: int | None = None
+    completed_record_id: str | None = None
     max_step_id: int | None = None
     for record in session:
         record_id = _record_id(record)
@@ -273,10 +274,16 @@ def _is_completed_session(session: Sequence[Record]) -> bool:
                     record_id=record_id,
                 )
             completed_step_id = step_id
+            completed_record_id = record_id
 
     if completed_step_id is None:
         return False
-    return completed_step_id == max_step_id
+    if completed_step_id != max_step_id:
+        raise StageTransformError(
+            "is_session_completed must be set on the maximum step_id record",
+            record_id=completed_record_id,
+        )
+    return True
 
 
 def _decode_messages(value: object, record_id: str) -> list[Any]:
