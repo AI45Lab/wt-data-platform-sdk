@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from wt_sdk.etl import SessionKey, StageContext, UpdateIsTrainableStage
+from wt_sdk.etl import (
+    SessionKey,
+    StageContext,
+    StageTransformError,
+    UpdateIsTrainableStage,
+)
 
 
 def _row(
@@ -67,10 +72,16 @@ def test_single_record_side_chain_is_not_trainable_at_any_step(
             completed=False,
             status_code=200,
         ),
-        _row("root-1", 5, [root_start], completed=False, status_code=200),
+        _row(
+            "root-1",
+            subagent_step + 1,
+            [root_start],
+            completed=False,
+            status_code=200,
+        ),
         _row(
             "root-2",
-            6,
+            subagent_step + 2,
             [root_start, root_response],
             completed=True,
             status_code=200,
@@ -113,6 +124,53 @@ def test_single_record_root_session_at_step_one_remains_trainable():
 
     assert UpdateIsTrainableStage().transform_session(session, _context()) == {
         "root": {"is_trainable": True},
+    }
+
+
+def test_completion_marker_before_max_step_returns_no_patches():
+    first = {"role": "user", "content": "question"}
+    response = {"role": "assistant", "content": "answer"}
+    session = (
+        _row("row-1", 1, [first], completed=True, status_code=200),
+        _row("row-2", 2, [first, response], completed=False, status_code=200),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {}
+
+
+def test_multiple_completion_markers_raise_stage_error():
+    first = {"role": "user", "content": "question"}
+    response = {"role": "assistant", "content": "answer"}
+    session = (
+        _row("row-1", 1, [first], completed=True, status_code=200),
+        _row("row-2", 2, [first, response], completed=True, status_code=200),
+    )
+
+    with pytest.raises(
+        StageTransformError,
+        match="There is exactly one `is_session_completed`",
+    ):
+        UpdateIsTrainableStage().transform_session(session, _context())
+
+
+def test_completion_marker_on_max_step_accepts_unordered_session():
+    first = {"role": "user", "content": "question"}
+    response = {"role": "assistant", "content": "answer"}
+    session = (
+        _row(
+            "row-2",
+            2,
+            [first, response],
+            completed=True,
+            status_code=200,
+            reward=0.75,
+        ),
+        _row("row-1", 1, [first], completed=False, status_code=200),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "row-2": {"is_trainable": True, "reward": 0.75},
+        "row-1": {"is_trainable": False},
     }
 
 
