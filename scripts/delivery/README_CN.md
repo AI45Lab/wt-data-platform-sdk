@@ -5,6 +5,8 @@
 `export_serving_data.py` 是面向外部用户的只读数据导出命令，用于从 serving
 表导出数据。默认读取生产表 `wind_tunnel_serving`。
 
+`count_dataset.py` 用于按 `job_id` 中的数据集名称统计行数。
+
 该命令在不同运行之间不保存状态。每次运行会按照调用方提供的过滤条件固定一份
 ID 清单，并完整导出该清单对应的数据。调用方负责构造后续的增量过滤条件、保存
 游标，以及对不同批次之间可能重复的数据进行去重。
@@ -81,6 +83,21 @@ part-00002.jsonl  #   450 条
 
 该参数限制的是记录数，不是文件字节大小；不同轨迹的内容长度不同，因此各分片的
 实际文件大小可能不同。
+
+## 按数据集统计行数
+
+```bash
+python scripts/delivery/count_dataset.py \
+  --table wind_tunnel_serving \
+  --concurrency 5 \
+  --verbose
+```
+
+- `--table`：目标表，默认 `wind_tunnel_serving`。
+- `--concurrency`：并发查询数，默认 `5`。
+- `--verbose`：打印实际执行的查询命令，默认关闭。
+
+大表建议降低并发；统计期间持续写入可能造成轻微时间差。
 
 ## 推荐的增量拉取方式
 

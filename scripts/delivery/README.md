@@ -6,6 +6,8 @@
 for exporting rows from a serving table. It defaults to the production
 `wind_tunnel_serving` table.
 
+`count_dataset.py` counts rows by the dataset name in `job_id`.
+
 The command is intentionally stateless. It exports exactly the ID manifest
 captured for the supplied filter. Callers own incremental filter construction,
 cursor storage, and deduplication between separate invocations.
@@ -69,6 +71,21 @@ normal nested JSON values. Literal Unicode line/paragraph separator characters
 so editors do not mistake them for JSONL record boundaries. Standard JSON
 parsers restore the original character values without changing the delivered
 data.
+
+## Count Rows by Dataset
+
+```bash
+python scripts/delivery/count_dataset.py \
+  --table wind_tunnel_serving \
+  --concurrency 5 \
+  --verbose
+```
+
+- `--table`: target table; defaults to `wind_tunnel_serving`.
+- `--concurrency`: concurrent query limit; defaults to `5`.
+- `--verbose`: print the executed query commands; disabled by default.
+
+Use lower concurrency for large tables; active writes can cause small timing differences.
 
 ## Recommended Incremental Usage
 
