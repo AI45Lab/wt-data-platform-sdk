@@ -5,7 +5,9 @@
 `export_serving_data.py` 是面向外部用户的只读数据导出命令，用于从 serving
 表导出数据。默认读取生产表 `wind_tunnel_serving`。
 
-该命令在不同运行之间不保存状态。每次运行会按照调用方提供的过滤条件固定一份
+`count_dataset.py` 按 `job_id` 中以 `#` 分隔的第一个字段统计 serving 行数。
+
+该导出命令在不同运行之间不保存状态。每次运行会按照调用方提供的过滤条件固定一份
 ID 清单，并完整导出该清单对应的数据。调用方负责构造后续的增量过滤条件、保存
 游标，以及对不同批次之间可能重复的数据进行去重。
 
@@ -81,6 +83,39 @@ part-00002.jsonl  #   450 条
 
 该参数限制的是记录数，不是文件字节大小；不同轨迹的内容长度不同，因此各分片的
 实际文件大小可能不同。
+
+## 按数据集统计行数
+
+数据集名称取自 `job_id` 的第一个字段：
+
+```text
+cvefactory#opencode#kimi-k3#mining-patch#20260811#pj
+└── 数据集：cvefactory
+```
+
+脚本以 `job_id` 为准，因为它是必填且不可变的业务标识。脚本不使用 `tags`：
+`tags` 是 ETL 派生的可选字段，没有被标签阶段选中的记录可能没有该字段。
+
+统计生产 serving 表中的全部数据：
+
+```bash
+python scripts/delivery/count_dataset.py
+```
+
+也可以指定过滤条件，或者显式读取测试表：
+
+```bash
+python scripts/delivery/count_dataset.py \
+  --filter "serving_updated_at >= 1786377600000"
+
+python scripts/delivery/count_dataset.py \
+  --table serving_test \
+  --filter "id IS NOT NULL"
+```
+
+脚本通过 `export_data_batches()` 先固定本次查询匹配的 ID 清单，再分批读取
+`job_id` 并在本地累计。它不会针对每个 dataset 分别执行一次全表 LIKE 查询。
+没有非空数据集前缀或不包含 `#` 的 `job_id` 会被跳过，并输出到标准错误流。
 
 ## 推荐的增量拉取方式
 
