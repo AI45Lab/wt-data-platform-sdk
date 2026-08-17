@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ..exceptions import StageTransformError
 from ..stage import ETLStage, Session, SessionPatch, StageContext
+
+_ANT_THINKING_PATTERN = re.compile(
+    r"<antThinking>(?P<content>.*?)</antThinking>", re.DOTALL | re.IGNORECASE
+)
+_COT_TOKENS_PATTERN = re.compile(r"<!--\s*cot_tokens\s*:\s*\d+\s*-->", re.IGNORECASE)
 
 
 class FreeCotStage(ETLStage):
@@ -16,8 +23,18 @@ class FreeCotStage(ETLStage):
 
     name = "freecot"
     version = "1"
-    required_fields = ("agent_model", "messages", "meta_json", "session_id", "step_id")
+    required_fields = (
+        "agent_model",
+        "is_trainable",
+        "is_session_completed",
+        "messages",
+        "meta_json",
+        "session_id",
+        "step_id",
+    )
     output_fields = ("messages", "meta_json")
+    dependencies = ("update_is_trainable",)
+    job_discovery_filter = "is_session_completed = true"
 
     def __init__(
         self,
@@ -25,28 +42,38 @@ class FreeCotStage(ETLStage):
         *,
         env_path: Path | None = None,
         max_tokens: int = 128000,
+        timeout_seconds: float = 300.0,
+        max_attempts: int = 3,
     ) -> None:
+        if timeout_seconds <= 0 or max_attempts <= 0:
+            raise ValueError("timeout_seconds and max_attempts must be positive")
         self._replay_client = replay_client
         self._env_path = env_path
         self._max_tokens = max_tokens
+        self._timeout_seconds = timeout_seconds
+        self._max_attempts = max_attempts
         self._secrets: tuple[str, ...] = ()
 
     def transform_session(self, session: Session, context: StageContext) -> SessionPatch:
         del context
+        if not any(record.get("is_session_completed") is True for record in session):
+            return {}
         messages_by_id: dict[str, list[dict[str, Any]]] = {}
         signatures: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         models: dict[str, str] = {}
-        errors: dict[str, list[dict[str, str]]] = {}
 
         for record in session:
             record_id = str(record["id"])
+            if record.get("is_trainable") is not True:
+                continue
             if "claude" not in str(record.get("agent_model") or "").lower():
                 continue
             try:
                 messages = _messages(record.get("messages"))
             except ValueError as exc:
-                _add_error(errors, record_id, "invalid_messages", self._safe_message(exc))
-                continue
+                raise StageTransformError(
+                    self._safe_message(exc), record_id=record_id
+                ) from exc
             signed = [
                 message
                 for message in messages
@@ -69,12 +96,14 @@ class FreeCotStage(ETLStage):
                 decoded = self._client().extract(
                     signature, models[targets[0][0]], self._max_tokens
                 )
-                if not isinstance(decoded, str) or not decoded.strip():
+                decoded = _reasoning_content(decoded)
+                if not decoded:
                     raise ValueError("replay service returned empty reasoning")
             except Exception as exc:
-                for record_id, _ in targets:
-                    _add_error(errors, record_id, "replay_failed", self._safe_message(exc))
-                continue
+                raise StageTransformError(
+                    f"FreeCoT replay failed: {self._safe_message(exc)}",
+                    record_id=targets[0][0],
+                ) from exc
             for _, message in targets:
                 message["reasoning_content"] = decoded
 
@@ -84,14 +113,15 @@ class FreeCotStage(ETLStage):
             messages = messages_by_id.get(record_id)
             if messages is None:
                 continue
-            row_errors = errors.get(record_id, [])
+            try:
+                meta_json = _normalized_meta_json(record.get("meta_json"))
+            except ValueError as exc:
+                raise StageTransformError(
+                    self._safe_message(exc), record_id=record_id
+                ) from exc
             patches[record_id] = {
                 "messages": _json_string(messages),
-                "meta_json": _with_status(
-                    record.get("meta_json"),
-                    "partial" if row_errors else "success",
-                    row_errors,
-                ),
+                "meta_json": meta_json,
             }
         return patches
 
@@ -114,6 +144,8 @@ class FreeCotStage(ETLStage):
             config["ORIGIN_COT_SERVICE_URL"],
             config["ORIGIN_COT_WRAPPER_KEY"],
             upstream_api_key=config.get("NEW_API_KEY"),
+            timeout_seconds=self._timeout_seconds,
+            max_attempts=self._max_attempts,
         )
         return self._replay_client
 
@@ -135,15 +167,16 @@ def _messages(value: object) -> list[dict[str, Any]]:
     return json.loads(_json_string(value))
 
 
-def _with_status(value: object, status: str, errors: Sequence[dict[str, str]]) -> str:
-    try:
-        meta = _mapping(value)
-    except ValueError:
-        meta = {}
-        if not errors:
-            status = "failed"
-            errors = [{"code": "invalid_meta_json", "message": "meta_json is not a JSON object"}]
-    meta["freecot"] = {"status": status, "errors": list(errors)}
+def _reasoning_content(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    matched = _ANT_THINKING_PATTERN.search(value)
+    content = matched.group("content") if matched is not None else value
+    return _COT_TOKENS_PATTERN.sub("", content).strip()
+
+
+def _normalized_meta_json(value: object) -> str:
+    meta = {} if value is None else _mapping(value)
     return _json_string(meta)
 
 
@@ -158,12 +191,6 @@ def _mapping(value: object) -> dict[str, Any]:
         if isinstance(parsed, dict):
             return parsed
     raise ValueError("meta_json must be a JSON object")
-
-
-def _add_error(
-    errors: dict[str, list[dict[str, str]]], record_id: str, code: str, message: str
-) -> None:
-    errors.setdefault(record_id, []).append({"code": code, "message": message[:500]})
 
 
 def _json_string(value: object) -> str:

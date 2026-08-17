@@ -267,8 +267,8 @@ def test_builtin_factories_are_no_argument_cli_factories():
     ]
     assert landing.mode is PipelineMode.LANDING
     assert [type(stage) for stage in landing.ordered_stages] == [
-        FreeCotStage,
         UpdateIsTrainableStage,
+        FreeCotStage,
     ]
 
 
