@@ -1,5 +1,7 @@
 # Serving Data Delivery
 
+[中文说明](README_CN.md)
+
 `export_serving_data.py` is the read-only command delivered to external users
 for exporting rows from a serving table. It defaults to the production
 `wind_tunnel_serving` table.

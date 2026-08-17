@@ -55,7 +55,12 @@ class UpdateIsTrainableStage(ETLStage):
             record for record in session if not _has_non_200_status_code(record)
         )
         trainable_ids = _detect_trainable_record_ids(eligible_records)
-        final_reward = session[-1].get("reward")
+        completed_record = next(
+            record
+            for record in session
+            if record.get("is_session_completed") is True
+        )
+        final_reward = completed_record.get("reward")
         patches: SessionPatch = {}
         for record in session:
             record_id = _record_id(record)
@@ -247,9 +252,15 @@ def _is_completed_session(session: Sequence[Record]) -> bool:
     if not session:
         raise StageTransformError("session must contain at least one row")
 
-    completed_records: list[tuple[int, str]] = []
-    for index, record in enumerate(session):
+    completed_step_id: int | None = None
+    completed_record_id: str | None = None
+    max_step_id: int | None = None
+    for record in session:
         record_id = _record_id(record)
+        step_id = _step_sort_key(record)
+        max_step_id = (
+            step_id if max_step_id is None else max(max_step_id, step_id)
+        )
         value = record.get("is_session_completed")
         if value is not None and not isinstance(value, bool):
             raise StageTransformError(
@@ -257,14 +268,19 @@ def _is_completed_session(session: Sequence[Record]) -> bool:
                 record_id=record_id,
             )
         if value is True:
-            completed_records.append((index, record_id))
+            if completed_step_id is not None:
+                raise StageTransformError(
+                    "There is exactly one `is_session_completed`.",
+                    record_id=record_id,
+                )
+            completed_step_id = step_id
+            completed_record_id = record_id
 
-    if not completed_records:
+    if completed_step_id is None:
         return False
-    completed_index, completed_record_id = completed_records[-1]
-    if completed_index != len(session) - 1:
+    if completed_step_id != max_step_id:
         raise StageTransformError(
-            "is_session_completed must be set on the final session row",
+            "is_session_completed must be set on the maximum step_id record",
             record_id=completed_record_id,
         )
     return True
