@@ -7,6 +7,7 @@ from wt_sdk.etl import (
     BuildSearchTextStage,
     DeriveJobTagsStage,
     ETLStage,
+    FreeCotStage,
     PipelineConfigurationError,
     PipelineDefinition,
     PipelineMode,
@@ -265,7 +266,10 @@ def test_builtin_factories_are_no_argument_cli_factories():
         "build_search_text",
     ]
     assert landing.mode is PipelineMode.LANDING
-    assert isinstance(landing.ordered_stages[0], UpdateIsTrainableStage)
+    assert [type(stage) for stage in landing.ordered_stages] == [
+        FreeCotStage,
+        UpdateIsTrainableStage,
+    ]
 
 
 def test_job_tags_are_best_effort_and_invalid_name_becomes_null():

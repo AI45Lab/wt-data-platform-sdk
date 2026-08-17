@@ -35,6 +35,7 @@ from .stages import (
     BuildChosenTraceStage,
     BuildSearchTextStage,
     DeriveJobTagsStage,
+    FreeCotStage,
     UpdateIsTrainableStage,
 )
 
@@ -51,6 +52,7 @@ __all__ = [
     "ETLError",
     "ETLRunFailed",
     "ETLStage",
+    "FreeCotStage",
     "InMemoryCheckpointStore",
     "PipelineConfigurationError",
     "PipelineDefinition",
