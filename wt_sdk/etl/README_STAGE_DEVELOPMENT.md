@@ -39,10 +39,14 @@ class MockedNormalizeMessagesStage(ETLStage):
         session: Session,
         context: StageContext,
     ) -> SessionPatch:
-        del context
         patches = {}
         for record in session:
-            desired_messages = mocked_normalize(record["messages"])
+            desired_messages, used_fallback = mocked_normalize(record["messages"])
+            if used_fallback:
+                context.warn(
+                    "messages used fallback normalization",
+                    warning_type="FallbackNormalization",
+                )
             if desired_messages != record["messages"]:
                 patches[record["id"]] = {"messages": desired_messages}
         return patches
@@ -64,6 +68,35 @@ Stage 自己决定处理零行、一行或多行。返回 `{}` 表示本 stage �
 引擎按 DAG 逐个 stage 执行。一个 stage 完整返回并通过校验后，它对所有行的 patches 才会
 统一合并进内存 working session；下一个 stage 收到的是前序 stage 全部处理完成后的新快照。
 同一个 stage 内不会边遍历边改变输入，因此结果不依赖行遍历顺序。
+
+### 非阻断 warning
+
+当数据存在需要交给上游写入方分析的异常，但 stage 仍能确定并继续执行正确的业务逻辑时，使用
+`context.warn()` 上报结构化 warning：
+
+```python
+context.warn(
+    "response missing optional provider metadata; used fallback",
+    warning_type="ProviderMetadataFallback",  # 可选，默认 StageWarning
+)
+```
+
+`context.warn()` 返回 `None`，不会中断当前函数。Stage 在调用后继续执行剩余逻辑并正常返回
+patch；后续 stage、当前 session 的 sink 和其他 session 都照常执行。Warning 不等同于 patch，
+不会单独选择 record，也不会改变业务输出。
+
+Warning 会按发出顺序写入最终 JSON report 的 `warnings`，包含 `job_id`、`session_id`、
+`stage_name`、`warning_type` 和 `message`。Report 同时给出 `warning_count` 和
+`sessions_warned`。仅有 warning 的 pipeline 状态仍是
+`SUCCEEDED`，命令 exit code 仍为 `0`，checkpoint 按正常成功规则推进。
+
+如果 stage 先发出 warning，随后遇到真正无法继续的错误，已经发出的 warning 与 failure 都会
+保留在 report；该 session 仍遵循 error 语义，不产生业务输出。Warning message 和
+`warning_type` 必须是非空字符串。
+
+不要通过 `raise`、Python `warnings.warn()` 或日志代替这个接口：`raise` 会中断 stage，普通
+Python warning/日志也不会进入结构化 ETL audit report。无法确定正确业务结果、patch 无法通过
+校验或继续执行可能产生错误输出时，仍必须抛出明确异常。
 
 ### 可选的 `job_discovery_filter`
 
@@ -119,7 +152,8 @@ def transform_session(self, session, context):
 - JSON schema 字段在 ETL 边界是 JSON 字符串；解析后必须重新序列化，不能返回 Python
   `dict/list`。
 - 同一 pipeline 内一个 output field 只能由一个 stage 拥有。
-- 坏数据应抛出明确异常；只有业务明确为 best effort 的输出才返回 `None`。
+- 无法继续计算出正确结果的坏数据应抛出明确异常；可安全降级但需要上游分析的数据使用
+  `context.warn()`；只有业务明确为 best effort 的输出才返回 `None`。
 - Stage 计算或校验失败时，当前 session 不产生任何业务输出，依赖它的 stage 不会继续执行。
   已完成的内存 patch 也不会落库。
 

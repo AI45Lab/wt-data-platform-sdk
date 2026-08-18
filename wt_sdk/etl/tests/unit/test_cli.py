@@ -10,6 +10,7 @@ from wt_sdk.etl import (
     RecordFailure,
     RunSummary,
     SessionKey,
+    StageWarning,
 )
 
 
@@ -377,9 +378,55 @@ def test_summary_payload_contains_audit_counts_and_failed_row_ids():
         "rows_selected": 3,
         "rows_succeeded": 2,
         "rows_failed": 1,
+        "warnings_emitted": 0,
         "landing_rows_updated": 0,
         "serving_rows_upserted": 2,
     }
+
+
+def test_summary_payload_reports_warnings_without_changing_success_status():
+    summary = RunSummary(
+        pipeline_name="landing_enrichment",
+        pipeline_version="1",
+        mode=PipelineMode.LANDING,
+        sessions_processed=1,
+        sessions_warned=1,
+        source_rows=2,
+        selected_rows=2,
+        successful_rows=2,
+        landing_rows_updated=2,
+        warnings=[
+            StageWarning(
+                job_id="job-1",
+                session_id="session-1",
+                stage_name="normalize_messages",
+                warning_type="FallbackNormalization",
+                message="used fallback normalization",
+            ),
+            StageWarning(
+                job_id="job-1",
+                session_id="session-1",
+                stage_name="normalize_messages",
+                warning_type="SessionShape",
+                message="session contains a legacy payload",
+            ),
+        ],
+    )
+
+    payload = run_module._summary_payload(
+        summary,
+        pipeline_run_id="landing_enrichment__v1__run",
+        started_at_ms=1_000,
+        ended_at_ms=1_100,
+    )
+
+    assert payload["status"] == "SUCCEEDED"
+    assert payload["failed_rows"] == 0
+    assert payload["sessions_failed"] == 0
+    assert payload["sessions_warned"] == 1
+    assert payload["warning_count"] == 2
+    assert payload["warnings"][0]["warning_type"] == "FallbackNormalization"
+    assert payload["audit"]["warnings_emitted"] == 2
 
 
 def test_dirty_handoff_excludes_sessions_already_processed_by_serving():
@@ -473,3 +520,79 @@ def test_failed_pipeline_prints_report_and_returns_nonzero(
     report_path = tmp_path / f"{payload[0]['pipeline_run_id']}.json"
     assert report_path.exists()
     assert json.loads(report_path.read_text())["ended_at"] == payload[0]["ended_at"]
+
+
+def test_warning_only_pipeline_prints_report_and_returns_zero(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
+    summary = RunSummary(
+        pipeline_name=pipeline.name,
+        pipeline_version=pipeline.version,
+        mode=pipeline.mode,
+        sessions_processed=1,
+        sessions_warned=1,
+        source_rows=1,
+        selected_rows=1,
+        successful_rows=1,
+        serving_rows_upserted=1,
+        warnings=[
+            StageWarning(
+                job_id="job-1",
+                session_id="session-1",
+                stage_name="build_chosen_trace",
+                warning_type="FallbackNormalization",
+                message="used fallback normalization",
+            )
+        ],
+    )
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def close(self):
+            return None
+
+    class FakeEngine:
+        def __init__(
+            self,
+            client,
+            checkpoint_store=None,
+            session_batch_size=25,
+            sink_batch_size=100,
+        ):
+            del client, checkpoint_store, session_batch_size, sink_batch_size
+
+        def run_jobs(self, pipeline, job_ids, dry_run=False):
+            del pipeline, job_ids, dry_run
+            return summary
+
+    monkeypatch.setenv("WT_SDK_PROFILE", "test")
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
+    monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
+    monkeypatch.setattr(run_module, "ETLEngine", FakeEngine)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run.py",
+            "--pipeline",
+            "example_pipeline",
+            "--job-id",
+            "job-1",
+            "--report-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert run_module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["status"] == "SUCCEEDED"
+    assert payload[0]["warning_count"] == 1
+    assert payload[0]["failed_rows"] == 0
+    report_path = tmp_path / f"{payload[0]['pipeline_run_id']}.json"
+    report = json.loads(report_path.read_text())
+    assert "record_id" not in report["warnings"][0]

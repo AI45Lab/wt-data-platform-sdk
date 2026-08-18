@@ -16,7 +16,14 @@ from .exceptions import (
     StageTransformError,
 )
 from .models import LandingRowPatch, PipelineMode, RecordFailure, SessionResult
-from .stage import ETLStage, Session, SessionKey, SessionPatch, StageContext
+from .stage import (
+    ETLStage,
+    Session,
+    SessionKey,
+    SessionPatch,
+    StageContext,
+    StageWarning,
+)
 
 
 IMMUTABLE_ETL_FIELDS = {
@@ -125,12 +132,8 @@ class PipelineDefinition:
         original_by_id = {str(row["id"]): dict(row) for row in ordered_rows}
         working_by_id = deepcopy(original_by_id)
         ordered_ids = tuple(str(row["id"]) for row in ordered_rows)
-        context = StageContext(
-            pipeline_name=self.name,
-            pipeline_version=self.version,
-            session_key=session_key,
-        )
         selected_ids: set[str] = set()
+        emitted_warnings: list[StageWarning] = []
         failure_stage = "__stage_execution__"
         failure_record_id: str | None = None
 
@@ -139,14 +142,23 @@ class PipelineDefinition:
                 failure_stage = stage.name
                 stage_input = _freeze_session(working_by_id, ordered_ids)
                 _validate_stage_inputs(stage, stage_input)
+                context = StageContext(
+                    pipeline_name=self.name,
+                    pipeline_version=self.version,
+                    session_key=session_key,
+                    stage_name=stage.name,
+                )
                 try:
-                    proposed = stage.transform_session(stage_input, context)
-                except StageTransformError:
-                    raise
-                except Exception as exc:
-                    raise StageTransformError(
-                        f"stage '{stage.name}' failed for session {session_key}: {exc}"
-                    ) from exc
+                    try:
+                        proposed = stage.transform_session(stage_input, context)
+                    except StageTransformError:
+                        raise
+                    except Exception as exc:
+                        raise StageTransformError(
+                            f"stage '{stage.name}' failed for session {session_key}: {exc}"
+                        ) from exc
+                finally:
+                    emitted_warnings.extend(context.emitted_warnings)
                 stage_patches = _validate_stage_session_patch(
                     stage,
                     proposed,
@@ -193,6 +205,7 @@ class PipelineDefinition:
                 source_rows=len(ordered_rows),
                 selected_rows=len(selected_ids),
                 successful_rows=0,
+                warnings=tuple(emitted_warnings),
                 failures=(
                     RecordFailure(
                         record_id=attributed_record_id,
@@ -212,6 +225,7 @@ class PipelineDefinition:
             successful_rows=len(selected_ids),
             landing_patches=tuple(landing_patches),
             serving_records=tuple(serving_records),
+            warnings=tuple(emitted_warnings),
         )
 
 

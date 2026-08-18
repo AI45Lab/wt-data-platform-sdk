@@ -284,7 +284,6 @@ v1 不新增持久化 failure 表，但每条 pipeline 的每次实际执行都�
 
 ```json
 {
-  "record_id": "row-id",
   "job_id": "job-id",
   "session_id": "session-id",
   "stage_name": "build_chosen_trace",
@@ -292,6 +291,25 @@ v1 不新增持久化 failure 表，但每条 pipeline 的每次实际执行都�
   "message": "response contains malformed JSON"
 }
 ```
+
+Stage 还可以通过 `context.warn()` 上报不阻断执行的数据质量 warning。它们与 failure 分开存储：
+
+```json
+{
+  "record_id": "row-id",
+  "job_id": "job-id",
+  "session_id": "session-id",
+  "stage_name": "normalize_messages",
+  "warning_type": "FallbackNormalization",
+  "message": "messages used fallback normalization"
+}
+```
+
+Warning 始终归属于当前 session，不终止当前 stage、后续 stage、sink 或其他 session，也不计入
+`failed_rows`/`sessions_failed`。只有 warning 的执行仍为
+`SUCCEEDED`、命令 exit code 为 `0`，增量 checkpoint 按正常成功规则推进。若同一 stage 后续
+又发生真正 error，先前 warning 与 failure 会同时保留，但该 session 仍按 error 规则丢弃内存
+业务输出。
 
 每条 pipeline 完成后都会输出以下 audit 计数：
 
@@ -302,11 +320,15 @@ v1 不新增持久化 failure 表，但每条 pipeline 的每次实际执行都�
   dry-run 时表示 stage/output 成功，不包含真实 sink 写入。
 - `rows_failed`：失败事件数。Session-level stage 无法归因到单行时，failure 的 `record_id` 可以
   为 null，但始终保留 job/session scope。
+- `warnings_emitted`：stage 发出的 warning 事件数；同一 session 可以产生多条。它与 report
+  顶层的 `warning_count` 以及 `warnings` 数组长度相同。
+- `sessions_warned`：至少发出一条 warning 的 session 执行次数。
 - `landing_rows_updated` / `serving_rows_upserted`：成功产生的实际写入数；dry-run 时表示计划
   写入数。
 
 Report 还包含 `pipeline_run_id`、`started_at`、`ended_at`、毫秒时间、`duration_ms`、`status`、
-`sessions_processed`、`sessions_failed`、`failed_row_ids`、完整 `failures` 和实际
+`sessions_processed`、`sessions_failed`、`sessions_warned`、`warning_count`、`failed_row_ids`、
+完整 `failures`、完整 `warnings` 和实际
 `report_path`。失败记录同时保留 job/session scope，因此后续可以按一次 report 批量构造
 session 重试。存在 stage/session/record 失败时命令仍会先写 report、打印汇总，然后以
 exit code `1` 结束。一个 stage 失败后，当前 session 不执行下游 stage，也不提交已计算的

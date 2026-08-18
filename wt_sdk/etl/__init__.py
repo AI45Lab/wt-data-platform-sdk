@@ -30,6 +30,7 @@ from .stage import (
     SessionKey,
     SessionPatch,
     StageContext,
+    StageWarning,
 )
 from .stages import (
     BuildChosenTraceStage,
@@ -67,6 +68,7 @@ __all__ = [
     "SessionValidationError",
     "StageContext",
     "StageTransformError",
+    "StageWarning",
     "TEST_CHECKPOINT_TABLE",
     "UpdateIsTrainableStage",
     "list_pipeline_names",

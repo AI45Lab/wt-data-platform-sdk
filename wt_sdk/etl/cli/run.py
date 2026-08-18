@@ -71,12 +71,15 @@ def _summary_payload(
         "discovery_rows": summary.discovery_rows,
         "sessions_processed": summary.sessions_processed,
         "sessions_failed": summary.sessions_failed,
+        "sessions_warned": summary.sessions_warned,
         "source_rows": summary.source_rows,
         "selected_rows": summary.selected_rows,
         "successful_rows": summary.successful_rows,
         "failed_rows": summary.failed_rows,
         "landing_rows_updated": summary.landing_rows_updated,
         "serving_rows_upserted": summary.serving_rows_upserted,
+        "warning_count": summary.warning_count,
+        "warnings": [asdict(warning) for warning in summary.warnings],
         "failures": [asdict(failure) for failure in summary.failures],
         "dirty_sessions": [
             {"job_id": key.job_id, "session_id": key.session_id}
@@ -96,6 +99,7 @@ def _summary_payload(
         "rows_selected": summary.selected_rows,
         "rows_succeeded": summary.successful_rows,
         "rows_failed": summary.failed_rows,
+        "warnings_emitted": summary.warning_count,
         "landing_rows_updated": summary.landing_rows_updated,
         "serving_rows_upserted": summary.serving_rows_upserted,
     }

@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from wt_sdk.models import ServingRecord
 
-from .stage import SessionKey
+from .stage import SessionKey, StageWarning
 
 
 class PipelineMode(str, Enum):
@@ -40,6 +40,7 @@ class SessionResult:
     successful_rows: int
     landing_patches: tuple[LandingRowPatch, ...] = ()
     serving_records: tuple[ServingRecord, ...] = ()
+    warnings: tuple[StageWarning, ...] = ()
     failures: tuple[RecordFailure, ...] = ()
 
     @property
@@ -56,12 +57,14 @@ class RunSummary:
     discovery_rows: int = 0
     sessions_processed: int = 0
     sessions_failed: int = 0
+    sessions_warned: int = 0
     source_rows: int = 0
     selected_rows: int = 0
     successful_rows: int = 0
     failed_rows: int = 0
     landing_rows_updated: int = 0
     serving_rows_upserted: int = 0
+    warnings: list[StageWarning] = field(default_factory=list)
     failures: list[RecordFailure] = field(default_factory=list)
     dirty_sessions: set[SessionKey] = field(default_factory=set)
     successful_sessions: set[SessionKey] = field(default_factory=set)
@@ -72,7 +75,10 @@ class RunSummary:
         self.selected_rows += result.selected_rows
         self.successful_rows += result.successful_rows
         self.failed_rows += len(result.failures)
+        self.warnings.extend(result.warnings)
         self.failures.extend(result.failures)
+        if result.warnings:
+            self.sessions_warned += 1
         if result.failures:
             self.sessions_failed += 1
         else:
@@ -101,12 +107,14 @@ class RunSummary:
         self.discovery_rows += other.discovery_rows
         self.sessions_processed += other.sessions_processed
         self.sessions_failed += other.sessions_failed
+        self.sessions_warned += other.sessions_warned
         self.source_rows += other.source_rows
         self.selected_rows += other.selected_rows
         self.successful_rows += other.successful_rows
         self.failed_rows += other.failed_rows
         self.landing_rows_updated += other.landing_rows_updated
         self.serving_rows_upserted += other.serving_rows_upserted
+        self.warnings.extend(other.warnings)
         self.failures.extend(other.failures)
         self.dirty_sessions.update(other.dirty_sessions)
         self.successful_sessions.update(other.successful_sessions)
@@ -114,6 +122,10 @@ class RunSummary:
     @property
     def status(self) -> str:
         return "FAILED" if self.failed_rows else "SUCCEEDED"
+
+    @property
+    def warning_count(self) -> int:
+        return len(self.warnings)
 
 
 @dataclass(frozen=True)

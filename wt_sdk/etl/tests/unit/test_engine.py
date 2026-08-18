@@ -157,6 +157,22 @@ class MarkTrainableStage(ETLStage):
         }
 
 
+class WarnAndMarkTrainableStage(ETLStage):
+    name = "warn_and_mark_trainable"
+    output_fields = ("is_trainable",)
+
+    def transform_session(self, session, context):
+        if context.session_key.session_id == "session-1":
+            context.warn(
+                "session used legacy trainability fallback",
+                warning_type="LegacyFallback",
+            )
+        return {
+            record["id"]: {"is_trainable": True}
+            for record in session
+        }
+
+
 def _checkpoint(store, pipeline, bucket=3):
     return store.load(
         pipeline_name=pipeline.name,
@@ -169,6 +185,51 @@ def _checkpoint(store, pipeline, bucket=3):
         ),
         bucket=bucket,
     )
+
+
+def test_warning_does_not_fail_engine_run_or_block_landing_sink():
+    client = FakeGatewayClient(
+        [
+            _row(
+                id="row-1",
+                session_id="session-1",
+                is_trainable=False,
+                source_updated_at=1_000,
+                _bucket=3,
+            ),
+            _row(
+                id="row-2",
+                session_id="session-2",
+                is_trainable=False,
+                source_updated_at=1_000,
+                _bucket=3,
+            ),
+        ]
+    )
+    pipeline = PipelineDefinition(
+        name="warning_landing_pipeline",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(WarnAndMarkTrainableStage(),),
+    )
+
+    summary = ETLEngine(client).run_sessions(
+        pipeline,
+        [
+            SessionKey(_row()["job_id"], "session-1"),
+            SessionKey(_row()["job_id"], "session-2"),
+        ],
+    )
+
+    assert summary.status == "SUCCEEDED"
+    assert summary.sessions_processed == 2
+    assert summary.failed_rows == 0
+    assert summary.sessions_failed == 0
+    assert summary.sessions_warned == 1
+    assert summary.warning_count == 1
+    assert summary.warnings[0].stage_name == "warn_and_mark_trainable"
+    assert summary.landing_rows_updated == 2
+    assert all(row["is_trainable"] is True for row in client.rows)
 
 
 def test_incremental_serving_run_commits_checkpoint_after_upsert():

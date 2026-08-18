@@ -302,6 +302,86 @@ def test_collect_failure_discards_all_session_outputs():
     assert result.failures[0].stage_name == "build_chosen_trace"
 
 
+def test_stage_warning_is_reported_without_interrupting_stage_or_downstream_logic():
+    execution = []
+
+    class WarnAndContinueStage(ETLStage):
+        name = "warn_and_continue"
+        output_fields = ("search_text",)
+
+        def transform_session(self, session, context):
+            context.warn(
+                "response required fallback normalization",
+                warning_type="FallbackNormalization",
+            )
+            execution.append("continued_after_warning")
+            return {session[0]["id"]: {"search_text": "normalized"}}
+
+    class DownstreamStage(ETLStage):
+        name = "downstream"
+        output_fields = ("reference_answer",)
+        dependencies = ("warn_and_continue",)
+
+        def transform_session(self, session, context):
+            del context
+            execution.append("downstream_executed")
+            assert session[0]["search_text"] == "normalized"
+            return {session[0]["id"]: {"reference_answer": "done"}}
+
+    pipeline = PipelineDefinition(
+        name="warning_pipeline",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(WarnAndContinueStage(), DownstreamStage()),
+    )
+
+    result = pipeline.process_session([_row()])
+
+    assert execution == ["continued_after_warning", "downstream_executed"]
+    assert result.successful_rows == 1
+    assert result.failures == ()
+    assert len(result.warnings) == 1
+    warning = result.warnings[0]
+    assert warning.job_id == _row()["job_id"]
+    assert warning.session_id == "session-1"
+    assert warning.stage_name == "warn_and_continue"
+    assert warning.warning_type == "FallbackNormalization"
+    assert warning.message == "response required fallback normalization"
+    assert result.landing_patches[0].updates == {
+        "reference_answer": "done",
+        "search_text": "normalized",
+    }
+
+
+def test_stage_warning_is_retained_when_stage_later_fails():
+    class WarnThenFailStage(ETLStage):
+        name = "warn_then_fail"
+        output_fields = ("search_text",)
+
+        def transform_session(self, session, context):
+            context.warn("suspicious source data")
+            raise StageTransformError(
+                "source data cannot be transformed",
+                record_id=session[0]["id"],
+            )
+
+    pipeline = PipelineDefinition(
+        name="warning_then_failure",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(WarnThenFailStage(),),
+    )
+
+    result = pipeline.process_session([_row()], collect_failures=True)
+
+    assert result.successful_rows == 0
+    assert result.landing_patches == ()
+    assert len(result.warnings) == 1
+    assert result.warnings[0].message == "suspicious source data"
+    assert len(result.failures) == 1
+    assert result.failures[0].stage_name == "warn_then_fail"
+
+
 def test_landing_pipeline_returns_only_actual_final_diff():
     pipeline = PipelineDefinition(
         name="landing_enrichment",
