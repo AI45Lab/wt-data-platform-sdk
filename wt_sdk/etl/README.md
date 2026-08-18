@@ -284,6 +284,7 @@ v1 不新增持久化 failure 表，但每条 pipeline 的每次实际执行都�
 
 ```json
 {
+  "record_id": "row-id",
   "job_id": "job-id",
   "session_id": "session-id",
   "stage_name": "build_chosen_trace",
@@ -296,7 +297,6 @@ Stage 还可以通过 `context.warn()` 上报不阻断执行的数据质量 warn
 
 ```json
 {
-  "record_id": "row-id",
   "job_id": "job-id",
   "session_id": "session-id",
   "stage_name": "normalize_messages",
@@ -310,6 +310,10 @@ Warning 始终归属于当前 session，不终止当前 stage、后续 stage、s
 `SUCCEEDED`、命令 exit code 为 `0`，增量 checkpoint 按正常成功规则推进。若同一 stage 后续
 又发生真正 error，先前 warning 与 failure 会同时保留，但该 session 仍按 error 规则丢弃内存
 业务输出。
+
+Session validation 发现重复 `step_id` 时会产生一条 session 级 `DuplicateStepId` warning，
+但仍沿用原有的 `step_id` 排序并继续执行 stages 和 sink。其他 session 结构校验错误仍按
+failure 处理。
 
 每条 pipeline 完成后都会输出以下 audit 计数：
 

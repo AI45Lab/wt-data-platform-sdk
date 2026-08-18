@@ -94,6 +94,10 @@ Warning 会按发出顺序写入最终 JSON report 的 `warnings`，包含 `job_
 保留在 report；该 session 仍遵循 error 语义，不产生业务输出。Warning message 和
 `warning_type` 必须是非空字符串。
 
+引擎本身也可能产生 session 级 warning。当前 session validation 遇到重复 `step_id` 时会发出
+一条 `DuplicateStepId` warning，随后沿用原有的 `step_id` 排序并继续执行 stages；stage 无需
+重复上报该 warning。其他 session 结构校验错误仍会中断该 session。
+
 不要通过 `raise`、Python `warnings.warn()` 或日志代替这个接口：`raise` 会中断 stage，普通
 Python warning/日志也不会进入结构化 ETL audit report。无法确定正确业务结果、patch 无法通过
 校验或继续执行可能产生错误输出时，仍必须抛出明确异常。

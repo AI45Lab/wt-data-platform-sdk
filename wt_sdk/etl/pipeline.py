@@ -128,12 +128,16 @@ class PipelineDefinition:
         *,
         collect_failures: bool = False,
     ) -> SessionResult:
-        ordered_rows, session_key = _validate_and_order_session(rows)
+        (
+            ordered_rows,
+            session_key,
+            validation_warnings,
+        ) = _validate_and_order_session(rows)
         original_by_id = {str(row["id"]): dict(row) for row in ordered_rows}
         working_by_id = deepcopy(original_by_id)
         ordered_ids = tuple(str(row["id"]) for row in ordered_rows)
         selected_ids: set[str] = set()
-        emitted_warnings: list[StageWarning] = []
+        emitted_warnings = list(validation_warnings)
         failure_stage = "__stage_execution__"
         failure_record_id: str | None = None
 
@@ -406,7 +410,7 @@ def _validate_stage_session_patch(
 
 def _validate_and_order_session(
     rows: Sequence[Mapping[str, object]],
-) -> tuple[list[dict[str, object]], SessionKey]:
+) -> tuple[list[dict[str, object]], SessionKey, tuple[StageWarning, ...]]:
     if not rows:
         raise SessionValidationError("session contains no rows")
 
@@ -419,6 +423,7 @@ def _validate_and_order_session(
 
     ids: set[str] = set()
     steps: set[int] = set()
+    duplicate_steps: set[int] = set()
     env_ids: set[str] = set()
     normalized: list[dict[str, object]] = []
     for row in rows:
@@ -437,7 +442,7 @@ def _validate_and_order_session(
             )
         step = step_id
         if step in steps:
-            raise SessionValidationError(f"session contains duplicate step_id: {step}")
+            duplicate_steps.add(step)
         steps.add(step)
         source_updated_at = row.get("source_updated_at")
         if (
@@ -459,4 +464,18 @@ def _validate_and_order_session(
             f"session {key} contains multiple env_id values: {sorted(env_ids)}"
         )
     normalized.sort(key=lambda row: row["step_id"])
-    return normalized, key
+    warnings: tuple[StageWarning, ...] = ()
+    if duplicate_steps:
+        warnings = (
+            StageWarning(
+                job_id=key.job_id,
+                session_id=key.session_id,
+                stage_name="__session_validation__",
+                warning_type="DuplicateStepId",
+                message=(
+                    "session contains duplicate step_id values: "
+                    f"{sorted(duplicate_steps)}"
+                ),
+            ),
+        )
+    return normalized, key, warnings

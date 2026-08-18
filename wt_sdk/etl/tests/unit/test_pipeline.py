@@ -544,16 +544,40 @@ def test_session_patch_contract_is_validated(stage_result, message):
         pipeline.process_session([_row()])
 
 
-def test_session_scope_validation_rejects_duplicate_step_id():
+def test_session_scope_validation_warns_and_continues_for_duplicate_step_id():
+    stage_executed = []
+
+    class CaptureExecutionStage(ETLStage):
+        name = "capture_execution"
+        output_fields = ("is_trainable",)
+
+        def transform_session(self, session, context):
+            del context
+            stage_executed.append(True)
+            return {
+                record["id"]: {"is_trainable": True}
+                for record in session
+            }
+
     pipeline = PipelineDefinition(
         name="landing_enrichment",
         version="1",
         mode=PipelineMode.LANDING,
-        stages=(SetTrainableStage(),),
+        stages=(CaptureExecutionStage(),),
     )
 
-    with pytest.raises(SessionValidationError, match="duplicate step_id"):
-        pipeline.process_session([_row(), _row(id="row-2")])
+    result = pipeline.process_session([_row(id="row-2"), _row(id="row-1")])
+
+    assert stage_executed == [True]
+    assert result.failures == ()
+    assert result.successful_rows == 2
+    assert len(result.warnings) == 1
+    warning = result.warnings[0]
+    assert warning.job_id == _row()["job_id"]
+    assert warning.session_id == "session-1"
+    assert warning.stage_name == "__session_validation__"
+    assert warning.warning_type == "DuplicateStepId"
+    assert warning.message == "session contains duplicate step_id values: [0]"
 
 
 @pytest.mark.parametrize(
