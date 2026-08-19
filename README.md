@@ -424,6 +424,13 @@ strings by default; `deserialize_json=True` returns Python values while
 preserving JSON-internal nulls. Malformed JSON remains unchanged as a string so
 a presentation option cannot make an otherwise readable row fail.
 
+Within one `WTGatewayClient` lifetime, the SDK reuses its exact dldb logical-table
+wrapper and the physical bucket objects opened by that wrapper. This applies to
+reads, writes, index maintenance, and scripts built on the client; it does not
+cache query results or change `checkout_latest`. Code that mutates the logical
+catalog through `client.session` must call
+`client.invalidate_table_cache(table_name)` before the next SDK operation.
+
 ## Client Interface
 
 ### Landing Data

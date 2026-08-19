@@ -52,7 +52,9 @@ class MockedNormalizeMessagesStage(ETLStage):
         return patches
 ```
 
-`session` 是按 `step_id` 排序、递归只读的完整 `(job_id, session_id)` 快照。返回值必须是：
+`session` 是按 `step_id` 排序、递归只读的 pipeline input scope。默认
+`COMPLETE_SESSION` 会提供完整 `(job_id, session_id)` 快照；内置 landing-to-serving pipeline
+使用 `MATCHED_ROWS`，只提供该 session 中匹配安全 pipeline predicate 的行。返回值必须是：
 
 ```python
 {
@@ -104,14 +106,21 @@ Python warning/日志也不会进入结构化 ETL audit report。无法确定正
 
 ### 可选的 `job_discovery_filter`
 
-`job_discovery_filter` 只是显式 `--job-id` 模式的保守读取优化，不是共享业务 selector。它必须
+`job_discovery_filter` 默认只是显式 `--job-id` 模式的保守读取优化，不是共享业务 selector。它必须
 是一个 dldb WHERE 行谓词，并满足：只要该 stage 可能处理某个 session，session 中至少有一行
-会匹配这个谓词。命中任意行后，引擎仍会加载并校验完整 session，再由 `transform_session()`
-作最终决定。
+会匹配这个谓词。默认 `COMPLETE_SESSION` scope 在命中任意行后仍加载并校验完整 session，再由
+`transform_session()` 作最终决定。
 
 只有 pipeline 内所有 stage 都声明安全提示时，引擎才把这些提示用 OR 合并；任意 stage 保留
 `None` 就自动退回 job 全量 discovery。无法用行级证据安全表达的跨行条件必须保留 `None`，
 不能为了性能填写可能漏 session 的过滤条件。
+
+Pipeline 可以显式声明 `input_scope=PipelineInputScope.MATCHED_ROWS`，但仅允许用于 serving，且
+所有 stage 都必须声明安全 filter。此时引擎把合并后的 predicate 同时用于 session load，只把
+匹配行送入 stage。选择该 scope 的额外责任是：pipeline 内每个 stage 都必须能仅凭匹配行得到
+正确结果，不能依赖被过滤掉的同 session 行。需要完整轨迹做跨行判断的 pipeline 必须保留默认
+`COMPLETE_SESSION`。当前内置 serving pipeline 的三个 stage 都是 trainable record-local
+transform，因此使用 `MATCHED_ROWS` + `is_trainable=true`；enrichment 仍使用完整 session。
 
 ### 不同 pipeline mode 应如何返回
 

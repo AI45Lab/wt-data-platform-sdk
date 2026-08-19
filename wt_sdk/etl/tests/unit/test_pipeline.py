@@ -9,6 +9,7 @@ from wt_sdk.etl import (
     ETLStage,
     PipelineConfigurationError,
     PipelineDefinition,
+    PipelineInputScope,
     PipelineMode,
     SessionValidationError,
     StageTransformError,
@@ -87,6 +88,7 @@ def test_canonical_serving_pipeline_builds_trace_and_tags_then_search_text():
         "build_search_text",
     ]
     assert pipeline.version == "3"
+    assert pipeline.input_scope is PipelineInputScope.MATCHED_ROWS
 
     result = pipeline.process_session([_row()])
 
@@ -193,6 +195,7 @@ def test_describe_dag_returns_machine_readable_stage_inventory():
     description = pipeline.describe_dag()
 
     assert description["pipeline_name"] == "landing_to_serving_pipeline"
+    assert description["input_scope"] == "matched_rows"
     assert description["execution_order"] == [
         "build_chosen_trace",
         "derive_job_tags",
@@ -214,6 +217,28 @@ def test_canonical_serving_pipeline_skips_session_when_no_stage_selects_rows():
 
     assert result.selected_rows == 0
     assert result.serving_records == ()
+
+
+def test_matched_row_scope_is_rejected_for_landing_pipeline():
+    with pytest.raises(PipelineConfigurationError, match="only for serving"):
+        PipelineDefinition(
+            name="invalid_landing_pipeline",
+            version="1",
+            mode=PipelineMode.LANDING,
+            stages=(UpdateIsTrainableStage(),),
+            input_scope=PipelineInputScope.MATCHED_ROWS,
+        )
+
+
+def test_matched_row_scope_requires_safe_pipeline_filter():
+    with pytest.raises(PipelineConfigurationError, match="requires a safe"):
+        PipelineDefinition(
+            name="invalid_serving_pipeline",
+            version="1",
+            mode=PipelineMode.SERVING,
+            stages=(ProcessNonTrainableStage(),),
+            input_scope=PipelineInputScope.MATCHED_ROWS,
+        )
 
 
 def test_serving_pipeline_can_publish_non_trainable_row_from_independent_stage():

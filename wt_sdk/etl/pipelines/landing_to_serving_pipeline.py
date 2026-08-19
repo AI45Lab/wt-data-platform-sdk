@@ -1,6 +1,6 @@
 """Landing-to-serving publication pipeline."""
 
-from ..models import PipelineMode
+from ..models import PipelineInputScope, PipelineMode
 from ..pipeline import PipelineDefinition
 from ..stages import (
     BuildChosenTraceStage,
@@ -16,6 +16,7 @@ def build_pipeline() -> PipelineDefinition:
         name="landing_to_serving_pipeline",
         version="3",
         mode=PipelineMode.SERVING,
+        input_scope=PipelineInputScope.MATCHED_ROWS,
         stages=(
             BuildChosenTraceStage(),
             DeriveJobTagsStage(),

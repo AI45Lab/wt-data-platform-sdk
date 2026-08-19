@@ -67,6 +67,12 @@ def _summary_payload(
         "started_at_ms": started_at_ms,
         "ended_at_ms": ended_at_ms,
         "duration_ms": max(0, ended_at_ms - started_at_ms),
+        "phase_timings_ms": {
+            "discovery": round(summary.discovery_duration_ms, 3),
+            "load": round(summary.load_duration_ms, 3),
+            "transform": round(summary.transform_duration_ms, 3),
+            "sink": round(summary.sink_duration_ms, 3),
+        },
         "buckets_scanned": summary.buckets_scanned,
         "discovery_rows": summary.discovery_rows,
         "sessions_processed": summary.sessions_processed,

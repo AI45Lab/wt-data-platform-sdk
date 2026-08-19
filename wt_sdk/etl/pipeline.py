@@ -15,7 +15,13 @@ from .exceptions import (
     SessionValidationError,
     StageTransformError,
 )
-from .models import LandingRowPatch, PipelineMode, RecordFailure, SessionResult
+from .models import (
+    LandingRowPatch,
+    PipelineInputScope,
+    PipelineMode,
+    RecordFailure,
+    SessionResult,
+)
 from .stage import (
     ETLStage,
     Session,
@@ -45,6 +51,7 @@ class PipelineDefinition:
     version: str
     mode: PipelineMode
     stages: tuple[ETLStage, ...]
+    input_scope: PipelineInputScope = PipelineInputScope.COMPLETE_SESSION
     _ordered_stages: tuple[ETLStage, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -58,6 +65,19 @@ class PipelineDefinition:
         if not isinstance(self.mode, PipelineMode):
             raise PipelineConfigurationError("pipeline mode must be a PipelineMode")
         object.__setattr__(self, "_ordered_stages", self.validate_dag(self.stages))
+        if not isinstance(self.input_scope, PipelineInputScope):
+            raise PipelineConfigurationError(
+                "pipeline input_scope must be a PipelineInputScope"
+            )
+        if self.input_scope is PipelineInputScope.MATCHED_ROWS:
+            if self.mode is not PipelineMode.SERVING:
+                raise PipelineConfigurationError(
+                    "matched-row input scope is supported only for serving pipelines"
+                )
+            if self.job_discovery_filter is None:
+                raise PipelineConfigurationError(
+                    "matched-row input scope requires a safe pipeline discovery filter"
+                )
 
     @staticmethod
     def validate_dag(stages: Sequence[ETLStage]) -> tuple[ETLStage, ...]:
@@ -117,6 +137,7 @@ class PipelineDefinition:
             "pipeline_name": self.name,
             "pipeline_version": self.version,
             "mode": self.mode.value,
+            "input_scope": self.input_scope.value,
             "execution_order": [stage.name for stage in self.ordered_stages],
             "stages": stages,
             "edges": edges,

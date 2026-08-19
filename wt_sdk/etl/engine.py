@@ -15,6 +15,7 @@ from .checkpoint import CheckpointStore
 from .exceptions import CheckpointError, ETLRunFailed, SessionValidationError
 from .models import (
     Checkpoint,
+    PipelineInputScope,
     PipelineMode,
     RecordFailure,
     RunSummary,
@@ -90,11 +91,16 @@ class ETLEngine:
 
         summary = self._new_summary(pipeline)
         source_table, target_table = self._table_names(pipeline)
-        selected_buckets = (
-            list(buckets)
-            if buckets is not None
-            else list(self.client.list_table_partitions(table=source_table))
-        )
+        if buckets is not None:
+            selected_buckets = list(buckets)
+        else:
+            discovery_started_ns = time.perf_counter_ns()
+            try:
+                selected_buckets = list(
+                    self.client.list_table_partitions(table=source_table)
+                )
+            finally:
+                summary.discovery_duration_ms += _elapsed_ms(discovery_started_ns)
         has_failures = False
         for raw_bucket in selected_buckets:
             if not isinstance(raw_bucket, int):
@@ -137,12 +143,17 @@ class ETLEngine:
         if not normalized_filter:
             raise ValueError("source filter must be a non-empty WHERE expression")
         source_table, _ = self._table_names(pipeline)
-        selected_buckets = (
-            list(buckets)
-            if buckets is not None
-            else list(self.client.list_table_partitions(table=source_table))
-        )
         summary = self._new_summary(pipeline)
+        if buckets is not None:
+            selected_buckets = list(buckets)
+        else:
+            discovery_started_ns = time.perf_counter_ns()
+            try:
+                selected_buckets = list(
+                    self.client.list_table_partitions(table=source_table)
+                )
+            finally:
+                summary.discovery_duration_ms += _elapsed_ms(discovery_started_ns)
         for bucket in selected_buckets:
             if not isinstance(bucket, int):
                 raise ValueError(
@@ -176,12 +187,17 @@ class ETLEngine:
         if start_ms < 0 or end_ms < start_ms:
             raise ValueError("manual range requires 0 <= start_ms <= end_ms")
         source_table, _ = self._table_names(pipeline)
-        selected_buckets = (
-            list(buckets)
-            if buckets is not None
-            else list(self.client.list_table_partitions(table=source_table))
-        )
         summary = self._new_summary(pipeline)
+        if buckets is not None:
+            selected_buckets = list(buckets)
+        else:
+            discovery_started_ns = time.perf_counter_ns()
+            try:
+                selected_buckets = list(
+                    self.client.list_table_partitions(table=source_table)
+                )
+            finally:
+                summary.discovery_duration_ms += _elapsed_ms(discovery_started_ns)
         has_failures = False
         for bucket in selected_buckets:
             if not isinstance(bucket, int):
@@ -238,6 +254,7 @@ class ETLEngine:
         if pipeline.job_discovery_filter is not None:
             discovery_filters.append(f"({pipeline.job_discovery_filter})")
         summary = self._new_summary(pipeline)
+        discovery_started_ns = time.perf_counter_ns()
         try:
             rows = self._query_source_with_retry(
                 description=f"discover job {normalized_job_id!r}",
@@ -258,6 +275,8 @@ class ETLEngine:
                 )
             )
             raise ETLRunFailed(summary) from exc
+        finally:
+            summary.discovery_duration_ms += _elapsed_ms(discovery_started_ns)
         summary.discovery_rows += len(rows)
         keys: set[SessionKey] = set()
         discovery_failures: list[RecordFailure] = []
@@ -467,6 +486,7 @@ class ETLEngine:
             if cursor is not None:
                 filters.append(f"id > '{_escape_sql(cursor)}'")
             try:
+                discovery_started_ns = time.perf_counter_ns()
                 page = self._query_source_with_retry(
                     description=f"discover source bucket {bucket}",
                     filter_query=" AND ".join(filters),
@@ -485,6 +505,8 @@ class ETLEngine:
                     _read_failure(SessionKey("", ""), "__discovery__", exc)
                 )
                 break
+            finally:
+                summary.discovery_duration_ms += _elapsed_ms(discovery_started_ns)
             refresh_latest = False
             if not page:
                 break
@@ -552,6 +574,7 @@ class ETLEngine:
             if cursor is not None:
                 filters.append(f"id > '{_escape_sql(cursor)}'")
             try:
+                discovery_started_ns = time.perf_counter_ns()
                 page = self._query_source_with_retry(
                     description=f"discover source bucket {bucket}",
                     filter_query=" AND ".join(filters),
@@ -570,6 +593,8 @@ class ETLEngine:
                     _read_failure(SessionKey("", ""), "__discovery__", exc)
                 )
                 break
+            finally:
+                summary.discovery_duration_ms += _elapsed_ms(discovery_started_ns)
             refresh_latest = False
             if not page:
                 break
@@ -618,10 +643,21 @@ class ETLEngine:
         dry_run: bool,
     ) -> SessionResult:
         try:
-            rows_by_key = self._load_session_batch((key,), checkout_latest=True)
+            rows_by_key = self._load_session_batch(
+                pipeline,
+                (key,),
+                checkout_latest=True,
+            )
             rows = rows_by_key[key]
         except Exception as exc:
             return _session_failure_result(key, (), exc, "__session_load__")
+        if not rows and pipeline.input_scope is PipelineInputScope.MATCHED_ROWS:
+            return SessionResult(
+                session_key=key,
+                source_rows=0,
+                selected_rows=0,
+                successful_rows=0,
+            )
         result = self._transform_loaded_session(pipeline, key, rows)
         if dry_run:
             return result
@@ -648,8 +684,10 @@ class ETLEngine:
             for offset in range(0, len(job_keys), self.session_batch_size):
                 batch = tuple(job_keys[offset : offset + self.session_batch_size])
                 batch_failed = False
+                load_started_ns = time.perf_counter_ns()
                 try:
                     rows_by_key = self._load_session_batch(
+                        pipeline,
                         batch,
                         checkout_latest=checkout_latest,
                     )
@@ -676,29 +714,51 @@ class ETLEngine:
                                 ),
                                 dry_run=dry_run,
                             )
-                else:
+                finally:
+                    summary.load_duration_ms += _elapsed_ms(load_started_ns)
+                if not batch_failed:
                     transformed: list[SessionResult] = []
                     for key in batch:
                         rows = rows_by_key.get(key, [])
                         if not rows:
-                            result = _session_failure_result(
-                                key,
-                                (),
-                                SessionValidationError(f"session not found: {key}"),
-                                "__session_load__",
-                            )
+                            if pipeline.input_scope is PipelineInputScope.MATCHED_ROWS:
+                                result = SessionResult(
+                                    session_key=key,
+                                    source_rows=0,
+                                    selected_rows=0,
+                                    successful_rows=0,
+                                )
+                            else:
+                                result = _session_failure_result(
+                                    key,
+                                    (),
+                                    SessionValidationError(f"session not found: {key}"),
+                                    "__session_load__",
+                                )
                         else:
-                            result = self._transform_loaded_session(
-                                pipeline,
-                                key,
-                                rows,
-                            )
+                            transform_started_ns = time.perf_counter_ns()
+                            try:
+                                result = self._transform_loaded_session(
+                                    pipeline,
+                                    key,
+                                    rows,
+                                )
+                            finally:
+                                summary.transform_duration_ms += _elapsed_ms(
+                                    transform_started_ns
+                                )
                         transformed.append(result)
-                    persisted = (
-                        transformed
-                        if dry_run
-                        else self._persist_session_batch(pipeline, transformed)
-                    )
+                    if dry_run:
+                        persisted = transformed
+                    else:
+                        sink_started_ns = time.perf_counter_ns()
+                        try:
+                            persisted = self._persist_session_batch(
+                                pipeline,
+                                transformed,
+                            )
+                        finally:
+                            summary.sink_duration_ms += _elapsed_ms(sink_started_ns)
                     for result in persisted:
                         summary.add_session(result, dry_run=dry_run)
                 checkout_latest = False
@@ -848,6 +908,7 @@ class ETLEngine:
 
     def _load_session_batch(
         self,
+        pipeline: PipelineDefinition,
         keys: Sequence[SessionKey],
         *,
         checkout_latest: bool,
@@ -866,6 +927,11 @@ class ETLEngine:
             f"job_id = '{_escape_sql(job_id)}' "
             f"AND session_id IN ({session_values})"
         )
+        if pipeline.input_scope is PipelineInputScope.MATCHED_ROWS:
+            # MATCHED_ROWS is validated to have one safe pipeline predicate.
+            # The canonical serving pipeline uses this to avoid loading the
+            # non-trainable majority of each discovered session.
+            query = f"{query} AND ({pipeline.job_discovery_filter})"
         rows = self._query_source_with_retry(
             description=(
                 f"load {len(keys)} session(s) for job {job_id!r}"
@@ -942,6 +1008,10 @@ class ETLEngine:
 
 def _validate_page_size(page_size: int) -> None:
     _validate_positive_int(page_size, "page_size")
+
+
+def _elapsed_ms(started_ns: int) -> float:
+    return max(0, time.perf_counter_ns() - started_ns) / 1_000_000
 
 
 def _validate_positive_int(value: int, name: str) -> None:

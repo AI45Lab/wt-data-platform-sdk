@@ -14,6 +14,13 @@ class PipelineMode(str, Enum):
     SERVING = "serving"
 
 
+class PipelineInputScope(str, Enum):
+    """Rows loaded for each discovered session before stage execution."""
+
+    COMPLETE_SESSION = "complete_session"
+    MATCHED_ROWS = "matched_rows"
+
+
 @dataclass(frozen=True)
 class LandingRowPatch:
     record_id: str
@@ -64,6 +71,10 @@ class RunSummary:
     failed_rows: int = 0
     landing_rows_updated: int = 0
     serving_rows_upserted: int = 0
+    discovery_duration_ms: float = 0.0
+    load_duration_ms: float = 0.0
+    transform_duration_ms: float = 0.0
+    sink_duration_ms: float = 0.0
     warnings: list[StageWarning] = field(default_factory=list)
     failures: list[RecordFailure] = field(default_factory=list)
     dirty_sessions: set[SessionKey] = field(default_factory=set)
@@ -114,6 +125,10 @@ class RunSummary:
         self.failed_rows += other.failed_rows
         self.landing_rows_updated += other.landing_rows_updated
         self.serving_rows_upserted += other.serving_rows_upserted
+        self.discovery_duration_ms += other.discovery_duration_ms
+        self.load_duration_ms += other.load_duration_ms
+        self.transform_duration_ms += other.transform_duration_ms
+        self.sink_duration_ms += other.sink_duration_ms
         self.warnings.extend(other.warnings)
         self.failures.extend(other.failures)
         self.dirty_sessions.update(other.dirty_sessions)

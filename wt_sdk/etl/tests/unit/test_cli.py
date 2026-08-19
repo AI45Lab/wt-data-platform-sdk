@@ -344,6 +344,10 @@ def test_summary_payload_contains_audit_counts_and_failed_row_ids():
         successful_rows=2,
         failed_rows=1,
         serving_rows_upserted=2,
+        discovery_duration_ms=10.1254,
+        load_duration_ms=20.5,
+        transform_duration_ms=3.0,
+        sink_duration_ms=7.7777,
         dirty_sessions={SessionKey("job-1", "session-1")},
         failures=[
             RecordFailure(
@@ -369,6 +373,12 @@ def test_summary_payload_contains_audit_counts_and_failed_row_ids():
     assert payload["started_at_ms"] == 1_000
     assert payload["ended_at_ms"] == 1_250
     assert payload["duration_ms"] == 250
+    assert payload["phase_timings_ms"] == {
+        "discovery": 10.125,
+        "load": 20.5,
+        "transform": 3.0,
+        "sink": 7.778,
+    }
     assert payload["dirty_sessions"] == [
         {"job_id": "job-1", "session_id": "session-1"}
     ]
