@@ -1,14 +1,17 @@
-"""Canonical enrichment coverage using reusable contributor-owned fixtures."""
+"""Canonical trainability coverage for mock and contributor-owned sessions."""
 
+import json
 import os
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
 from dldb.utils import stable_hash
 import pytest
 
-from wt_sdk import WTGatewayClient
+from wt_sdk import LandingRecord, WTGatewayClient
 from wt_sdk.core.schemas import SERVING_PARTITIONS
 from wt_sdk.etl import (
     ETLEngine,
@@ -21,6 +24,7 @@ from wt_sdk.etl.tests.integration.helpers import (
     LANDING_TEST_TABLE,
     SERVING_TEST_TABLE,
     TEST_TABLE_CONFIG,
+    cleanup_test_trajectory,
 )
 
 
@@ -39,7 +43,7 @@ FIXTURE_SESSION_IDS = (
     "mock_xq_case_05",
 )
 
-pytestmark = pytest.mark.skipif(
+requires_xquer_fixtures = pytest.mark.skipif(
     os.getenv("WT_SDK_RUN_XQUER_FIXTURES") != "1",
     reason="set WT_SDK_RUN_XQUER_FIXTURES=1 to query fixed xquer fixtures",
 )
@@ -157,6 +161,173 @@ def _render_results(results: list[tuple[object, ...]]) -> str:
     return "\n".join(rendered)
 
 
+def _mock_session_records(
+    job_id: str,
+    session_id: str,
+    suffix: str,
+    source_updated_at: int,
+) -> list[LandingRecord]:
+    """Build one chain with equivalent user-content representations."""
+
+    string_user = {"role": "user", "content": "integration task"}
+    block_user = {
+        "role": "user",
+        "content": [{"type": "text", "text": "integration task"}],
+    }
+    assistant = {"role": "assistant", "content": "integration answer"}
+    metadata = json.dumps(
+        {
+            "source": "trainability-mock-session-integration-test",
+            "env_state": json.dumps({"status_code": 200}),
+        }
+    )
+    common = {
+        "dataset_type": "ETL_TRAINABILITY_MOCK_SESSION_TEST",
+        "session_id": session_id,
+        "job_id": job_id,
+        "agent_model": "trainability-mock-session-model",
+        "env_name": "trainability-mock-session-test",
+        "is_truncated": False,
+        "is_trainable": False,
+        "meta_json": metadata,
+    }
+    created_at = source_updated_at // 1000
+    return [
+        LandingRecord(
+            **common,
+            id=f"mock-session-completed-{suffix}",
+            created_at=created_at,
+            source_updated_at=source_updated_at,
+            step_id=1,
+            is_terminal=True,
+            messages=json.dumps([string_user]),
+            is_session_completed=True,
+            reward=0.625,
+        ),
+        LandingRecord(
+            **common,
+            id=f"mock-session-tail-{suffix}",
+            created_at=created_at + 1,
+            source_updated_at=source_updated_at,
+            step_id=2,
+            is_terminal=False,
+            messages=json.dumps([block_user, assistant]),
+            is_session_completed=False,
+        ),
+    ]
+
+
+def _query_mock_session_rows(
+    client: WTGatewayClient,
+    job_id: str,
+) -> list[dict[str, object]]:
+    return client.query_data(
+        filter_query=f"job_id = '{_sql_quote(job_id)}'",
+        columns=[
+            "id",
+            "job_id",
+            "session_id",
+            "step_id",
+            "source_updated_at",
+            "messages",
+            "is_session_completed",
+            "is_trainable",
+            "meta_json",
+            "reward",
+        ],
+        partition=job_id,
+        order_by="step_id",
+        table=LANDING_TEST_TABLE,
+        checkout_latest=True,
+        exclude_none=False,
+        deserialize_json=False,
+    )
+
+
+def test_mock_session_normalizes_user_content_and_warns_on_early_completion():
+    suffix = uuid.uuid4().hex
+    job_id = f"trainability#integration#mock-session#{suffix}"
+    session_id = f"trainability-mock-session-{suffix}"
+    initial_timestamp = int(time.time() * 1000) - 10_000
+    completed_id = f"mock-session-completed-{suffix}"
+    tail_id = f"mock-session-tail-{suffix}"
+
+    with WTGatewayClient(config=TEST_TABLE_CONFIG) as client:
+        assert client.config.tables.profile == "test"
+        assert client.config.tables.landing_table == LANDING_TEST_TABLE
+        assert client.config.tables.serving_table == SERVING_TEST_TABLE
+        try:
+            client.ingest_landing_batch(
+                _mock_session_records(
+                    job_id,
+                    session_id,
+                    suffix,
+                    initial_timestamp,
+                )
+            )
+            before = _query_mock_session_rows(client, job_id)
+            assert len(before) == 2
+            before_by_id = {str(row["id"]): row for row in before}
+
+            first = ETLEngine(client).run_sessions(
+                load_pipeline("landing_enrichment_pipeline"),
+                [SessionKey(job_id, session_id)],
+            )
+            assert first.failed_rows == 0
+            assert first.source_rows == 2
+            assert first.landing_rows_updated == 1
+            assert first.sessions_warned == 1
+            assert first.warning_count == 1
+            warning = first.warnings[0]
+            assert warning.stage_name == "update_is_trainable"
+            assert warning.warning_type == "StageWarning"
+            assert warning.message == (
+                "is_session_completed is not set on the maximum step_id record; "
+                f"completed_record_id='{completed_id}', completed_step_id=1, "
+                "max_step_id=2; continuing trainability processing"
+            )
+
+            after_first = _query_mock_session_rows(client, job_id)
+            after_first_by_id = {
+                str(row["id"]): row for row in after_first
+            }
+            assert after_first_by_id[completed_id] == before_by_id[completed_id]
+            assert after_first_by_id[tail_id]["is_trainable"] is True
+            assert after_first_by_id[tail_id]["reward"] == 0.625
+            assert (
+                after_first_by_id[tail_id]["source_updated_at"]
+                > before_by_id[tail_id]["source_updated_at"]
+            )
+
+            second = ETLEngine(client).run_sessions(
+                load_pipeline("landing_enrichment_pipeline"),
+                [SessionKey(job_id, session_id)],
+            )
+            assert second.failed_rows == 0
+            assert second.landing_rows_updated == 0
+            assert second.sessions_warned == 1
+            assert second.warning_count == 1
+            after_second = _query_mock_session_rows(client, job_id)
+            assert {
+                row["id"]: row["source_updated_at"] for row in after_second
+            } == {
+                row["id"]: row["source_updated_at"] for row in after_first
+            }
+
+            print(
+                "\nMock-session trainability result: "
+                "completed_step=1, max_step=2, warning_count=1, "
+                "equivalent_user_content_chain=True, trainable_steps=2, "
+                "reward=0.625, "
+                f"first_updated={first.landing_rows_updated}, "
+                f"second_updated={second.landing_rows_updated}"
+            )
+        finally:
+            cleanup_test_trajectory(client, job_id)
+            assert _query_mock_session_rows(client, job_id) == []
+
+
+@requires_xquer_fixtures
 def test_xquer_fixtures_through_canonical_pipeline_are_repeatable():
     stage = UpdateIsTrainableStage()
     with WTGatewayClient(config=TEST_TABLE_CONFIG) as client:
