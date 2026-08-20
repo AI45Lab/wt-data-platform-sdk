@@ -57,6 +57,30 @@ def test_completed_200_session_marks_only_the_append_only_chain_tail():
     }
 
 
+def test_equivalent_user_text_content_shapes_share_one_chain():
+    string_user = {"role": "user", "content": "hello"}
+    block_user = {
+        "role": "user",
+        "content": [{"type": "text", "text": "hello"}],
+    }
+    response = {"role": "assistant", "content": "answer"}
+    session = (
+        _row("row-1", 1, [string_user], completed=False, status_code=200),
+        _row(
+            "row-2",
+            2,
+            [block_user, response],
+            completed=True,
+            status_code=200,
+        ),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "row-1": {"is_trainable": False},
+        "row-2": {"is_trainable": True},
+    }
+
+
 @pytest.mark.parametrize("subagent_step", [1, 2, 3, 4, 5, 20, 100])
 def test_single_record_side_chain_is_not_trainable_at_any_step(
     subagent_step: int,
@@ -127,21 +151,29 @@ def test_single_record_root_session_at_step_one_remains_trainable():
     }
 
 
-def test_completion_marker_before_max_step_raises_stage_error():
+def test_completion_marker_before_max_step_warns_and_continues():
     first = {"role": "user", "content": "question"}
     response = {"role": "assistant", "content": "answer"}
     session = (
         _row("row-1", 1, [first], completed=True, status_code=200),
         _row("row-2", 2, [first, response], completed=False, status_code=200),
     )
+    context = _context()
 
-    with pytest.raises(
-        StageTransformError,
-        match="is_session_completed must be set on the maximum step_id record",
-    ) as exc:
-        UpdateIsTrainableStage().transform_session(session, _context())
+    assert UpdateIsTrainableStage().transform_session(session, context) == {
+        "row-1": {"is_trainable": False},
+        "row-2": {"is_trainable": True},
+    }
 
-    assert exc.value.record_id == "row-1"
+    assert len(context.emitted_warnings) == 1
+    warning = context.emitted_warnings[0]
+    assert warning.warning_type == "CompletionMarkerBeforeMaxStep"
+    assert warning.stage_name == "__stage__"
+    assert warning.message == (
+        "is_session_completed is not set on the maximum step_id record; "
+        "completed_record_id='row-1', completed_step_id=1, max_step_id=2; "
+        "continuing trainability processing"
+    )
 
 
 def test_multiple_completion_markers_raise_stage_error():

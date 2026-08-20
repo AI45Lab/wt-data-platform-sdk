@@ -15,13 +15,15 @@ from ..stage import ETLStage, Record, Session, SessionPatch, StageContext
 class UpdateIsTrainableStage(ETLStage):
     """Mark the tail row of every append-only chain in a completed session.
 
-    Inputs are grouped into append-only chains with exact message-prefix
-    matching. Each chain tail contains the complete messages of one
-    structurally separated trajectory. A later strict prefix of an active chain
-    tail is treated as a retry reset, so the abandoned longer row is not a
-    trainable tail. Identical message snapshots are separate occurrences rather
-    than append operations. In a multi-chain session, every independent
-    one-record chain is treated as a one-step subagent and is not trainable.
+    Inputs are grouped into append-only chains with canonical message-prefix
+    matching. Equivalent user text represented as either a string or one text
+    content block is normalized before matching. Each chain tail contains the
+    complete messages of one structurally separated trajectory. A later strict
+    prefix of an active chain tail is treated as a retry reset, so the abandoned
+    longer row is not a trainable tail. Identical message snapshots are separate
+    occurrences rather than append operations. In a multi-chain session, every
+    independent one-record chain is treated as a one-step subagent and is not
+    trainable.
     Rows with an explicitly non-200 gateway status are excluded from chain
     detection without preventing the remaining rows from being processed. This
     stage copies the final session row's non-null ``reward`` to every trainable
@@ -47,8 +49,7 @@ class UpdateIsTrainableStage(ETLStage):
         session: Session,
         context: StageContext,
     ) -> SessionPatch:
-        del context
-        if not _is_completed_session(session):
+        if not _is_completed_session(session, context):
             return {}
 
         eligible_records = tuple(
@@ -248,7 +249,10 @@ def _is_status_code_200(value: object) -> bool:
     return False
 
 
-def _is_completed_session(session: Sequence[Record]) -> bool:
+def _is_completed_session(
+    session: Sequence[Record],
+    context: StageContext,
+) -> bool:
     if not session:
         raise StageTransformError("session must contain at least one row")
 
@@ -279,9 +283,12 @@ def _is_completed_session(session: Sequence[Record]) -> bool:
     if completed_step_id is None:
         return False
     if completed_step_id != max_step_id:
-        raise StageTransformError(
-            "is_session_completed must be set on the maximum step_id record",
-            record_id=completed_record_id,
+        context.warn(
+            "is_session_completed is not set on the maximum step_id record; "
+            f"completed_record_id={completed_record_id!r}, "
+            f"completed_step_id={completed_step_id}, max_step_id={max_step_id}; "
+            "continuing trainability processing",
+            warning_type="CompletionMarkerBeforeMaxStep",
         )
     return True
 
@@ -309,13 +316,26 @@ def _decode_messages(value: object, record_id: str) -> list[Any]:
 
 def _message_fingerprint(message: Any) -> str:
     canonical = json.dumps(
-        message,
+        _normalize_message_for_prefix_matching(message),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         default=str,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _normalize_message_for_prefix_matching(message: Any) -> Any:
+    """Canonicalize equivalent user text shapes without mutating the input."""
+
+    if not isinstance(message, Mapping) or message.get("role") != "user":
+        return message
+    content = message.get("content")
+    if not isinstance(content, str):
+        return message
+    normalized = dict(message)
+    normalized["content"] = [{"type": "text", "text": content}]
+    return normalized
 
 
 def _latest_eligible_terminal(
