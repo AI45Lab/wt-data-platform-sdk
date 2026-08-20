@@ -167,7 +167,7 @@ def test_completion_marker_before_max_step_warns_and_continues():
 
     assert len(context.emitted_warnings) == 1
     warning = context.emitted_warnings[0]
-    assert warning.warning_type == "StageWarning"
+    assert warning.warning_type == "CompletionMarkerBeforeMaxStep"
     assert warning.stage_name == "__stage__"
     assert warning.message == (
         "is_session_completed is not set on the maximum step_id record; "

@@ -280,7 +280,7 @@ def test_mock_session_normalizes_user_content_and_warns_on_early_completion():
             assert first.warning_count == 1
             warning = first.warnings[0]
             assert warning.stage_name == "update_is_trainable"
-            assert warning.warning_type == "StageWarning"
+            assert warning.warning_type == "CompletionMarkerBeforeMaxStep"
             assert warning.message == (
                 "is_session_completed is not set on the maximum step_id record; "
                 f"completed_record_id='{completed_id}', completed_step_id=1, "
@@ -307,6 +307,10 @@ def test_mock_session_normalizes_user_content_and_warns_on_early_completion():
             assert second.landing_rows_updated == 0
             assert second.sessions_warned == 1
             assert second.warning_count == 1
+            assert (
+                second.warnings[0].warning_type
+                == "CompletionMarkerBeforeMaxStep"
+            )
             after_second = _query_mock_session_rows(client, job_id)
             assert {
                 row["id"]: row["source_updated_at"] for row in after_second

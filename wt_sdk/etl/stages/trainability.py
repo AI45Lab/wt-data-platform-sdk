@@ -288,6 +288,7 @@ def _is_completed_session(
             f"completed_record_id={completed_record_id!r}, "
             f"completed_step_id={completed_step_id}, max_step_id={max_step_id}; "
             "continuing trainability processing",
+            warning_type="CompletionMarkerBeforeMaxStep",
         )
     return True
 
