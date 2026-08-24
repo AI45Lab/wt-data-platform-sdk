@@ -12,7 +12,7 @@ def build_pipeline() -> PipelineDefinition:
         name="landing_enrichment_pipeline",
         version="1",
         mode=PipelineMode.LANDING,
-        stages=(UpdateIsTrainableStage(), FreeCotStage()),
+        stages=(FreeCotStage(), UpdateIsTrainableStage()),
     )
 
 

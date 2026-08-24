@@ -25,14 +25,13 @@ class FreeCotStage(ETLStage):
     version = "1"
     required_fields = (
         "agent_model",
-        "is_trainable",
         "is_session_completed",
         "messages",
         "session_id",
         "step_id",
     )
     output_fields = ("messages",)
-    dependencies = ("update_is_trainable",)
+    dependencies = ()
     job_discovery_filter = "is_session_completed = true"
 
     def __init__(
@@ -56,8 +55,6 @@ class FreeCotStage(ETLStage):
     def transform_session(self, session: Session, context: StageContext) -> SessionPatch:
         del context
         if not any(record.get("is_session_completed") is True for record in session):
-            return {}
-        if not any(record.get("is_trainable") is True for record in session):
             return {}
         decoded_by_signature: dict[str, str] = {}
         model_by_signature: dict[str, str] = {}

@@ -99,7 +99,7 @@ def test_freecot_decodes_signatures_from_all_blocks_in_trainable_session():
         assert set(patch) == {"messages"}
 
 
-def test_freecot_skips_session_without_trainable_records():
+def test_freecot_decodes_completed_session_without_trainable_records():
     client = ReplayClient()
 
     patches = FreeCotStage(replay_client=client).transform_session(
@@ -115,8 +115,11 @@ def test_freecot_skips_session_without_trainable_records():
         _context(),
     )
 
-    assert patches == {}
-    assert client.calls == []
+    assert sorted(signature for signature, _, _ in client.calls) == [
+        "encrypted-signature",
+        "sig-2",
+    ]
+    assert set(patches) == {"not-trainable-1", "not-trainable-2"}
 
 
 def test_freecot_skips_incomplete_sessions_without_calling_replay_service():
