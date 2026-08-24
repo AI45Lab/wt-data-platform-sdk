@@ -19,7 +19,14 @@ from .exceptions import (
     SessionValidationError,
     StageTransformError,
 )
-from .models import Checkpoint, PipelineMode, RecordFailure, RunSummary, SessionResult
+from .models import (
+    Checkpoint,
+    PipelineInputScope,
+    PipelineMode,
+    RecordFailure,
+    RunSummary,
+    SessionResult,
+)
 from .pipeline import PipelineDefinition
 from .pipelines import list_pipeline_names, load_pipeline
 from .stage import (
@@ -30,6 +37,7 @@ from .stage import (
     SessionKey,
     SessionPatch,
     StageContext,
+    StageWarning,
 )
 from .stages import (
     BuildChosenTraceStage,
@@ -56,6 +64,7 @@ __all__ = [
     "InMemoryCheckpointStore",
     "PipelineConfigurationError",
     "PipelineDefinition",
+    "PipelineInputScope",
     "PipelineMode",
     "Record",
     "RecordFailure",
@@ -69,6 +78,7 @@ __all__ = [
     "SessionValidationError",
     "StageContext",
     "StageTransformError",
+    "StageWarning",
     "TEST_CHECKPOINT_TABLE",
     "UpdateIsTrainableStage",
     "list_pipeline_names",

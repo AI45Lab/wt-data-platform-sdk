@@ -39,16 +39,22 @@ class MockedNormalizeMessagesStage(ETLStage):
         session: Session,
         context: StageContext,
     ) -> SessionPatch:
-        del context
         patches = {}
         for record in session:
-            desired_messages = mocked_normalize(record["messages"])
+            desired_messages, used_fallback = mocked_normalize(record["messages"])
+            if used_fallback:
+                context.warn(
+                    "messages used fallback normalization",
+                    warning_type="FallbackNormalization",
+                )
             if desired_messages != record["messages"]:
                 patches[record["id"]] = {"messages": desired_messages}
         return patches
 ```
 
-`session` 是按 `step_id` 排序、递归只读的完整 `(job_id, session_id)` 快照。返回值必须是：
+`session` 是按 `step_id` 排序、递归只读的 pipeline input scope。默认
+`COMPLETE_SESSION` 会提供完整 `(job_id, session_id)` 快照；内置 landing-to-serving pipeline
+使用 `MATCHED_ROWS`，只提供该 session 中匹配安全 pipeline predicate 的行。返回值必须是：
 
 ```python
 {
@@ -65,16 +71,56 @@ Stage 自己决定处理零行、一行或多行。返回 `{}` 表示本 stage �
 统一合并进内存 working session；下一个 stage 收到的是前序 stage 全部处理完成后的新快照。
 同一个 stage 内不会边遍历边改变输入，因此结果不依赖行遍历顺序。
 
+### 非阻断 warning
+
+当数据存在需要交给上游写入方分析的异常，但 stage 仍能确定并继续执行正确的业务逻辑时，使用
+`context.warn()` 上报结构化 warning：
+
+```python
+context.warn(
+    "response missing optional provider metadata; used fallback",
+    warning_type="ProviderMetadataFallback",  # 可选，默认 StageWarning
+)
+```
+
+`context.warn()` 返回 `None`，不会中断当前函数。Stage 在调用后继续执行剩余逻辑并正常返回
+patch；后续 stage、当前 session 的 sink 和其他 session 都照常执行。Warning 不等同于 patch，
+不会单独选择 record，也不会改变业务输出。
+
+Warning 会按发出顺序写入最终 JSON report 的 `warnings`，包含 `job_id`、`session_id`、
+`stage_name`、`warning_type` 和 `message`。Report 同时给出 `warning_count` 和
+`sessions_warned`。仅有 warning 的 pipeline 状态仍是
+`SUCCEEDED`，命令 exit code 仍为 `0`，checkpoint 按正常成功规则推进。
+
+如果 stage 先发出 warning，随后遇到真正无法继续的错误，已经发出的 warning 与 failure 都会
+保留在 report；该 session 仍遵循 error 语义，不产生业务输出。Warning message 和
+`warning_type` 必须是非空字符串。
+
+引擎本身也可能产生 session 级 warning。当前 session validation 遇到重复 `step_id` 时会发出
+一条 `DuplicateStepId` warning，随后沿用原有的 `step_id` 排序并继续执行 stages；stage 无需
+重复上报该 warning。其他 session 结构校验错误仍会中断该 session。
+
+不要通过 `raise`、Python `warnings.warn()` 或日志代替这个接口：`raise` 会中断 stage，普通
+Python warning/日志也不会进入结构化 ETL audit report。无法确定正确业务结果、patch 无法通过
+校验或继续执行可能产生错误输出时，仍必须抛出明确异常。
+
 ### 可选的 `job_discovery_filter`
 
-`job_discovery_filter` 只是显式 `--job-id` 模式的保守读取优化，不是共享业务 selector。它必须
+`job_discovery_filter` 默认只是显式 `--job-id` 模式的保守读取优化，不是共享业务 selector。它必须
 是一个 dldb WHERE 行谓词，并满足：只要该 stage 可能处理某个 session，session 中至少有一行
-会匹配这个谓词。命中任意行后，引擎仍会加载并校验完整 session，再由 `transform_session()`
-作最终决定。
+会匹配这个谓词。默认 `COMPLETE_SESSION` scope 在命中任意行后仍加载并校验完整 session，再由
+`transform_session()` 作最终决定。
 
 只有 pipeline 内所有 stage 都声明安全提示时，引擎才把这些提示用 OR 合并；任意 stage 保留
 `None` 就自动退回 job 全量 discovery。无法用行级证据安全表达的跨行条件必须保留 `None`，
 不能为了性能填写可能漏 session 的过滤条件。
+
+Pipeline 可以显式声明 `input_scope=PipelineInputScope.MATCHED_ROWS`，但仅允许用于 serving，且
+所有 stage 都必须声明安全 filter。此时引擎把合并后的 predicate 同时用于 session load，只把
+匹配行送入 stage。选择该 scope 的额外责任是：pipeline 内每个 stage 都必须能仅凭匹配行得到
+正确结果，不能依赖被过滤掉的同 session 行。需要完整轨迹做跨行判断的 pipeline 必须保留默认
+`COMPLETE_SESSION`。当前内置 serving pipeline 的三个 stage 都是 trainable record-local
+transform，因此使用 `MATCHED_ROWS` + `is_trainable=true`；enrichment 仍使用完整 session。
 
 ### 不同 pipeline mode 应如何返回
 
@@ -119,7 +165,8 @@ def transform_session(self, session, context):
 - JSON schema 字段在 ETL 边界是 JSON 字符串；解析后必须重新序列化，不能返回 Python
   `dict/list`。
 - 同一 pipeline 内一个 output field 只能由一个 stage 拥有。
-- 坏数据应抛出明确异常；只有业务明确为 best effort 的输出才返回 `None`。
+- 无法继续计算出正确结果的坏数据应抛出明确异常；可安全降级但需要上游分析的数据使用
+  `context.warn()`；只有业务明确为 best effort 的输出才返回 `None`。
 - Stage 计算或校验失败时，当前 session 不产生任何业务输出，依赖它的 stage 不会继续执行。
   已完成的内存 patch 也不会落库。
 

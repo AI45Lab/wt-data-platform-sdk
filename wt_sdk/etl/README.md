@@ -1,8 +1,8 @@
 # (WIP)WT ETL v1 使用与运维说明
 
 本目录提供 Wind Tunnel 轨迹数据的 ETL v1 引擎。它负责从 landing
-发现发生过变化的数据，以 `(job_id, session_id)` 为完整轨迹范围加载，依次执行
-stage，并由引擎统一持久化到 landing 或 serving。
+发现发生过变化的数据，以 `(job_id, session_id)` 分组并加载 pipeline 声明的 input scope，
+依次执行 stage，并由引擎统一持久化到 landing 或 serving。
 
 本文面向 ETL pipeline 的使用、测试与运维。如果要开发或接入新 stage，请直接阅读
 [`README_STAGE_DEVELOPMENT.md`](README_STAGE_DEVELOPMENT.md)，其中包含 stage contract、
@@ -88,22 +88,25 @@ ETL 的正确运行要求以下约束始终成立：
 - 一条完整轨迹的逻辑主键是 `(job_id, session_id)`。`session_id` 不要求全局唯一。
 - 一个 session 内 `id` 必须唯一，`step_id` 必须非空且唯一，记录按 `step_id` 排序。
 - 一个 session 最多对应一个非空 `env_id`。
-- discovery 只读取 `id/job_id/session_id/source_updated_at`，发现任意一行变化后再完整
-  加载整个 session。这保证 session 级 stage 看见完整轨迹。
+- discovery 只读取 `id/job_id/session_id/source_updated_at`。Landing enrichment 在发现任意
+  一行变化后完整加载 session；内置 serving pipeline 按 session 分组，但直接加载其中
+  `is_trainable=true` 的行，因为当前三个 serving stage 都只依赖并发布这些行。
 - `--job-id` 模式允许 stage 声明保守的 `job_discovery_filter`：当前 enrichment 用
   `is_session_completed=true` 发现完整 session，serving 用 `is_trainable=true`。只有 pipeline
   内每个 stage 都声明安全提示时才收窄，否则退回 job 全量 discovery；提示不是业务 selector。
-- 同一 job 的 session 以有界批次合并读取（默认 25），随后按 `(job_id, session_id)` 拆回完整
-  session。Stage 仍然一次只接收一个 session。
+- 同一 job 的 session 以有界批次合并读取（默认 25），随后按 `(job_id, session_id)` 拆分。
+  Enrichment stage 收到完整 session；内置 serving stage 收到该 session 的 trainable 行集合。
+  Stage 仍然一次只接收一个 session scope。
 - 同一读取批次完成全部 session transform 后，内容完全相同的 landing patches 会合并成有界的
   `job_id + id IN (...)` update；多个 session 的 serving records 也会合并 upsert。默认每个
   sink 请求最多 100 行。单个 sink 批次失败时仍逐 record 记录 failure，已成功批次可安全重放。
-- Pipeline 按 DAG 逐个 stage 执行。每个 stage 都读取当前完整 working session；它对所有行
+- Pipeline 按 DAG 逐个 stage 执行。每个 stage 都读取当前 pipeline input scope 的完整 working
+  session；它对所有行
   返回的 patches 通过校验并统一合并后，下一个 stage 才开始，因此后序 stage 能看到前序
   stage 对整个 session 的完整结果。
 - Stage 输入递归只读，业务代码只能返回 `{record_id: {field: desired_value}}`。Stage 自己控制
   处理零行、一行或多行；引擎负责校验、合并以及最终持久化。
-- `--page-size` 只限制每页 discovery 轻量行数，不限制完整 session 大小。同一 session 的
+- `--page-size` 只限制每页 discovery 轻量行数，不限制随后加载的 session scope 大小。同一 session 的
   discovery 行可以落在不同 page；引擎在当前 bucket/run 内按 `(job_id, session_id)` 去重，
   第一次发现时就重新加载整个 session，因此不会只处理半条轨迹，也不会因跨页重复处理。
 - `source_updated_at` 表示 landing 来源数据最后一次业务变化；landing enrichment 也是
@@ -127,7 +130,7 @@ ETL 的正确运行要求以下约束始终成立：
 | `landing_enrichment_pipeline` + 任意模式 + `--dry-run` | 只读 | **不变** | 不写 | 不写或只读，不推进 |
 | `landing_enrichment_pipeline` + 手动模式正式运行 | 只更新产生非空 diff 的行 | **仅实际更新成功的行改变** | 不写 | 不写 |
 | `landing_enrichment_pipeline` + incremental 正式运行 | 只更新产生非空 diff 的行 | **仅实际更新成功的行改变** | 不写 | 成功后推进 |
-| 同一次命令先 enrichment、再 serving | enrichment 有实际 patch 时更新 | **有实际 landing patch 的行改变** | 后续 serving 立即发布变化后的完整 session | incremental 才推进各自 checkpoint |
+| 同一次命令先 enrichment、再 serving | enrichment 有实际 patch 时更新 | **有实际 landing patch 的行改变** | 后续 serving 立即发布变化后的 trainable rows | incremental 才推进各自 checkpoint |
 
 “stage 被执行”不等于时间戳一定变化。Landing engine 会先比较 patch 与当前值；patch 为空或
 所有值都相同时，不调用 `update_landing()`，因此不会刷新 `source_updated_at`。反过来，只要
@@ -254,15 +257,16 @@ default: settle_delay = 0, cutoff = run_started_at
 - `--session job-a s1 --session job-b s2`：跨多个 job 精确指定任意 job/session pair；
 - `--start-time ... [--end-time ...]`
 - `--source-filter "..."`：高级 dldb WHERE predicate，对每个 landing HASH bucket 做
-  discovery，再按发现的 `(job_id, session_id)` 加载完整 session；
+  discovery，再按发现的 `(job_id, session_id)` 加载 pipeline 声明的 session input scope；
 
 `--job-id`/`--session-id` 使用空格分隔的 list，也允许重复传参；多个 job 各自只处理部分
 session 时使用可重复的 `--session JOB_ID SESSION_ID`，避免依赖不全局唯一的 session ID 猜测
 归属。结构化的 job/session/time 参数仍是默认推荐：它们容易校验、含义清晰，并能在 job 模式下
 直接 HASH pruning。`--source-filter` 不替代这些参数，只用于它们不能自然表达的临时筛选；
 它接收 WHERE 条件表达式而不是完整 `SELECT`，会扫描所有现有 landing HASH buckets，且不写
-checkpoint。条件命中的行只用于发现 session；一旦某行命中，引擎仍加载完整 session。每个
-stage 收到完整快照，并自行决定为哪些 record ID 返回 patch；pipeline 不设置共享业务过滤器。
+checkpoint。条件命中的行只用于发现 session；一旦某行命中，引擎会加载 pipeline 声明的
+session input scope。默认及 enrichment 是完整 session；内置 serving 是该 session 中
+`is_trainable=true` 的行。每个 stage 自行决定为哪些 record ID 返回 patch；
 至少被一个 stage 返回 patch 的 record 才进入输出流程。三类入口 `--job-id`、`--start-time`、
 `--source-filter` 互斥。
 
@@ -293,24 +297,56 @@ v1 不新增持久化 failure 表，但每条 pipeline 的每次实际执行都�
 }
 ```
 
+Stage 还可以通过 `context.warn()` 上报不阻断执行的数据质量 warning。它们与 failure 分开存储：
+
+```json
+{
+  "job_id": "job-id",
+  "session_id": "session-id",
+  "stage_name": "normalize_messages",
+  "warning_type": "FallbackNormalization",
+  "message": "messages used fallback normalization"
+}
+```
+
+Warning 始终归属于当前 session，不终止当前 stage、后续 stage、sink 或其他 session，也不计入
+`failed_rows`/`sessions_failed`。只有 warning 的执行仍为
+`SUCCEEDED`、命令 exit code 为 `0`，增量 checkpoint 按正常成功规则推进。若同一 stage 后续
+又发生真正 error，先前 warning 与 failure 会同时保留，但该 session 仍按 error 规则丢弃内存
+业务输出。
+
+Session validation 发现重复 `step_id` 时会产生一条 session 级 `DuplicateStepId` warning，
+但仍沿用原有的 `step_id` 排序并继续执行 stages 和 sink。其他 session 结构校验错误仍按
+failure 处理。
+
 每条 pipeline 完成后都会输出以下 audit 计数：
 
 - `discovery_rows_read`：增量/时间范围 discovery 读取的轻量行数；定向 session 模式可能为 0。
-- `source_rows_read`：加载完整 session 后实际送入 pipeline 的 source 行数。
+- `source_rows_read`：加载 pipeline session input scope 后实际送入 pipeline 的 source 行数。
 - `rows_selected`：至少被一个 stage 返回非空 patch 的 record ID 数量。
 - `rows_succeeded`：被 stage 选择，且 session transform、输出校验和实际 sink 均成功的行数；
   dry-run 时表示 stage/output 成功，不包含真实 sink 写入。
 - `rows_failed`：失败事件数。Session-level stage 无法归因到单行时，failure 的 `record_id` 可以
   为 null，但始终保留 job/session scope。
+- `warnings_emitted`：stage 发出的 warning 事件数；同一 session 可以产生多条。它与 report
+  顶层的 `warning_count` 以及 `warnings` 数组长度相同。
+- `sessions_warned`：至少发出一条 warning 的 session 执行次数。
 - `landing_rows_updated` / `serving_rows_upserted`：成功产生的实际写入数；dry-run 时表示计划
   写入数。
 
 Report 还包含 `pipeline_run_id`、`started_at`、`ended_at`、毫秒时间、`duration_ms`、`status`、
-`sessions_processed`、`sessions_failed`、`failed_row_ids`、完整 `failures` 和实际
+`phase_timings_ms`（`discovery`/`load`/`transform`/`sink` 的累计 wall time）、
+`sessions_processed`、`sessions_failed`、`sessions_warned`、`warning_count`、`failed_row_ids`、
+完整 `failures`、完整 `warnings` 和实际
 `report_path`。失败记录同时保留 job/session scope，因此后续可以按一次 report 批量构造
 session 重试。存在 stage/session/record 失败时命令仍会先写 report、打印汇总，然后以
 exit code `1` 结束。一个 stage 失败后，当前 session 不执行下游 stage，也不提交已计算的
 业务 patches。
+
+`phase_timings_ms.discovery` 包含 bucket/session discovery 读取以及读取重试等待；`load` 包含
+session scope 加载及读取重试等待；`transform` 是 stage DAG 和输出校验；`sink` 是 landing
+update 或 serving upsert。Dry-run 不调用 sink，因此其 `sink` 为 `0`。四项之和可以小于
+`duration_ms`，因为 checkpoint、report 写入和引擎编排开销不归入这四项。
 
 源表读取遇到明确的临时 S3/HTTP 错误时最多尝试三次并做指数退避。重试耗尽后，failure 归因到
 `__discovery__` 或 `__session_load__`，report 保留失败前已经完成的 session 和行计数，不会再
@@ -338,8 +374,8 @@ run 结构化查询、告警、重试次数和保留周期，再增加单独的 
 | `--validate-only` | 可选，默认关闭 | 只做 pipeline/stage DAG 静态校验；不访问数据库、不执行 transform。 | `--validate-only` |
 | `--landing-table` | 可选，按 profile | 覆盖 source landing 逻辑表名。 | `--landing-table landing_test` |
 | `--serving-table` | 可选，按 profile | 覆盖 serving 目标逻辑表名。 | `--serving-table serving_test` |
-| `--page-size` | 可选，默认 `1000` | 每页轻量 discovery 行数；不是完整 session 截断大小，跨 page 的同一 session 会去重并整组加载。 | `--page-size 500` |
-| `--session-batch-size` | 可选，默认 `25` | 每次源表查询合并加载的完整 session 数；stage 仍逐个完整 session 执行。 | `--session-batch-size 25` |
+| `--page-size` | 可选，默认 `1000` | 每页轻量 discovery 行数；不是 session scope 截断大小，跨 page 的同一 session 会去重并整组加载。 | `--page-size 500` |
+| `--session-batch-size` | 可选，默认 `25` | 每次源表查询合并加载的 session scope 数；stage 仍逐个 session scope 执行。 | `--session-batch-size 25` |
 | `--sink-batch-size` | 可选，默认 `100` | 单次 landing update 或 serving upsert 最多包含的记录数；失败仍逐记录进入 report。 | `--sink-batch-size 100` |
 | `--settle-delay-seconds` | 可选，默认 `0` | 从本次固定启动时间减去的可选稳定延迟；增量模式及未显式传 `--end-time` 的时间范围使用它。 | `--settle-delay-seconds 7200` |
 | `--start-from` | 首次增量/新 bucket 必需 | 首个 checkpoint 的包含式 bootstrap 时间；支持 ISO 8601、epoch 秒或 epoch 毫秒。不能与 job/time-range 模式组合。 | `--start-from 2026-08-01T00:00:00Z` |
@@ -348,7 +384,7 @@ run 结构化查询、告警、重试次数和保留周期，再增加单独的 
 | `--job-id` | 可选，接 list | 立即处理一个或多个 job 的全部合法 session；也允许重复参数。 | `--job-id job-a job-b` |
 | `--session-id` | 可选，接 list | 一个 job 下处理多个 session；要求恰好一个 `--job-id`。 | `--job-id job-a --session-id s1 s2` |
 | `--session JOB_ID SESSION_ID` | 可选，可重复 | 精确指定来自任意多个 job 的 job/session pair。不能与 `--job-id/--session-id` 混用。 | `--session job-a s1 --session job-b s2` |
-| `--source-filter` | 可选 | 高级手动 dldb WHERE 表达式；扫描所有 landing HASH buckets，发现后加载完整 session，不使用 checkpoint。与 job/time 模式互斥。 | `--source-filter "is_trainable = true AND agent_model = 'opencode'"` |
+| `--source-filter` | 可选 | 高级手动 dldb WHERE 表达式；扫描所有 landing HASH buckets，发现后加载 pipeline session input scope，不使用 checkpoint。与 job/time 模式互斥。 | `--source-filter "is_trainable = true AND agent_model = 'opencode'"` |
 | `--dry-run` | 可选，默认关闭 | 读取真实 source 并执行 stage `transform_session` 与 output 校验，但不写 landing、serving 或 checkpoint。 | `--dry-run` |
 | `--confirm-production` | production 写入必需 | 非 dry-run production 执行的二次安全确认。 | `--confirm-production` |
 | `--state-db-uri` | 默认增量模式必需，可用环境变量 | ETL 控制表所在独立 dldb database；也可设置 `WT_SDK_ETL_STATE_DB_URI`。普通 SDK 和手动定向 ETL 不需要。 | `--state-db-uri s3://wind-tunnel-etl` |

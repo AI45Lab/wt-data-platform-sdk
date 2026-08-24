@@ -6,9 +6,12 @@
 for exporting rows from a serving table. It defaults to the production
 `wind_tunnel_serving` table.
 
-The command is intentionally stateless. It exports exactly the ID manifest
-captured for the supplied filter. Callers own incremental filter construction,
-cursor storage, and deduplication between separate invocations.
+`count_dataset.py` counts serving rows by the first `#`-delimited component of
+`job_id`.
+
+The export command is intentionally stateless. It exports exactly the ID
+manifest captured for the supplied filter. Callers own incremental filter
+construction, cursor storage, and deduplication between separate invocations.
 
 ## Configuration
 
@@ -69,6 +72,41 @@ normal nested JSON values. Literal Unicode line/paragraph separator characters
 so editors do not mistake them for JSONL record boundaries. Standard JSON
 parsers restore the original character values without changing the delivered
 data.
+
+## Count Rows by Dataset
+
+The dataset name is derived from the first component of `job_id`:
+
+```text
+cvefactory#opencode#kimi-k3#mining-patch#20260811#pj
+└── dataset: cvefactory
+```
+
+`job_id` is the source of truth because it is required and immutable. `tags`
+is not used: it is an optional ETL-derived field, and it can be absent for rows
+that were not selected by the tag stage.
+
+Count all production serving rows:
+
+```bash
+python scripts/delivery/count_dataset.py
+```
+
+Apply an optional filter or explicitly validate against the test table:
+
+```bash
+python scripts/delivery/count_dataset.py \
+  --filter "serving_updated_at >= 1786377600000"
+
+python scripts/delivery/count_dataset.py \
+  --table serving_test \
+  --filter "id IS NOT NULL"
+```
+
+The command uses `export_data_batches()` to capture one fixed matching ID
+manifest, then reads `job_id` in bounded batches and aggregates counts locally.
+It does not issue one full-table LIKE query per dataset. Job IDs without a
+non-empty dataset prefix followed by `#` are skipped and reported on stderr.
 
 ## Recommended Incremental Usage
 

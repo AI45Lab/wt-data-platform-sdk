@@ -2,6 +2,7 @@ import re
 from types import SimpleNamespace
 
 import pytest
+import wt_sdk.etl.engine as engine_module
 
 from wt_sdk.etl import (
     ETLEngine,
@@ -157,6 +158,22 @@ class MarkTrainableStage(ETLStage):
         }
 
 
+class WarnAndMarkTrainableStage(ETLStage):
+    name = "warn_and_mark_trainable"
+    output_fields = ("is_trainable",)
+
+    def transform_session(self, session, context):
+        if context.session_key.session_id == "session-1":
+            context.warn(
+                "session used legacy trainability fallback",
+                warning_type="LegacyFallback",
+            )
+        return {
+            record["id"]: {"is_trainable": True}
+            for record in session
+        }
+
+
 def _checkpoint(store, pipeline, bucket=3):
     return store.load(
         pipeline_name=pipeline.name,
@@ -169,6 +186,97 @@ def _checkpoint(store, pipeline, bucket=3):
         ),
         bucket=bucket,
     )
+
+
+def test_warning_does_not_fail_engine_run_or_block_landing_sink():
+    client = FakeGatewayClient(
+        [
+            _row(
+                id="row-1",
+                session_id="session-1",
+                is_trainable=False,
+                source_updated_at=1_000,
+                _bucket=3,
+            ),
+            _row(
+                id="row-2",
+                session_id="session-2",
+                is_trainable=False,
+                source_updated_at=1_000,
+                _bucket=3,
+            ),
+        ]
+    )
+    pipeline = PipelineDefinition(
+        name="warning_landing_pipeline",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(WarnAndMarkTrainableStage(),),
+    )
+
+    summary = ETLEngine(client).run_sessions(
+        pipeline,
+        [
+            SessionKey(_row()["job_id"], "session-1"),
+            SessionKey(_row()["job_id"], "session-2"),
+        ],
+    )
+
+    assert summary.status == "SUCCEEDED"
+    assert summary.sessions_processed == 2
+    assert summary.failed_rows == 0
+    assert summary.sessions_failed == 0
+    assert summary.sessions_warned == 1
+    assert summary.warning_count == 1
+    assert summary.warnings[0].stage_name == "warn_and_mark_trainable"
+    assert summary.landing_rows_updated == 2
+    assert all(row["is_trainable"] is True for row in client.rows)
+
+
+def test_duplicate_step_warning_does_not_fail_run_or_block_landing_sink():
+    job_id = _row()["job_id"]
+    client = FakeGatewayClient(
+        [
+            _row(
+                id="row-1",
+                session_id="session-1",
+                step_id=7,
+                is_trainable=False,
+                source_updated_at=1_000,
+                _bucket=3,
+            ),
+            _row(
+                id="row-2",
+                session_id="session-1",
+                step_id=7,
+                is_trainable=False,
+                source_updated_at=1_000,
+                _bucket=3,
+            ),
+        ]
+    )
+    pipeline = PipelineDefinition(
+        name="duplicate_step_warning_pipeline",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(MarkTrainableStage(),),
+    )
+
+    summary = ETLEngine(client).run_sessions(
+        pipeline,
+        [SessionKey(job_id, "session-1")],
+    )
+
+    assert summary.status == "SUCCEEDED"
+    assert summary.sessions_processed == 1
+    assert summary.sessions_failed == 0
+    assert summary.sessions_warned == 1
+    assert summary.failed_rows == 0
+    assert summary.warning_count == 1
+    assert summary.warnings[0].stage_name == "__session_validation__"
+    assert summary.warnings[0].warning_type == "DuplicateStepId"
+    assert summary.landing_rows_updated == 2
+    assert all(row["is_trainable"] is True for row in client.rows)
 
 
 def test_incremental_serving_run_commits_checkpoint_after_upsert():
@@ -494,7 +602,7 @@ def test_targeted_session_uses_job_and_session_scope():
     assert set(client.serving) == {"wanted"}
 
 
-def test_job_discovery_uses_stage_hint_and_batches_complete_session_reads():
+def test_serving_job_discovery_and_load_read_only_trainable_rows():
     rows = []
     for session_number in range(3):
         for step_id in range(2):
@@ -503,7 +611,7 @@ def test_job_discovery_uses_stage_hint_and_batches_complete_session_reads():
                     id=f"row-{session_number}-{step_id}",
                     session_id=f"session-{session_number}",
                     step_id=step_id,
-                    is_trainable=session_number < 2,
+                    is_trainable=session_number < 2 and step_id == 1,
                     _bucket=3,
                 )
             )
@@ -516,15 +624,69 @@ def test_job_discovery_uses_stage_hint_and_batches_complete_session_reads():
         dry_run=True,
     )
 
-    assert summary.discovery_rows == 4
+    assert summary.discovery_rows == 2
     assert summary.sessions_processed == 2
-    assert summary.source_rows == 4
+    assert summary.source_rows == 2
+    assert summary.selected_rows == 2
     assert len(client.query_calls) == 2
     discovery, batch_load = client.query_calls
     assert "is_trainable = true" in discovery["filter_query"]
     assert discovery["checkout_latest"] is True
     assert "session_id IN" in batch_load["filter_query"]
+    assert "is_trainable = true" in batch_load["filter_query"]
     assert batch_load["checkout_latest"] is False
+
+
+def test_explicit_serving_session_with_no_trainable_rows_is_successful_noop():
+    row = _row(
+        id="row-1",
+        session_id="session-1",
+        is_trainable=False,
+        _bucket=3,
+    )
+    client = FakeGatewayClient([row])
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    summary = ETLEngine(client).run_sessions(
+        pipeline,
+        [SessionKey(row["job_id"], row["session_id"])],
+    )
+
+    assert summary.status == "SUCCEEDED"
+    assert summary.sessions_processed == 1
+    assert summary.source_rows == 0
+    assert summary.selected_rows == 0
+    assert summary.serving_rows_upserted == 0
+    assert client.serving == {}
+    assert "is_trainable = true" in client.query_calls[0]["filter_query"]
+
+
+def test_engine_accumulates_phase_timings(monkeypatch):
+    timestamps = iter(
+        [
+            0, 1_000_000,
+            2_000_000, 3_000_000,
+            4_000_000, 5_000_000,
+            6_000_000, 7_000_000,
+        ]
+    )
+    monkeypatch.setattr(
+        engine_module.time,
+        "perf_counter_ns",
+        lambda: next(timestamps),
+    )
+    row = _row(id="row-1", session_id="session-1", _bucket=3)
+    client = FakeGatewayClient([row])
+
+    summary = ETLEngine(client).run_job(
+        load_pipeline("landing_to_serving_pipeline"),
+        row["job_id"],
+    )
+
+    assert summary.discovery_duration_ms == 1.0
+    assert summary.load_duration_ms == 1.0
+    assert summary.transform_duration_ms == 1.0
+    assert summary.sink_duration_ms == 1.0
 
 
 def test_landing_job_discovery_reads_only_completed_session_markers():

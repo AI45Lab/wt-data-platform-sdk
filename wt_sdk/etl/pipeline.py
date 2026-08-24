@@ -15,8 +15,21 @@ from .exceptions import (
     SessionValidationError,
     StageTransformError,
 )
-from .models import LandingRowPatch, PipelineMode, RecordFailure, SessionResult
-from .stage import ETLStage, Session, SessionKey, SessionPatch, StageContext
+from .models import (
+    LandingRowPatch,
+    PipelineInputScope,
+    PipelineMode,
+    RecordFailure,
+    SessionResult,
+)
+from .stage import (
+    ETLStage,
+    Session,
+    SessionKey,
+    SessionPatch,
+    StageContext,
+    StageWarning,
+)
 
 
 IMMUTABLE_ETL_FIELDS = {
@@ -38,6 +51,7 @@ class PipelineDefinition:
     version: str
     mode: PipelineMode
     stages: tuple[ETLStage, ...]
+    input_scope: PipelineInputScope = PipelineInputScope.COMPLETE_SESSION
     _ordered_stages: tuple[ETLStage, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -51,6 +65,19 @@ class PipelineDefinition:
         if not isinstance(self.mode, PipelineMode):
             raise PipelineConfigurationError("pipeline mode must be a PipelineMode")
         object.__setattr__(self, "_ordered_stages", self.validate_dag(self.stages))
+        if not isinstance(self.input_scope, PipelineInputScope):
+            raise PipelineConfigurationError(
+                "pipeline input_scope must be a PipelineInputScope"
+            )
+        if self.input_scope is PipelineInputScope.MATCHED_ROWS:
+            if self.mode is not PipelineMode.SERVING:
+                raise PipelineConfigurationError(
+                    "matched-row input scope is supported only for serving pipelines"
+                )
+            if self.job_discovery_filter is None:
+                raise PipelineConfigurationError(
+                    "matched-row input scope requires a safe pipeline discovery filter"
+                )
 
     @staticmethod
     def validate_dag(stages: Sequence[ETLStage]) -> tuple[ETLStage, ...]:
@@ -110,6 +137,7 @@ class PipelineDefinition:
             "pipeline_name": self.name,
             "pipeline_version": self.version,
             "mode": self.mode.value,
+            "input_scope": self.input_scope.value,
             "execution_order": [stage.name for stage in self.ordered_stages],
             "stages": stages,
             "edges": edges,
@@ -121,16 +149,16 @@ class PipelineDefinition:
         *,
         collect_failures: bool = False,
     ) -> SessionResult:
-        ordered_rows, session_key = _validate_and_order_session(rows)
+        (
+            ordered_rows,
+            session_key,
+            validation_warnings,
+        ) = _validate_and_order_session(rows)
         original_by_id = {str(row["id"]): dict(row) for row in ordered_rows}
         working_by_id = deepcopy(original_by_id)
         ordered_ids = tuple(str(row["id"]) for row in ordered_rows)
-        context = StageContext(
-            pipeline_name=self.name,
-            pipeline_version=self.version,
-            session_key=session_key,
-        )
         selected_ids: set[str] = set()
+        emitted_warnings = list(validation_warnings)
         failure_stage = "__stage_execution__"
         failure_record_id: str | None = None
 
@@ -139,14 +167,23 @@ class PipelineDefinition:
                 failure_stage = stage.name
                 stage_input = _freeze_session(working_by_id, ordered_ids)
                 _validate_stage_inputs(stage, stage_input)
+                context = StageContext(
+                    pipeline_name=self.name,
+                    pipeline_version=self.version,
+                    session_key=session_key,
+                    stage_name=stage.name,
+                )
                 try:
-                    proposed = stage.transform_session(stage_input, context)
-                except StageTransformError:
-                    raise
-                except Exception as exc:
-                    raise StageTransformError(
-                        f"stage '{stage.name}' failed for session {session_key}: {exc}"
-                    ) from exc
+                    try:
+                        proposed = stage.transform_session(stage_input, context)
+                    except StageTransformError:
+                        raise
+                    except Exception as exc:
+                        raise StageTransformError(
+                            f"stage '{stage.name}' failed for session {session_key}: {exc}"
+                        ) from exc
+                finally:
+                    emitted_warnings.extend(context.emitted_warnings)
                 stage_patches = _validate_stage_session_patch(
                     stage,
                     proposed,
@@ -193,6 +230,7 @@ class PipelineDefinition:
                 source_rows=len(ordered_rows),
                 selected_rows=len(selected_ids),
                 successful_rows=0,
+                warnings=tuple(emitted_warnings),
                 failures=(
                     RecordFailure(
                         record_id=attributed_record_id,
@@ -212,6 +250,7 @@ class PipelineDefinition:
             successful_rows=len(selected_ids),
             landing_patches=tuple(landing_patches),
             serving_records=tuple(serving_records),
+            warnings=tuple(emitted_warnings),
         )
 
 
@@ -392,7 +431,7 @@ def _validate_stage_session_patch(
 
 def _validate_and_order_session(
     rows: Sequence[Mapping[str, object]],
-) -> tuple[list[dict[str, object]], SessionKey]:
+) -> tuple[list[dict[str, object]], SessionKey, tuple[StageWarning, ...]]:
     if not rows:
         raise SessionValidationError("session contains no rows")
 
@@ -405,6 +444,7 @@ def _validate_and_order_session(
 
     ids: set[str] = set()
     steps: set[int] = set()
+    duplicate_steps: set[int] = set()
     env_ids: set[str] = set()
     normalized: list[dict[str, object]] = []
     for row in rows:
@@ -423,7 +463,7 @@ def _validate_and_order_session(
             )
         step = step_id
         if step in steps:
-            raise SessionValidationError(f"session contains duplicate step_id: {step}")
+            duplicate_steps.add(step)
         steps.add(step)
         source_updated_at = row.get("source_updated_at")
         if (
@@ -445,4 +485,18 @@ def _validate_and_order_session(
             f"session {key} contains multiple env_id values: {sorted(env_ids)}"
         )
     normalized.sort(key=lambda row: row["step_id"])
-    return normalized, key
+    warnings: tuple[StageWarning, ...] = ()
+    if duplicate_steps:
+        warnings = (
+            StageWarning(
+                job_id=key.job_id,
+                session_id=key.session_id,
+                stage_name="__session_validation__",
+                warning_type="DuplicateStepId",
+                message=(
+                    "session contains duplicate step_id values: "
+                    f"{sorted(duplicate_steps)}"
+                ),
+            ),
+        )
+    return normalized, key, warnings

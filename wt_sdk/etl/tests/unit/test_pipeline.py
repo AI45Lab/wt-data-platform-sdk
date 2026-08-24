@@ -10,6 +10,7 @@ from wt_sdk.etl import (
     FreeCotStage,
     PipelineConfigurationError,
     PipelineDefinition,
+    PipelineInputScope,
     PipelineMode,
     SessionValidationError,
     StageTransformError,
@@ -88,6 +89,7 @@ def test_canonical_serving_pipeline_builds_trace_and_tags_then_search_text():
         "build_search_text",
     ]
     assert pipeline.version == "3"
+    assert pipeline.input_scope is PipelineInputScope.MATCHED_ROWS
 
     result = pipeline.process_session([_row()])
 
@@ -194,6 +196,7 @@ def test_describe_dag_returns_machine_readable_stage_inventory():
     description = pipeline.describe_dag()
 
     assert description["pipeline_name"] == "landing_to_serving_pipeline"
+    assert description["input_scope"] == "matched_rows"
     assert description["execution_order"] == [
         "build_chosen_trace",
         "derive_job_tags",
@@ -215,6 +218,28 @@ def test_canonical_serving_pipeline_skips_session_when_no_stage_selects_rows():
 
     assert result.selected_rows == 0
     assert result.serving_records == ()
+
+
+def test_matched_row_scope_is_rejected_for_landing_pipeline():
+    with pytest.raises(PipelineConfigurationError, match="only for serving"):
+        PipelineDefinition(
+            name="invalid_landing_pipeline",
+            version="1",
+            mode=PipelineMode.LANDING,
+            stages=(UpdateIsTrainableStage(),),
+            input_scope=PipelineInputScope.MATCHED_ROWS,
+        )
+
+
+def test_matched_row_scope_requires_safe_pipeline_filter():
+    with pytest.raises(PipelineConfigurationError, match="requires a safe"):
+        PipelineDefinition(
+            name="invalid_serving_pipeline",
+            version="1",
+            mode=PipelineMode.SERVING,
+            stages=(ProcessNonTrainableStage(),),
+            input_scope=PipelineInputScope.MATCHED_ROWS,
+        )
 
 
 def test_serving_pipeline_can_publish_non_trainable_row_from_independent_stage():
@@ -304,6 +329,86 @@ def test_collect_failure_discards_all_session_outputs():
     assert len(result.failures) == 1
     assert result.failures[0].record_id == "bad-row"
     assert result.failures[0].stage_name == "build_chosen_trace"
+
+
+def test_stage_warning_is_reported_without_interrupting_stage_or_downstream_logic():
+    execution = []
+
+    class WarnAndContinueStage(ETLStage):
+        name = "warn_and_continue"
+        output_fields = ("search_text",)
+
+        def transform_session(self, session, context):
+            context.warn(
+                "response required fallback normalization",
+                warning_type="FallbackNormalization",
+            )
+            execution.append("continued_after_warning")
+            return {session[0]["id"]: {"search_text": "normalized"}}
+
+    class DownstreamStage(ETLStage):
+        name = "downstream"
+        output_fields = ("reference_answer",)
+        dependencies = ("warn_and_continue",)
+
+        def transform_session(self, session, context):
+            del context
+            execution.append("downstream_executed")
+            assert session[0]["search_text"] == "normalized"
+            return {session[0]["id"]: {"reference_answer": "done"}}
+
+    pipeline = PipelineDefinition(
+        name="warning_pipeline",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(WarnAndContinueStage(), DownstreamStage()),
+    )
+
+    result = pipeline.process_session([_row()])
+
+    assert execution == ["continued_after_warning", "downstream_executed"]
+    assert result.successful_rows == 1
+    assert result.failures == ()
+    assert len(result.warnings) == 1
+    warning = result.warnings[0]
+    assert warning.job_id == _row()["job_id"]
+    assert warning.session_id == "session-1"
+    assert warning.stage_name == "warn_and_continue"
+    assert warning.warning_type == "FallbackNormalization"
+    assert warning.message == "response required fallback normalization"
+    assert result.landing_patches[0].updates == {
+        "reference_answer": "done",
+        "search_text": "normalized",
+    }
+
+
+def test_stage_warning_is_retained_when_stage_later_fails():
+    class WarnThenFailStage(ETLStage):
+        name = "warn_then_fail"
+        output_fields = ("search_text",)
+
+        def transform_session(self, session, context):
+            context.warn("suspicious source data")
+            raise StageTransformError(
+                "source data cannot be transformed",
+                record_id=session[0]["id"],
+            )
+
+    pipeline = PipelineDefinition(
+        name="warning_then_failure",
+        version="1",
+        mode=PipelineMode.LANDING,
+        stages=(WarnThenFailStage(),),
+    )
+
+    result = pipeline.process_session([_row()], collect_failures=True)
+
+    assert result.successful_rows == 0
+    assert result.landing_patches == ()
+    assert len(result.warnings) == 1
+    assert result.warnings[0].message == "suspicious source data"
+    assert len(result.failures) == 1
+    assert result.failures[0].stage_name == "warn_then_fail"
 
 
 def test_landing_pipeline_returns_only_actual_final_diff():
@@ -468,16 +573,40 @@ def test_session_patch_contract_is_validated(stage_result, message):
         pipeline.process_session([_row()])
 
 
-def test_session_scope_validation_rejects_duplicate_step_id():
+def test_session_scope_validation_warns_and_continues_for_duplicate_step_id():
+    stage_executed = []
+
+    class CaptureExecutionStage(ETLStage):
+        name = "capture_execution"
+        output_fields = ("is_trainable",)
+
+        def transform_session(self, session, context):
+            del context
+            stage_executed.append(True)
+            return {
+                record["id"]: {"is_trainable": True}
+                for record in session
+            }
+
     pipeline = PipelineDefinition(
         name="landing_enrichment",
         version="1",
         mode=PipelineMode.LANDING,
-        stages=(SetTrainableStage(),),
+        stages=(CaptureExecutionStage(),),
     )
 
-    with pytest.raises(SessionValidationError, match="duplicate step_id"):
-        pipeline.process_session([_row(), _row(id="row-2")])
+    result = pipeline.process_session([_row(id="row-2"), _row(id="row-1")])
+
+    assert stage_executed == [True]
+    assert result.failures == ()
+    assert result.successful_rows == 2
+    assert len(result.warnings) == 1
+    warning = result.warnings[0]
+    assert warning.job_id == _row()["job_id"]
+    assert warning.session_id == "session-1"
+    assert warning.stage_name == "__session_validation__"
+    assert warning.warning_type == "DuplicateStepId"
+    assert warning.message == "session contains duplicate step_id values: [0]"
 
 
 @pytest.mark.parametrize(
