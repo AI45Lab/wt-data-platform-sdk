@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Count success and delivery rows by the first four ``job_id`` components.
+"""Count delivered serving rows by ``job_id`` reporting prefix.
 
-The reporting key is:
+The default reporting key is:
 
     dataset#harness#model#task
 
-For each key, this script reports:
+For ``cybergym`` only, the reporting key additionally includes the ``level*``
+component found after the first four fields:
 
-1. ``landing_success_rows``: rows in the landing table whose ``job_id`` starts
-   with that key and whose ``reward != 0``.
-2. ``serving_delivered_rows``: rows in the serving table whose ``job_id`` starts
-   with that key.
+    cybergym#harness#model#task#level
+
+For each key, this script reports serving-table counts only:
+
+1. ``success_rows``: serving rows whose ``reward != 0``.
+2. ``delivered_rows``: all serving rows in that reporting group.
 
 The implementation is intentionally read-only and narrow-column: it scans each
-existing HASH partition at most once per table and only fetches ``job_id``.
-That is usually much cheaper than running one ``LIKE`` query per reporting row,
-and it avoids reading the wide JSON trajectory columns.
+existing serving HASH partition at most once and only fetches ``job_id`` and
+``reward``. That is usually much cheaper than running one query per reporting
+row, and it avoids reading the wide JSON trajectory columns.
 """
 
 from __future__ import annotations
@@ -29,9 +32,7 @@ from typing import Any
 
 from wt_sdk.client import WTGatewayClient
 from wt_sdk.config import (
-    DEFAULT_LANDING_TABLE,
     DEFAULT_SERVING_TABLE,
-    TEST_LANDING_TABLE,
     TEST_SERVING_TABLE,
     GatewayConfig,
     TableConfig,
@@ -45,7 +46,7 @@ TASK_LABELS_ZH = {
 }
 
 
-PrefixKey = tuple[str, str, str, str]
+PrefixKey = tuple[str, str, str, str, str | None]
 
 
 def _escape_sql_string(value: str) -> str:
@@ -62,28 +63,55 @@ def _escape_sql_like_pattern(value: str) -> str:
 
 
 def parse_prefix(value: str) -> PrefixKey:
-    """Parse one ``dataset#harness#model#task`` prefix."""
+    """Parse one report prefix.
+
+    Non-cybergym prefixes normally contain four components. Cybergym prefixes
+    may contain a fifth ``level*`` component such as
+    ``cybergym#opencode#kimi-k3#find#level1``.
+    """
     parts = [part.strip() for part in value.split("#")]
-    if len(parts) != 4 or any(not part for part in parts):
+    if len(parts) not in {4, 5} or any(not part for part in parts):
         raise ValueError(
-            "prefix must have exactly four non-empty components: "
-            "dataset#harness#model#task"
+            "prefix must have four components dataset#harness#model#task, "
+            "or five components for cybergym: dataset#harness#model#task#level"
         )
-    return (parts[0], parts[1], parts[2], parts[3])
+    if len(parts) == 5 and parts[0] != "cybergym":
+        raise ValueError("five-component prefixes are only supported for cybergym")
+    return (parts[0], parts[1], parts[2], parts[3], parts[4] if len(parts) == 5 else None)
 
 
 def prefix_to_string(prefix: PrefixKey) -> str:
-    return "#".join(prefix)
+    dataset, harness, model, task, level = prefix
+    parts = [dataset, harness, model, task]
+    if level:
+        parts.append(level)
+    return "#".join(parts)
+
+
+def prefix_to_sql_base(prefix: PrefixKey) -> str:
+    """Return the first-four-component prefix used for SQL narrowing."""
+    return "#".join(prefix[:4])
 
 
 def key_from_job_id(job_id: Any) -> PrefixKey | None:
-    """Return the first four job_id components, or None for malformed values."""
+    """Return the reporting key for one job_id, or None for malformed values."""
     if not isinstance(job_id, str):
         return None
-    parts = [part.strip() for part in job_id.split("#", 4)[:4]]
-    if len(parts) != 4 or any(not part for part in parts):
+    parts = [part.strip() for part in job_id.split("#")]
+    if len(parts) < 4 or any(not part for part in parts[:4]):
         return None
-    return (parts[0], parts[1], parts[2], parts[3])
+    dataset, harness, model, task = parts[:4]
+    level = None
+    if dataset == "cybergym":
+        level = next(
+            (
+                part
+                for part in parts[4:]
+                if part.lower().startswith("level") and len(part) > len("level")
+            ),
+            None,
+        )
+    return (dataset, harness, model, task, level)
 
 
 def load_prefix_file(path: str | None) -> list[PrefixKey]:
@@ -111,8 +139,7 @@ def build_prefix_filter(prefixes: Sequence[PrefixKey]) -> str | None:
     if not prefixes:
         return None
     clauses: list[str] = []
-    for prefix in prefixes:
-        value = prefix_to_string(prefix)
+    for value in sorted({prefix_to_sql_base(prefix) for prefix in prefixes}):
         exact = _escape_sql_string(value)
         like = _escape_sql_like_pattern(value + "#")
         clauses.append(f"(job_id = '{exact}' OR job_id LIKE '{like}%' ESCAPE '\\')")
@@ -122,34 +149,53 @@ def build_prefix_filter(prefixes: Sequence[PrefixKey]) -> str | None:
 def build_config(
     *,
     profile: str,
-    landing_table: str | None,
     serving_table: str | None,
 ) -> GatewayConfig:
     normalized_profile = "production" if profile in {"prod", "production"} else "test"
-    default_landing = (
-        DEFAULT_LANDING_TABLE if normalized_profile == "production" else TEST_LANDING_TABLE
-    )
     default_serving = (
         DEFAULT_SERVING_TABLE if normalized_profile == "production" else TEST_SERVING_TABLE
     )
     return GatewayConfig(
         tables=TableConfig(
             profile=normalized_profile,
-            landing_table=landing_table or default_landing,
             serving_table=serving_table or default_serving,
         )
     )
 
 
-def scan_job_id_counts(
+def key_matches_requested(key: PrefixKey, requested: PrefixKey) -> bool:
+    """Return whether an observed key belongs under a requested prefix."""
+    if key[:4] != requested[:4]:
+        return False
+    requested_level = requested[4]
+    return requested_level is None or key[4] == requested_level
+
+
+def should_include_key(key: PrefixKey, prefixes: Sequence[PrefixKey] | None) -> bool:
+    if not prefixes:
+        return True
+    return any(key_matches_requested(key, requested) for requested in prefixes)
+
+
+def _is_nonzero_reward(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return float(value) != 0.0
+    except (TypeError, ValueError):
+        return True
+
+
+def scan_serving_counts(
     client: WTGatewayClient,
     *,
     table_name: str,
     filter_query: str,
-    prefixes: set[PrefixKey] | None,
-) -> tuple[Counter[PrefixKey], int, int]:
-    """Scan one logical table and return counts, scanned rows, invalid rows."""
-    counts: Counter[PrefixKey] = Counter()
+    prefixes: Sequence[PrefixKey] | None,
+) -> tuple[Counter[PrefixKey], Counter[PrefixKey], int, int]:
+    """Scan serving and return success counts, delivered counts, scanned, invalid."""
+    success_counts: Counter[PrefixKey] = Counter()
+    delivered_counts: Counter[PrefixKey] = Counter()
     rows_scanned = 0
     invalid_rows = 0
 
@@ -162,7 +208,7 @@ def scan_job_id_counts(
             table_name,
             query=filter_query,
             limit=None,
-            columns=["job_id"],
+            columns=["job_id", "reward"],
             partitions=[partition],
             checkout_latest=True,
             extra={
@@ -172,34 +218,43 @@ def scan_job_id_counts(
         )
         if "job_id" not in frame.columns:
             raise RuntimeError(f"{table_name} query did not return job_id")
+        if "reward" not in frame.columns:
+            raise RuntimeError(f"{table_name} query did not return reward")
 
         rows_scanned += len(frame)
-        for job_id in frame["job_id"].tolist():
+        for job_id, reward in zip(frame["job_id"].tolist(), frame["reward"].tolist(), strict=True):
             key = key_from_job_id(job_id)
             if key is None:
                 invalid_rows += 1
                 continue
-            if prefixes is not None and key not in prefixes:
+            if not should_include_key(key, prefixes):
                 continue
-            counts[key] += 1
+            delivered_counts[key] += 1
+            if _is_nonzero_reward(reward):
+                success_counts[key] += 1
 
-    return counts, rows_scanned, invalid_rows
+    return success_counts, delivered_counts, rows_scanned, invalid_rows
 
 
 def build_rows(
-    landing_counts: Counter[PrefixKey],
-    serving_counts: Counter[PrefixKey],
+    success_counts: Counter[PrefixKey],
+    delivered_counts: Counter[PrefixKey],
     requested_prefixes: Sequence[PrefixKey],
     *,
     task_label: str,
 ) -> list[dict[str, Any]]:
     if requested_prefixes:
-        keys = list(dict.fromkeys(requested_prefixes))
+        observed_keys = sorted(set(success_counts) | set(delivered_counts))
+        keys: list[PrefixKey] = []
+        for requested in requested_prefixes:
+            matches = [key for key in observed_keys if key_matches_requested(key, requested)]
+            keys.extend(matches or [requested])
+        keys = list(dict.fromkeys(keys))
     else:
-        keys = sorted(set(landing_counts) | set(serving_counts))
+        keys = sorted(set(success_counts) | set(delivered_counts))
 
     rows: list[dict[str, Any]] = []
-    for dataset, harness, model, task in keys:
+    for dataset, harness, model, task, level in keys:
         display_task = TASK_LABELS_ZH.get(task, task) if task_label == "zh" else task
         rows.append(
             {
@@ -207,9 +262,10 @@ def build_rows(
                 "harness": harness,
                 "model": model,
                 "task": display_task,
-                "job_prefix": "#".join((dataset, harness, model, task)),
-                "landing_success_rows": int(landing_counts[(dataset, harness, model, task)]),
-                "serving_delivered_rows": int(serving_counts[(dataset, harness, model, task)]),
+                "level": level or "",
+                "job_prefix": prefix_to_string((dataset, harness, model, task, level)),
+                "success_rows": int(success_counts[(dataset, harness, model, task, level)]),
+                "delivered_rows": int(delivered_counts[(dataset, harness, model, task, level)]),
             }
         )
     return rows
@@ -221,8 +277,9 @@ def format_markdown(rows: Sequence[dict[str, Any]]) -> str:
         ("harness", "harness"),
         ("model", "model"),
         ("task", "任务"),
-        ("landing_success_rows", "成功条数"),
-        ("serving_delivered_rows", "总条数"),
+        ("level", "level"),
+        ("success_rows", "成功条数"),
+        ("delivered_rows", "总条数"),
     ]
     lines = [
         "| " + " | ".join(title for _, title in headers) + " |",
@@ -235,16 +292,12 @@ def format_markdown(rows: Sequence[dict[str, Any]]) -> str:
 
 def _print_scan_summary(
     *,
-    landing_table: str,
     serving_table: str,
-    landing_scanned: int,
     serving_scanned: int,
-    landing_invalid: int,
     serving_invalid: int,
 ) -> None:
     print(
         "Scan summary: "
-        f"{landing_table} matched_rows={landing_scanned}, invalid_job_id={landing_invalid}; "
         f"{serving_table} matched_rows={serving_scanned}, invalid_job_id={serving_invalid}",
         file=sys.stderr,
     )
@@ -253,8 +306,8 @@ def _print_scan_summary(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Count landing success rows and serving delivered rows by "
-            "dataset#harness#model#task job_id prefix."
+            "Count serving success rows and delivered rows by "
+            "dataset#harness#model#task job_id prefix. Cybergym is split by level."
         )
     )
     parser.add_argument(
@@ -263,7 +316,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="production",
         help="Table profile to use. Defaults to production.",
     )
-    parser.add_argument("--landing-table", default=None)
     parser.add_argument("--serving-table", default=None)
     parser.add_argument(
         "--prefix",
@@ -271,13 +323,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "One dataset#harness#model#task prefix to report. "
-            "Can be repeated. If omitted, all prefixes found in either table are reported."
+            "For cybergym, optionally pass dataset#harness#model#task#level. "
+            "Can be repeated. If omitted, all prefixes found in serving are reported."
         ),
     )
     parser.add_argument(
         "--prefix-file",
         default=None,
-        help="Optional text file containing one dataset#harness#model#task prefix per line.",
+        help=(
+            "Optional text file containing one prefix per line. "
+            "Cybergym may use dataset#harness#model#task#level."
+        ),
     )
     parser.add_argument(
         "--task-label",
@@ -298,38 +354,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         requested_prefixes = [parse_prefix(value) for value in args.prefix]
         requested_prefixes.extend(load_prefix_file(args.prefix_file))
-        prefix_set = set(requested_prefixes) if requested_prefixes else None
         prefix_sql = build_prefix_filter(requested_prefixes)
 
         config = build_config(
             profile=args.profile,
-            landing_table=args.landing_table,
             serving_table=args.serving_table,
         )
 
-        landing_filter_parts = ["job_id IS NOT NULL", "reward != 0"]
         serving_filter_parts = ["job_id IS NOT NULL"]
         if prefix_sql:
-            landing_filter_parts.append(prefix_sql)
             serving_filter_parts.append(prefix_sql)
 
         with WTGatewayClient(config=config) as client:
-            landing_counts, landing_scanned, landing_invalid = scan_job_id_counts(
-                client,
-                table_name=config.tables.landing_table,
-                filter_query=" AND ".join(f"({part})" for part in landing_filter_parts),
-                prefixes=prefix_set,
-            )
-            serving_counts, serving_scanned, serving_invalid = scan_job_id_counts(
+            success_counts, delivered_counts, serving_scanned, serving_invalid = scan_serving_counts(
                 client,
                 table_name=config.tables.serving_table,
                 filter_query=" AND ".join(f"({part})" for part in serving_filter_parts),
-                prefixes=prefix_set,
+                prefixes=requested_prefixes or None,
             )
 
         rows = build_rows(
-            landing_counts,
-            serving_counts,
+            success_counts,
+            delivered_counts,
             requested_prefixes,
             task_label=args.task_label,
         )
@@ -337,11 +383,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if not args.quiet:
             _print_scan_summary(
-                landing_table=config.tables.landing_table,
                 serving_table=config.tables.serving_table,
-                landing_scanned=landing_scanned,
                 serving_scanned=serving_scanned,
-                landing_invalid=landing_invalid,
                 serving_invalid=serving_invalid,
             )
         return 0

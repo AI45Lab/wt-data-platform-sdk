@@ -74,20 +74,26 @@ python scripts/inspect/query_data.py \
 ```
 
 Use `count_job_prefix_delivery.py` to update the recurring dataset progress
-table keyed by the first four `job_id` components:
-`dataset#harness#model#task`. It reports two read-only counts:
+table from the production serving table. The default key is the first four
+`job_id` components: `dataset#harness#model#task`. For `cybergym` only, the
+script additionally splits rows by the later `level*` component, so a job such
+as `cybergym#opencode#kimi-k3#find#20260817#jz#level1#1-500-01` is reported
+under `cybergym#opencode#kimi-k3#find#level1`.
 
-- `成功条数`: landing rows whose `job_id` has the prefix and `reward != 0`.
-- `总条数`: serving rows whose `job_id` has the prefix.
+It reports two read-only serving counts:
+
+- `成功条数`: serving rows in the group whose `reward != 0`.
+- `总条数`: all serving rows in the group.
 
 For a fixed report, pass the prefixes you care about. The command prints a
-Markdown-style table to the console and reads only narrow `job_id` columns
-instead of wide JSON payload columns:
+Markdown-style table to the console and reads only narrow `job_id` and `reward`
+columns instead of wide JSON payload columns:
 
 ```bash
 python scripts/inspect/count_job_prefix_delivery.py \
   --profile production \
-  --prefix 'cybergym#opencode#kimi-k3#find' \
+  --prefix 'cybergym#opencode#kimi-k3#find#level1' \
+  --prefix 'cybergym#opencode#kimi-k3#find#level2' \
   --prefix 'vulhub#opencode#kimi-k3#exploit' \
   --prefix 'vulhub#codex#kimi-k3#exploit' \
   --prefix 'vulhub#claude-code#kimi-k3#exploit' \
@@ -97,7 +103,8 @@ python scripts/inspect/count_job_prefix_delivery.py \
 For a longer fixed list, put one prefix per line in a file:
 
 ```text
-cybergym#opencode#kimi-k3#find
+cybergym#opencode#kimi-k3#find#level1
+cybergym#opencode#kimi-k3#find#level2
 cvefactory#opencode#kimi-k3#mining-patch
 vulhub#opencode#kimi-k3#exploit
 vulhub#codex#kimi-k3#exploit
@@ -113,10 +120,9 @@ python scripts/inspect/count_job_prefix_delivery.py \
   --task-label zh
 ```
 
-If no prefix is supplied, the script scans landing and serving and reports all
-valid four-component prefixes it finds. Prefer explicit prefixes for routine
-status updates because the output is stable and easier to paste into the
-tracking table.
+If no prefix is supplied, the script scans serving and reports all valid
+serving groups it finds. Prefer explicit prefixes for routine status updates
+because the output is stable and easier to paste into the tracking table.
 
 For the separate environment-config table, specify only the table name; the
 script automatically uses `WT_SDK_ENV_CONFIG_DB_URI` and reads the latest
