@@ -34,9 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 # ETL-specific third-party dependencies must be declared here, never in the
 # core dependency list.
-etl = [
-    "freecot",
-]
+etl = []
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
