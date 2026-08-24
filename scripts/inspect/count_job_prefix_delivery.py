@@ -12,7 +12,7 @@ component found after the first four fields:
 
 For each key, this script reports serving-table counts only:
 
-1. ``success_rows``: serving rows whose ``reward != 0``.
+1. ``success_rows``: serving rows whose ``reward > 0``.
 2. ``delivered_rows``: all serving rows in that reporting group.
 
 The implementation is intentionally read-only and narrow-column: it scans each
@@ -177,13 +177,13 @@ def should_include_key(key: PrefixKey, prefixes: Sequence[PrefixKey] | None) -> 
     return any(key_matches_requested(key, requested) for requested in prefixes)
 
 
-def _is_nonzero_reward(value: Any) -> bool:
+def _is_positive_reward(value: Any) -> bool:
     if value is None:
         return False
     try:
-        return float(value) != 0.0
+        return float(value) > 0.0
     except (TypeError, ValueError):
-        return True
+        return False
 
 
 def scan_serving_counts(
@@ -230,7 +230,7 @@ def scan_serving_counts(
             if not should_include_key(key, prefixes):
                 continue
             delivered_counts[key] += 1
-            if _is_nonzero_reward(reward):
+            if _is_positive_reward(reward):
                 success_counts[key] += 1
 
     return success_counts, delivered_counts, rows_scanned, invalid_rows

@@ -82,7 +82,7 @@ under `cybergym#opencode#kimi-k3#find#level1`.
 
 It reports two read-only serving counts:
 
-- `成功条数`: serving rows in the group whose `reward != 0`.
+- `成功条数`: serving rows in the group whose `reward > 0`.
 - `总条数`: all serving rows in the group.
 
 For a fixed report, pass the prefixes you care about. The command prints a
