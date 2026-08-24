@@ -28,11 +28,10 @@ class FreeCotStage(ETLStage):
         "is_trainable",
         "is_session_completed",
         "messages",
-        "meta_json",
         "session_id",
         "step_id",
     )
-    output_fields = ("messages", "meta_json")
+    output_fields = ("messages",)
     dependencies = ("update_is_trainable",)
     job_discovery_filter = "is_session_completed = true"
 
@@ -58,71 +57,78 @@ class FreeCotStage(ETLStage):
         del context
         if not any(record.get("is_session_completed") is True for record in session):
             return {}
-        messages_by_id: dict[str, list[dict[str, Any]]] = {}
-        signatures: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-        models: dict[str, str] = {}
+        if not any(record.get("is_trainable") is True for record in session):
+            return {}
+        decoded_by_signature: dict[str, str] = {}
+        model_by_signature: dict[str, str] = {}
 
         for record in session:
-            record_id = str(record["id"])
-            if record.get("is_trainable") is not True:
-                continue
             if "claude" not in str(record.get("agent_model") or "").lower():
                 continue
+            record_id = str(record["id"])
             try:
                 messages = _messages(record.get("messages"))
             except ValueError as exc:
                 raise StageTransformError(
                     self._safe_message(exc), record_id=record_id
                 ) from exc
-            signed = [
-                message
-                for message in messages
-                if isinstance(message.get("encrypted_content"), str)
-                and message["encrypted_content"]
-            ]
-            if not signed:
-                continue
-            messages_by_id[record_id] = messages
-            models[record_id] = str(
+            model = str(
                 record.get("agent_model") or "claude-opus-4-6"
             ).removesuffix("-thinking")
-            for message in signed:
-                signatures.setdefault(message["encrypted_content"], []).append(
-                    (record_id, message)
-                )
+            for message in messages:
+                signature = message.get("encrypted_content")
+                if (
+                    not isinstance(signature, str)
+                    or not signature
+                    or message.get("reasoning_content") is not None
+                    or signature in decoded_by_signature
+                ):
+                    continue
+                model_by_signature.setdefault(signature, model)
+                try:
+                    decoded = self._client().extract(
+                        signature, model_by_signature[signature], self._max_tokens
+                    )
+                    decoded = _reasoning_content(decoded)
+                    if not decoded:
+                        raise ValueError("replay service returned empty reasoning")
+                except Exception as exc:
+                    raise StageTransformError(
+                        f"FreeCoT replay failed: {self._safe_message(exc)}",
+                        record_id=record_id,
+                    ) from exc
+                decoded_by_signature[signature] = decoded
 
-        for signature, targets in signatures.items():
-            try:
-                decoded = self._client().extract(
-                    signature, models[targets[0][0]], self._max_tokens
-                )
-                decoded = _reasoning_content(decoded)
-                if not decoded:
-                    raise ValueError("replay service returned empty reasoning")
-            except Exception as exc:
-                raise StageTransformError(
-                    f"FreeCoT replay failed: {self._safe_message(exc)}",
-                    record_id=targets[0][0],
-                ) from exc
-            for _, message in targets:
-                message["reasoning_content"] = decoded
+        if not decoded_by_signature:
+            return {}
 
         patches: SessionPatch = {}
         for record in session:
-            record_id = str(record["id"])
-            messages = messages_by_id.get(record_id)
-            if messages is None:
+            if "claude" not in str(record.get("agent_model") or "").lower():
                 continue
+            record_id = str(record["id"])
             try:
-                meta_json = _normalized_meta_json(record.get("meta_json"))
+                messages = _messages(record.get("messages"))
             except ValueError as exc:
                 raise StageTransformError(
                     self._safe_message(exc), record_id=record_id
                 ) from exc
-            patches[record_id] = {
-                "messages": _json_string(messages),
-                "meta_json": meta_json,
-            }
+            changed = False
+            for message in messages:
+                signature = message.get("encrypted_content")
+                if (
+                    not isinstance(signature, str)
+                    or not signature
+                    or message.get("reasoning_content") is not None
+                ):
+                    continue
+                decoded = decoded_by_signature.get(signature)
+                if decoded is None:
+                    continue
+                message["reasoning_content"] = decoded
+                changed = True
+            if changed:
+                patches[record_id] = {"messages": _json_string(messages)}
         return patches
 
     def _client(self) -> Any:
@@ -173,24 +179,6 @@ def _reasoning_content(value: object) -> str:
     matched = _ANT_THINKING_PATTERN.search(value)
     content = matched.group("content") if matched is not None else value
     return _COT_TOKENS_PATTERN.sub("", content).strip()
-
-
-def _normalized_meta_json(value: object) -> str:
-    meta = {} if value is None else _mapping(value)
-    return _json_string(meta)
-
-
-def _mapping(value: object) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        return dict(value)
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise ValueError("meta_json is not valid JSON") from exc
-        if isinstance(parsed, dict):
-            return parsed
-    raise ValueError("meta_json must be a JSON object")
 
 
 def _json_string(value: object) -> str:

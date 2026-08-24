@@ -52,22 +52,71 @@ def _record(
     }
 
 
-def test_freecot_decodes_unique_signatures_only_for_trainable_completed_sessions():
+def test_freecot_backfills_decoded_signatures_into_previous_blocks():
     client = ReplayClient()
     stage = FreeCotStage(replay_client=client)
     session = (
-        _record("trainable-1"),
-        _record("trainable-2", is_session_completed=True),
-        _record("not-trainable", is_trainable=False, is_session_completed=False),
+        _record(
+            "prev-block",
+            is_trainable=False,
+            is_session_completed=False,
+            signature="shared-sig",
+        ),
+        _record("trainable", is_session_completed=True, signature="shared-sig"),
     )
 
     patches = stage.transform_session(session, _context())
 
     assert len(client.calls) == 1
-    assert set(patches) == {"trainable-1", "trainable-2"}
+    assert set(patches) == {"prev-block", "trainable"}
     for patch in patches.values():
         assert json.loads(patch["messages"])[0]["reasoning_content"] == "decoded reasoning"
-        assert json.loads(patch["meta_json"]) == {"source": "test"}
+        assert set(patch) == {"messages"}
+
+
+def test_freecot_decodes_signatures_from_all_blocks_in_trainable_session():
+    client = ReplayClient()
+    stage = FreeCotStage(replay_client=client)
+    session = (
+        _record(
+            "prev-block",
+            is_trainable=False,
+            is_session_completed=False,
+            signature="only-in-prev",
+        ),
+        _record("trainable", is_session_completed=True, signature="trainable-sig"),
+    )
+
+    patches = stage.transform_session(session, _context())
+
+    assert sorted(signature for signature, _, _ in client.calls) == [
+        "only-in-prev",
+        "trainable-sig",
+    ]
+    assert set(patches) == {"prev-block", "trainable"}
+    for patch in patches.values():
+        assert json.loads(patch["messages"])[0]["reasoning_content"] == "decoded reasoning"
+        assert set(patch) == {"messages"}
+
+
+def test_freecot_skips_session_without_trainable_records():
+    client = ReplayClient()
+
+    patches = FreeCotStage(replay_client=client).transform_session(
+        (
+            _record("not-trainable-1", is_trainable=False, is_session_completed=True),
+            _record(
+                "not-trainable-2",
+                is_trainable=False,
+                is_session_completed=True,
+                signature="sig-2",
+            ),
+        ),
+        _context(),
+    )
+
+    assert patches == {}
+    assert client.calls == []
 
 
 def test_freecot_skips_incomplete_sessions_without_calling_replay_service():
@@ -79,6 +128,31 @@ def test_freecot_skips_incomplete_sessions_without_calling_replay_service():
 
     assert patches == {}
     assert client.calls == []
+
+
+def test_freecot_skips_messages_with_existing_reasoning_content():
+    client = ReplayClient()
+    already_decoded = _record("already-decoded", signature="already-decoded")
+    already_decoded["messages"] = json.dumps(
+        [
+            {
+                "role": "assistant",
+                "encrypted_content": "already-decoded",
+                "reasoning_content": "existing reasoning",
+            }
+        ]
+    )
+
+    patches = FreeCotStage(replay_client=client).transform_session(
+        (
+            already_decoded,
+            _record("needs-decoding", signature="decode-me", is_session_completed=True),
+        ),
+        _context(),
+    )
+
+    assert client.calls == [("decode-me", "claude-opus-4-6", 128000)]
+    assert set(patches) == {"needs-decoding"}
 
 
 def test_freecot_extracts_reasoning_without_anthropic_wrapper_tokens():
@@ -97,14 +171,15 @@ def test_freecot_extracts_reasoning_without_anthropic_wrapper_tokens():
     assert message["reasoning_content"] == "original reasoning chain"
 
 
-def test_freecot_preserves_metadata_by_rejecting_invalid_json_object():
+def test_freecot_does_not_read_or_patch_metadata():
     stage = FreeCotStage(replay_client=ReplayClient())
 
-    with pytest.raises(StageTransformError, match="meta_json must be a JSON object"):
-        stage.transform_session(
-            (_record("trainable", is_session_completed=True, meta_json="[]"),),
-            _context(),
-        )
+    patches = stage.transform_session(
+        (_record("trainable", is_session_completed=True, meta_json="[]"),),
+        _context(),
+    )
+
+    assert set(patches["trainable"]) == {"messages"}
 
 
 def test_freecot_replay_failure_fails_the_session():
