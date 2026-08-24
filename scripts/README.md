@@ -73,6 +73,51 @@ python scripts/inspect/query_data.py \
   --count
 ```
 
+Use `count_job_prefix_delivery.py` to update the recurring dataset progress
+table keyed by the first four `job_id` components:
+`dataset#harness#model#task`. It reports two read-only counts:
+
+- `成功条数`: landing rows whose `job_id` has the prefix and `reward != 0`.
+- `总条数`: serving rows whose `job_id` has the prefix.
+
+For a fixed report, pass the prefixes you care about. The command prints a
+Markdown-style table to the console and reads only narrow `job_id` columns
+instead of wide JSON payload columns:
+
+```bash
+python scripts/inspect/count_job_prefix_delivery.py \
+  --profile production \
+  --prefix 'cybergym#opencode#kimi-k3#find' \
+  --prefix 'vulhub#opencode#kimi-k3#exploit' \
+  --prefix 'vulhub#codex#kimi-k3#exploit' \
+  --prefix 'vulhub#claude-code#kimi-k3#exploit' \
+  --task-label zh
+```
+
+For a longer fixed list, put one prefix per line in a file:
+
+```text
+cybergym#opencode#kimi-k3#find
+cvefactory#opencode#kimi-k3#mining-patch
+vulhub#opencode#kimi-k3#exploit
+vulhub#codex#kimi-k3#exploit
+vulhub#claude-code#kimi-k3#exploit
+```
+
+Then run:
+
+```bash
+python scripts/inspect/count_job_prefix_delivery.py \
+  --profile production \
+  --prefix-file ./artifacts/job_prefixes.txt \
+  --task-label zh
+```
+
+If no prefix is supplied, the script scans landing and serving and reports all
+valid four-component prefixes it finds. Prefer explicit prefixes for routine
+status updates because the output is stable and easier to paste into the
+tracking table.
+
 For the separate environment-config table, specify only the table name; the
 script automatically uses `WT_SDK_ENV_CONFIG_DB_URI` and reads the latest
 snapshot:
