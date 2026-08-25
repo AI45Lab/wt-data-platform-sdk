@@ -16,9 +16,10 @@ For each key, this script reports serving-table counts only:
 2. ``delivered_rows``: all serving rows in that reporting group.
 
 The implementation is intentionally read-only and narrow-column: it scans each
-existing serving HASH partition at most once and only fetches ``job_id`` and
-``reward``. That is usually much cheaper than running one query per reporting
-row, and it avoids reading the wide JSON trajectory columns.
+matching serving row once and only fetches ``job_id`` and ``reward``. When
+exact ``--job-id`` values are supplied, the SDK can prune HASH buckets and avoid
+the prefix-wide table scan. The script avoids reading the wide JSON trajectory
+columns.
 """
 
 from __future__ import annotations
@@ -129,6 +130,20 @@ def load_prefix_file(path: str | None) -> list[PrefixKey]:
     return prefixes
 
 
+def load_text_values_file(path: str | None, *, label: str) -> list[str]:
+    if not path:
+        return []
+    values: list[str] = []
+    for line_number, raw_line in enumerate(Path(path).read_text().splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "\x00" in line:
+            raise ValueError(f"{path}:{line_number}: {label} contains a NUL byte")
+        values.append(line)
+    return values
+
+
 def build_prefix_filter(prefixes: Sequence[PrefixKey]) -> str | None:
     """Build an optional SQL filter that narrows rows returned by dldb.
 
@@ -144,6 +159,13 @@ def build_prefix_filter(prefixes: Sequence[PrefixKey]) -> str | None:
         like = _escape_sql_like_pattern(value + "#")
         clauses.append(f"(job_id = '{exact}' OR job_id LIKE '{like}%' ESCAPE '\\')")
     return "(" + " OR ".join(clauses) + ")"
+
+
+def build_job_id_filter(job_ids: Sequence[str]) -> str:
+    if not job_ids:
+        raise ValueError("job_ids must be non-empty")
+    quoted = ", ".join(f"'{_escape_sql_string(job_id)}'" for job_id in job_ids)
+    return f"job_id IN ({quoted})"
 
 
 def build_config(
@@ -186,53 +208,90 @@ def _is_positive_reward(value: Any) -> bool:
         return False
 
 
-def scan_serving_counts(
+def _accumulate_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    prefixes: Sequence[PrefixKey] | None,
+    success_counts: Counter[PrefixKey],
+    delivered_counts: Counter[PrefixKey],
+) -> tuple[int, int]:
+    """Accumulate serving rows and return scanned/invalid row counts."""
+    rows_scanned = 0
+    invalid_rows = 0
+    for row in rows:
+        rows_scanned += 1
+        key = key_from_job_id(row.get("job_id"))
+        if key is None:
+            invalid_rows += 1
+            continue
+        if not should_include_key(key, prefixes):
+            continue
+        delivered_counts[key] += 1
+        if _is_positive_reward(row.get("reward")):
+            success_counts[key] += 1
+    return rows_scanned, invalid_rows
+
+
+def scan_serving_counts_by_filter(
     client: WTGatewayClient,
     *,
     table_name: str,
     filter_query: str,
     prefixes: Sequence[PrefixKey] | None,
 ) -> tuple[Counter[PrefixKey], Counter[PrefixKey], int, int]:
-    """Scan serving and return success counts, delivered counts, scanned, invalid."""
+    """Scan matching serving rows with one narrow logical-table query."""
+    success_counts: Counter[PrefixKey] = Counter()
+    delivered_counts: Counter[PrefixKey] = Counter()
+    rows = client.query_data(
+        table=table_name,
+        filter_query=filter_query,
+        columns=["job_id", "reward"],
+        limit=None,
+        checkout_latest=True,
+        exclude_none=False,
+        deserialize_json=False,
+    )
+    rows_scanned, invalid_rows = _accumulate_rows(
+        rows,
+        prefixes=prefixes,
+        success_counts=success_counts,
+        delivered_counts=delivered_counts,
+    )
+    return success_counts, delivered_counts, rows_scanned, invalid_rows
+
+
+def scan_serving_counts_by_job_ids(
+    client: WTGatewayClient,
+    *,
+    table_name: str,
+    job_ids: Sequence[str],
+    prefixes: Sequence[PrefixKey] | None,
+    batch_size: int = 50,
+) -> tuple[Counter[PrefixKey], Counter[PrefixKey], int, int]:
+    """Scan exact job IDs in HASH-pruned batches."""
     success_counts: Counter[PrefixKey] = Counter()
     delivered_counts: Counter[PrefixKey] = Counter()
     rows_scanned = 0
     invalid_rows = 0
-
-    partitions = client.list_table_partitions(table_name)
-    if not partitions:
-        return counts, rows_scanned, invalid_rows
-
-    for partition in partitions:
-        frame = client._filter_table(  # noqa: SLF001 - inspect script, SDK-only path.
-            table_name,
-            query=filter_query,
-            limit=None,
+    for offset in range(0, len(job_ids), batch_size):
+        batch = job_ids[offset : offset + batch_size]
+        rows = client.query_data(
+            table=table_name,
+            filter_query=build_job_id_filter(batch),
             columns=["job_id", "reward"],
-            partitions=[partition],
+            limit=None,
             checkout_latest=True,
-            extra={
-                "api": "count_job_prefix_delivery",
-                "partition": partition,
-            },
+            exclude_none=False,
+            deserialize_json=False,
         )
-        if "job_id" not in frame.columns:
-            raise RuntimeError(f"{table_name} query did not return job_id")
-        if "reward" not in frame.columns:
-            raise RuntimeError(f"{table_name} query did not return reward")
-
-        rows_scanned += len(frame)
-        for job_id, reward in zip(frame["job_id"].tolist(), frame["reward"].tolist(), strict=True):
-            key = key_from_job_id(job_id)
-            if key is None:
-                invalid_rows += 1
-                continue
-            if not should_include_key(key, prefixes):
-                continue
-            delivered_counts[key] += 1
-            if _is_positive_reward(reward):
-                success_counts[key] += 1
-
+        scanned, invalid = _accumulate_rows(
+            rows,
+            prefixes=prefixes,
+            success_counts=success_counts,
+            delivered_counts=delivered_counts,
+        )
+        rows_scanned += scanned
+        invalid_rows += invalid
     return success_counts, delivered_counts, rows_scanned, invalid_rows
 
 
@@ -336,6 +395,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--job-id",
+        action="append",
+        default=[],
+        help=(
+            "Exact job_id to include. Can be repeated. When supplied, the script "
+            "uses HASH-pruned exact job_id queries instead of a prefix-wide scan."
+        ),
+    )
+    parser.add_argument(
+        "--job-id-file",
+        default=None,
+        help="Optional text file containing one exact job_id per line.",
+    )
+    parser.add_argument(
         "--task-label",
         choices=("raw", "zh"),
         default="raw",
@@ -354,6 +427,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         requested_prefixes = [parse_prefix(value) for value in args.prefix]
         requested_prefixes.extend(load_prefix_file(args.prefix_file))
+        requested_job_ids = list(dict.fromkeys([
+            *args.job_id,
+            *load_text_values_file(args.job_id_file, label="job_id"),
+        ]))
         prefix_sql = build_prefix_filter(requested_prefixes)
 
         config = build_config(
@@ -366,12 +443,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             serving_filter_parts.append(prefix_sql)
 
         with WTGatewayClient(config=config) as client:
-            success_counts, delivered_counts, serving_scanned, serving_invalid = scan_serving_counts(
-                client,
-                table_name=config.tables.serving_table,
-                filter_query=" AND ".join(f"({part})" for part in serving_filter_parts),
-                prefixes=requested_prefixes or None,
-            )
+            if requested_job_ids:
+                success_counts, delivered_counts, serving_scanned, serving_invalid = (
+                    scan_serving_counts_by_job_ids(
+                        client,
+                        table_name=config.tables.serving_table,
+                        job_ids=requested_job_ids,
+                        prefixes=requested_prefixes or None,
+                    )
+                )
+            else:
+                success_counts, delivered_counts, serving_scanned, serving_invalid = (
+                    scan_serving_counts_by_filter(
+                        client,
+                        table_name=config.tables.serving_table,
+                        filter_query=" AND ".join(f"({part})" for part in serving_filter_parts),
+                        prefixes=requested_prefixes or None,
+                    )
+                )
 
         rows = build_rows(
             success_counts,

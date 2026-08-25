@@ -87,7 +87,8 @@ It reports two read-only serving counts:
 
 For a fixed report, pass the prefixes you care about. The command prints a
 Markdown-style table to the console and reads only narrow `job_id` and `reward`
-columns instead of wide JSON payload columns:
+columns instead of wide JSON payload columns. Prefix filters cannot use HASH
+partition pruning, so this mode may still need to scan across serving buckets:
 
 ```bash
 python scripts/inspect/count_job_prefix_delivery.py \
@@ -97,6 +98,17 @@ python scripts/inspect/count_job_prefix_delivery.py \
   --prefix 'vulhub#opencode#kimi-k3#exploit' \
   --prefix 'vulhub#codex#kimi-k3#exploit' \
   --prefix 'vulhub#claude-code#kimi-k3#exploit' \
+  --task-label zh
+```
+
+For faster checks when the exact job IDs are known, pass `--job-id` or
+`--job-id-file`. Exact job IDs let the SDK prune HASH buckets:
+
+```bash
+python scripts/inspect/count_job_prefix_delivery.py \
+  --profile production \
+  --job-id 'cybergym#opencode#kimi-k3#find#20260817#jz#level1#1-500-01' \
+  --job-id 'vulhub#codex#kimi-k3#exploit#20260821222106#lml' \
   --task-label zh
 ```
 
@@ -117,6 +129,15 @@ Then run:
 python scripts/inspect/count_job_prefix_delivery.py \
   --profile production \
   --prefix-file ./artifacts/job_prefixes.txt \
+  --task-label zh
+```
+
+If you also have a job-id file, prefer it for performance:
+
+```bash
+python scripts/inspect/count_job_prefix_delivery.py \
+  --profile production \
+  --job-id-file ./artifacts/job_ids.txt \
   --task-label zh
 ```
 
