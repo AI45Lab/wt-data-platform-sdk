@@ -675,6 +675,14 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing \
 # Show expected versus existing scalar indexes by partition
 python scripts/inspect/show_table_indexes.py landing_test
 
+# Show aggregate fragment statistics and index coverage for selected HASH buckets
+python scripts/inspect/show_partition_status.py --table landing_test \
+  --partition 34 --partition 94
+
+# Inspect every logical bucket, including buckets that have not materialized yet
+python scripts/inspect/show_partition_status.py \
+  --table wind_tunnel_landing --all-partitions
+
 # Scan a logical table for duplicate IDs
 python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 100
 

@@ -31,6 +31,17 @@ set -a && source .env && set +a
 python scripts/inspect/query_data.py --table landing_test --count
 ```
 
+Inspect dldb's aggregate fragment statistics and per-index row coverage for
+selected HASH buckets, or scan all logical buckets. The command is read-only;
+expected index names and types come from `wt_sdk/core/schemas.py`:
+
+```bash
+python scripts/inspect/show_partition_status.py \
+  --table landing_test --partition 34 --partition 94
+python scripts/inspect/show_partition_status.py \
+  --table wind_tunnel_landing --all-partitions
+```
+
 External users can export production serving rows as sharded JSONL files with
 the stateless delivery command. It targets `wind_tunnel_serving` by default,
 writes 1,000 rows per file, and excludes the frontend-only `search_text` column
