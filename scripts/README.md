@@ -31,6 +31,8 @@ set -a && source .env && set +a
 python scripts/inspect/query_data.py --table landing_test --count
 ```
 
+### HASH Partition Fragment and Index Status
+
 Inspect dldb's aggregate fragment statistics and per-index row coverage for
 selected HASH buckets, or scan all logical buckets. The command is read-only;
 expected index names and types come from `wt_sdk/core/schemas.py`:
@@ -41,6 +43,49 @@ python scripts/inspect/show_partition_status.py \
 python scripts/inspect/show_partition_status.py \
   --table wind_tunnel_landing --all-partitions
 ```
+
+Add `--show-all-indexes` to print the coverage of every existing index. Without
+it, the command prints details only for missing indexes, unexpected indexes,
+and indexes with an unindexed tail. Results are flushed one bucket at a time so
+a long `--all-partitions` scan remains visible in a terminal or redirected log.
+
+The summary columns are:
+
+| Column | Meaning |
+| --- | --- |
+| `BUCKET` | HASH bucket number, calculated as `stable_hash(job_id) % partitions`. |
+| `STATE` | Combined bucket health classification described below. |
+| `ROWS` | Number of live rows in the latest physical-table version. |
+| `VER` | Current Lance version number for the physical bucket table. |
+| `BYTES` | Current partition size reported by Lance. It is not total S3 usage including historical versions. |
+| `FRAGS` | Number of fragments referenced by the current version. |
+| `SMALL` | Number of fragments Lance classifies as small. |
+| `MIN` | Row count of the smallest fragment. |
+| `P50` | Median fragment row count. |
+| `P99` | 99th-percentile fragment row count. |
+| `MAX` | Row count of the largest fragment. |
+| `IDX` | Actual index count divided by the SDK-expected index count, for example `8/8`. |
+| `TAIL` | Number of existing indexes that do not fully cover the latest rows. |
+
+`STATE` can be one of the following values, or a `+`-joined combination of
+the applicable problem states:
+
+| State | Meaning | Typical action |
+| --- | --- | --- |
+| `ok` | The non-empty bucket has every expected index, no index tail, and no actionable multi-fragment condition. | None. |
+| `unmaterialized` | No physical table currently exists for this logical bucket, normally because it has never received data. | None unless a write to this bucket is unexpectedly failing. |
+| `empty_shell` | The physical bucket table exists but its latest version has zero live rows. | Usually none. |
+| `missing_idx` | A non-empty bucket is missing at least one index configured in `wt_sdk/core/schemas.py`. | Create the missing indexes. |
+| `index_tail` | At least one existing index does not cover all current rows. Unindexed rows remain queryable through scanning. | Refresh or optimize the indexes. |
+| `fragmented` | The bucket has more than one fragment and at least one is classified as small. | Consider fragment compaction. |
+| `stats_unavailable` | dldb found the physical bucket but returned no table/fragment statistics. | Inspect the bucket and dldb logs. |
+| `error` | `partition_status()` failed for this bucket; the next line contains the exception. | Investigate the reported error. |
+
+For example, `missing_idx+index_tail+fragmented` means all three maintenance
+conditions are present. `FRAGS=1 SMALL=1` is not classified as `fragmented`:
+although Lance calls the only fragment small, there is no second fragment to
+merge with it. `unmaterialized` is normally an unused bucket rather than a
+maintenance problem.
 
 External users can export production serving rows as sharded JSONL files with
 the stateless delivery command. It targets `wind_tunnel_serving` by default,

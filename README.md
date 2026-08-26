@@ -683,6 +683,8 @@ python scripts/inspect/show_partition_status.py --table landing_test \
 python scripts/inspect/show_partition_status.py \
   --table wind_tunnel_landing --all-partitions
 
+# Column definitions and STATE meanings are documented in scripts/README.md.
+
 # Scan a logical table for duplicate IDs
 python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 100
 
