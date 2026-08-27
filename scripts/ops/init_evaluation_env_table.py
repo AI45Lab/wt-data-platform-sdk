@@ -1,26 +1,34 @@
 """
-Initialize evaluation_env_config table for evaluation platform.
+Initialize a profile-selected environment-config table.
 
-This script creates the evaluation_env_config table in DLDB/LanceDB
-for storing environment configurations with SQL-like query support.
+This script creates ``env_config_test`` for the test profile or
+``evaluation_env_config`` for production in DLDB/LanceDB.
 
 The table is created in the separate environment-config database.
 """
 import argparse
 
 import dldb
-from wt_sdk.config import S3Config, resolve_env_config_db_uri
+from wt_sdk.config import (
+    S3Config,
+    resolve_env_config_db_uri,
+    resolve_env_config_table_name,
+)
 from wt_sdk.core.evaluation_env_schema import EVALUATION_ENV_SCHEMA, SCALAR_INDEX_COLUMNS
 
 
-TABLE_NAME = "evaluation_env_config"
-
-
-def init_evaluation_env_table(*, confirm_recreate: bool = False, dry_run: bool = False) -> int:
+def init_evaluation_env_table(
+    *,
+    profile: str = "test",
+    confirm_recreate: bool = False,
+    dry_run: bool = False,
+) -> int:
     """Recreate the environment-config table after explicit confirmation."""
     db_uri = resolve_env_config_db_uri()
+    table_name = resolve_env_config_table_name(profile=profile)
     print(f"Environment-config database: {db_uri}")
-    print(f"Target table: {TABLE_NAME}")
+    print(f"Profile: {'production' if profile in {'prod', 'production'} else 'test'}")
+    print(f"Target table: {table_name}")
 
     if dry_run:
         print("Dry run: no table or data was changed.")
@@ -39,27 +47,27 @@ def init_evaluation_env_table(*, confirm_recreate: bool = False, dry_run: bool =
 
     # Check if table already exists and try to drop it
     # We try to drop directly first since the table existence check is unreliable
-    print(f"Checking if table '{TABLE_NAME}' exists...")
+    print(f"Checking if table '{table_name}' exists...")
     try:
-        session.drop_table(TABLE_NAME)
-        print(f"Dropped existing table '{TABLE_NAME}'")
+        session.drop_table(table_name)
+        print(f"Dropped existing table '{table_name}'")
     except Exception:
-        print(f"Table '{TABLE_NAME}' does not exist or could not be dropped (this is OK)")
+        print(f"Table '{table_name}' does not exist or could not be dropped (this is OK)")
 
     # 1. Create table (no partition needed for this table)
-    print(f"Creating table '{TABLE_NAME}'...")
+    print(f"Creating table '{table_name}'...")
     try:
         session.create_table(
-            TABLE_NAME,
+            table_name,
             EVALUATION_ENV_SCHEMA,
         )
-        print(f"Table '{TABLE_NAME}' created successfully")
+        print(f"Table '{table_name}' created successfully")
     except Exception as e:
         if "already exists" in str(e):
-            print(f"Table '{TABLE_NAME}' already exists with a different schema.")
+            print(f"Table '{table_name}' already exists with a different schema.")
             print(f"Please manually drop it first using LanceDB directly:")
             print(f"  db = lancedb.connect('{db_uri}', storage_options=...)")
-            print(f"  db.drop_table('{TABLE_NAME}')")
+            print(f"  db.drop_table('{table_name}')")
             raise
         raise
 
@@ -67,14 +75,14 @@ def init_evaluation_env_table(*, confirm_recreate: bool = False, dry_run: bool =
     print("\nCreating scalar indexes for better query performance...")
     for column in SCALAR_INDEX_COLUMNS:
         print(f"  Creating index on '{column}'...")
-        session.create_scalar_index(TABLE_NAME, column)
+        session.create_scalar_index(table_name, column)
         print(f"  ✓ Index created on '{column}'")
 
     print("\n" + "=" * 80)
     print("Evaluation environment config table initialization complete!")
     print("=" * 80)
-    print(f"  Table: {TABLE_NAME}")
-    print(f"  Location: {db_uri}/{TABLE_NAME}.lance")
+    print(f"  Table: {table_name}")
+    print(f"  Location: {db_uri}/{table_name}.lance")
     print(f"  Schema: {len(EVALUATION_ENV_SCHEMA)} fields")
     print(f"  Indexes: {len(SCALAR_INDEX_COLUMNS)} scalar indexes")
     print(f"\n  Indexes created on:")
@@ -85,12 +93,21 @@ def init_evaluation_env_table(*, confirm_recreate: bool = False, dry_run: bool =
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Recreate the evaluation environment-config table."
+        description="Recreate the profile-selected environment-config table."
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("test", "prod", "production"),
+        default="test",
+        help=(
+            "Select env_config_test for test or evaluation_env_config for "
+            "production. Defaults to test."
+        ),
     )
     parser.add_argument(
         "--confirm-recreate",
         action="store_true",
-        help="Required: drop and recreate evaluation_env_config.",
+        help="Required: drop and recreate the selected env-config table.",
     )
     parser.add_argument(
         "--dry-run",
@@ -99,6 +116,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     return init_evaluation_env_table(
+        profile=args.profile,
         confirm_recreate=args.confirm_recreate,
         dry_run=args.dry_run,
     )

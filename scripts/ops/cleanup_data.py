@@ -14,8 +14,8 @@ Usage:
   # Delete from custom database
   python scripts/ops/cleanup_data.py --db-uri s3://my-bucket --table my_table --query "dataset_type = 'SFT'"
 
-  # Delete from the separate environment-config database by table name
-  python scripts/ops/cleanup_data.py --table evaluation_env_config --query "job_id = 'gateway'" --dry-run
+  # Delete from the separate test environment-config table by name
+  python scripts/ops/cleanup_data.py --table env_config_test --query "job_id = 'gateway'" --dry-run
 
   # Delete all data from a table (requires --force flag)
   python scripts/ops/cleanup_data.py --table landing_test --force
@@ -43,8 +43,10 @@ import dldb
 import pandas as pd
 from wt_sdk.client import WTGatewayClient
 from wt_sdk.config import (
+    DEFAULT_ENV_CONFIG_TABLE,
     DEFAULT_LANDING_TABLE,
     DEFAULT_SERVING_TABLE,
+    TEST_ENV_CONFIG_TABLE,
     TEST_LANDING_TABLE,
     TEST_SERVING_TABLE,
     GatewayConfig,
@@ -54,7 +56,7 @@ from wt_sdk.config import (
 )
 
 
-ENV_CONFIG_TABLE_NAMES = {"evaluation_env_config"}
+ENV_CONFIG_TABLE_NAMES = {DEFAULT_ENV_CONFIG_TABLE, TEST_ENV_CONFIG_TABLE}
 LANDING_TABLE_NAMES = {DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE}
 SERVING_TABLE_NAMES = {DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE}
 TRAJECTORY_TABLE_NAMES = LANDING_TABLE_NAMES | SERVING_TABLE_NAMES

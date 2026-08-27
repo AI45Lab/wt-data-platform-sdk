@@ -21,17 +21,23 @@ class EnvConfigManager:
 
     def __init__(
         self,
-        table_name: str = "evaluation_env_config",
+        table_name: Optional[str] = None,
         db_uri: Optional[str] = None,
         storage_options: Optional[Dict[str, Any]] = None,
         dldb_model: Optional[str] = None,
         enable_dldb_timing_logs: bool = False,
         log_dldb_metrics_summary_on_close: bool = True,
         dldb_metrics_log_path: Optional[str] = None,
+        *,
+        profile: Optional[str] = None,
     ):
-        from wt_sdk.config import S3Config, resolve_env_config_db_uri
+        from wt_sdk.config import (
+            S3Config,
+            resolve_env_config_db_uri,
+            resolve_env_config_table_name,
+        )
 
-        self.table_name = table_name
+        self.table_name = resolve_env_config_table_name(table_name, profile)
         self.db_uri = resolve_env_config_db_uri(db_uri)
         self.storage_options = storage_options or S3Config().to_storage_options()
         self._dldb_model = resolve_dldb_model(dldb_model)
@@ -249,7 +255,7 @@ class EnvConfigManager:
 
         Mimics the SQLite pattern:
             SELECT id, env_name, env_id, env_params, image, group_id, ...
-            FROM evaluation_env_config
+            FROM <profile-selected environment-config table>
             WHERE {filter_query}
             ORDER BY id ASC
             LIMIT ? OFFSET ?

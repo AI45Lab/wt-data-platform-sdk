@@ -23,13 +23,16 @@ python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_serving --all-partitions
 ```
 
-The separate, unpartitioned environment-config table has its own maintenance
-command and automatically resolves `WT_SDK_ENV_CONFIG_DB_URI` (default
-`s3://wind-tunnel-env-config`):
+The separate, unpartitioned environment-config tables have their own maintenance
+command and automatically resolve `WT_SDK_ENV_CONFIG_DB_URI` (default
+`s3://wind-tunnel-env-config`). The command defaults to `env_config_test`;
+production must be selected explicitly:
 
 ```bash
 python scripts/ops/maintain_env_config_indexes.py --dry-run
 python scripts/ops/maintain_env_config_indexes.py
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production --dry-run
 ```
 
 It creates missing indexes configured in
@@ -37,6 +40,16 @@ It creates missing indexes configured in
 compact fragments, clean old versions according to dldb's retention policy,
 and refresh index coverage. Pass `--no-optimize` only to create missing indexes
 without the full maintenance pass.
+
+Initialize or recreate the test table only after reviewing the dry-run. The
+same command can target production only with an explicit profile:
+
+```bash
+python scripts/ops/init_evaluation_env_table.py --dry-run
+python scripts/ops/init_evaluation_env_table.py --confirm-recreate
+python scripts/ops/init_evaluation_env_table.py \
+  --profile production --dry-run
+```
 
 Load the integrating service's environment configuration before invoking a
 script. For local development:
@@ -216,13 +229,13 @@ If no prefix is supplied, the script scans serving and reports all valid
 serving groups it finds. Prefer explicit prefixes for routine status updates
 because the output is stable and easier to paste into the tracking table.
 
-For the separate environment-config table, specify only the table name; the
+For the separate environment-config tables, specify the exact table name; the
 script automatically uses `WT_SDK_ENV_CONFIG_DB_URI` and reads the latest
 snapshot:
 
 ```bash
 python scripts/inspect/query_data.py \
-  --table evaluation_env_config \
+  --table env_config_test \
   --query "job_id = 'job-001'" \
   --columns "id,job_id,env_id,env_name,group_id,finished"
 
@@ -234,15 +247,16 @@ python scripts/inspect/query_data.py \
 
 Production-changing commands require their own explicit confirmation flags.
 
-Use `cleanup_data.py` for filtered deletes. `evaluation_env_config`
-automatically uses `WT_SDK_ENV_CONFIG_DB_URI`; landing and serving tables use
+Use `cleanup_data.py` for filtered deletes. `env_config_test` and
+`evaluation_env_config`
+automatically use `WT_SDK_ENV_CONFIG_DB_URI`; landing and serving tables use
 `WT_SDK_DB_URI` unless `--db-uri` is supplied. For the four active
 landing/serving tables, exact `job_id = '...'` filters use SDK HASH bucket
 pruning and dry-runs read only lightweight preview/count columns:
 
 ```bash
 python scripts/ops/cleanup_data.py \
-  --table evaluation_env_config \
+  --table env_config_test \
   --query "job_id = 'gateway'" \
   --dry-run
 

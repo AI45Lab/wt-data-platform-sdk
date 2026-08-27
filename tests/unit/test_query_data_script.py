@@ -69,7 +69,9 @@ def test_resolve_db_uri_uses_env_config_database(monkeypatch):
     monkeypatch.setenv("WT_SDK_ENV_CONFIG_DB_URI", "s3://env-config-db")
 
     assert query_data._resolve_db_uri("evaluation_env_config", None) == "s3://env-config-db"
+    assert query_data._resolve_db_uri("env_config_test", None) == "s3://env-config-db"
     assert query_data._uses_latest_snapshot_by_default("evaluation_env_config") is True
+    assert query_data._uses_latest_snapshot_by_default("env_config_test") is True
 
 
 def test_resolve_db_uri_respects_explicit_database(monkeypatch):

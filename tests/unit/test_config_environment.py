@@ -1,9 +1,12 @@
 from wt_sdk.config import (
+    DEFAULT_ENV_CONFIG_TABLE,
     DEFAULT_ENV_CONFIG_DB_URI,
+    TEST_ENV_CONFIG_TABLE,
     GatewayConfig,
     S3Config,
     TableConfig,
     resolve_env_config_db_uri,
+    resolve_env_config_table_name,
 )
 
 
@@ -83,3 +86,26 @@ def test_env_config_database_uses_dedicated_override(monkeypatch):
     monkeypatch.setenv("WT_SDK_ENV_CONFIG_DB_URI", "s3://test-env-config")
     assert resolve_env_config_db_uri() == "s3://test-env-config"
     assert resolve_env_config_db_uri("s3://explicit-env-config") == "s3://explicit-env-config"
+
+
+def test_env_config_table_defaults_to_test_profile(monkeypatch):
+    monkeypatch.delenv("WT_SDK_PROFILE", raising=False)
+
+    assert resolve_env_config_table_name() == TEST_ENV_CONFIG_TABLE
+
+
+def test_env_config_table_resolves_profile_and_alias(monkeypatch):
+    monkeypatch.setenv("WT_SDK_PROFILE", "production")
+
+    assert resolve_env_config_table_name() == DEFAULT_ENV_CONFIG_TABLE
+    assert resolve_env_config_table_name(profile="prod") == DEFAULT_ENV_CONFIG_TABLE
+    assert resolve_env_config_table_name(profile="test") == TEST_ENV_CONFIG_TABLE
+
+
+def test_explicit_env_config_table_overrides_profile(monkeypatch):
+    monkeypatch.setenv("WT_SDK_PROFILE", "production")
+
+    assert (
+        resolve_env_config_table_name("custom_env_config", profile="test")
+        == "custom_env_config"
+    )

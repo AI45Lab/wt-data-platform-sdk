@@ -9,8 +9,8 @@ def test_env_config_reads_checkout_latest_by_default_across_managers():
     env_id = f"wt-sdk-integration-env-{suffix}"
     job_id = f"wt-sdk-integration-job-{suffix}"
 
-    reader = EnvConfigManager()
-    writer = EnvConfigManager()
+    reader = EnvConfigManager(profile="test")
+    writer = EnvConfigManager(profile="test")
     try:
         writer.save_config(
             {

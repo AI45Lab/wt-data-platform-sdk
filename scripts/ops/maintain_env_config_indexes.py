@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Create missing indexes and fully optimize the env-config table.
+"""Create missing indexes and fully optimize a profile-selected env-config table.
 
-The target is always the unpartitioned ``evaluation_env_config`` table in the
-database selected by ``WT_SDK_ENV_CONFIG_DB_URI``. Use ``--db-uri`` only for an
-explicit override.
+The target is ``env_config_test`` for the test profile and
+``evaluation_env_config`` for production. Both are unpartitioned tables in the
+database selected by ``WT_SDK_ENV_CONFIG_DB_URI``.
 
 Examples:
   python scripts/ops/maintain_env_config_indexes.py --dry-run
   python scripts/ops/maintain_env_config_indexes.py
+  python scripts/ops/maintain_env_config_indexes.py --profile production --dry-run
   python scripts/ops/maintain_env_config_indexes.py --no-optimize
 """
 
@@ -18,37 +19,41 @@ from typing import Any
 
 import dldb
 
-from wt_sdk.config import S3Config, resolve_env_config_db_uri
+from wt_sdk.config import (
+    S3Config,
+    TEST_ENV_CONFIG_TABLE,
+    resolve_env_config_db_uri,
+    resolve_env_config_table_name,
+)
 from wt_sdk.core.evaluation_env_schema import (
     EVALUATION_ENV_SCHEMA,
     SCALAR_INDEX_COLUMNS,
 )
 
 
-TABLE_NAME = "evaluation_env_config"
 INDEX_TYPE = "BTREE"
 
 
-def _pin_exact_dldb_table(session) -> None:
+def _pin_exact_dldb_table(session, table_name: str) -> None:
     """Pin the exact information-schema record before index operations."""
     from dldb.table import SimpleTable
 
-    record = session.schema_table.get(TABLE_NAME)
+    record = session.schema_table.get(table_name)
     if record is None:
         raise ValueError(
-            f"Table {TABLE_NAME!r} does not exist in dldb information_schema"
+            f"Table {table_name!r} does not exist in dldb information_schema"
         )
     if getattr(record, "partition_column", None):
-        raise ValueError(f"Table {TABLE_NAME!r} must be unpartitioned")
+        raise ValueError(f"Table {table_name!r} must be unpartitioned")
 
     # This legacy table has no partition column, although older dldb metadata
     # may report partition_type="VALUE". The missing column is authoritative:
     # opening it as a ValuePartitionTable raises "Partition column must be
     # specified". Pin the exact physical table as an unpartitioned table.
-    session.tables[TABLE_NAME] = SimpleTable.from_table_name(
+    session.tables[table_name] = SimpleTable.from_table_name(
         session.db_conn,
         session.schema_table,
-        TABLE_NAME,
+        table_name,
     )
 
 
@@ -75,26 +80,27 @@ def _coverage_row(item: Any) -> dict[str, Any]:
 def maintain_env_config_indexes(
     session,
     *,
+    table_name: str = TEST_ENV_CONFIG_TABLE,
     create_missing: bool = True,
     optimize: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Create missing indexes, compact fragments, and refresh index tails."""
-    _pin_exact_dldb_table(session)
+    _pin_exact_dldb_table(session, table_name)
 
-    actual_schema = session.get_schema(TABLE_NAME)
+    actual_schema = session.get_schema(table_name)
     expected_fields = set(EVALUATION_ENV_SCHEMA.names)
     actual_fields = set(actual_schema.names)
     missing_schema_fields = sorted(expected_fields - actual_fields)
     if missing_schema_fields:
         raise ValueError(
-            f"Table {TABLE_NAME!r} is missing schema fields required by the SDK: "
+            f"Table {table_name!r} is missing schema fields required by the SDK: "
             + ", ".join(missing_schema_fields)
         )
 
     configured = [(column, INDEX_TYPE) for column in SCALAR_INDEX_COLUMNS]
     existing_before = sorted(
-        {_index_name(index) for index in session.list_indices(TABLE_NAME)}
+        {_index_name(index) for index in session.list_indices(table_name)}
     )
     missing = [
         (column, index_type)
@@ -103,7 +109,7 @@ def maintain_env_config_indexes(
     ]
 
     summary: dict[str, Any] = {
-        "table_name": TABLE_NAME,
+        "table_name": table_name,
         "expected_indexes": [f"{column}_idx" for column, _ in configured],
         "existing_indexes_before": existing_before,
         "missing_indexes_before": [f"{column}_idx" for column, _ in missing],
@@ -122,7 +128,7 @@ def maintain_env_config_indexes(
         for column, index_type in missing:
             try:
                 session.create_scalar_index(
-                    TABLE_NAME,
+                    table_name,
                     column,
                     index_type=index_type,
                 )
@@ -148,7 +154,7 @@ def maintain_env_config_indexes(
                 raise RuntimeError(
                     "Installed dldb does not expose session.optimize(...)"
                 )
-            session.optimize(TABLE_NAME)
+            session.optimize(table_name)
             summary["optimized"] = True
         except Exception as exc:
             summary["errors"].append(
@@ -161,7 +167,7 @@ def maintain_env_config_indexes(
     try:
         summary["coverage"] = [
             _coverage_row(item)
-            for item in session.list_index_coverage(TABLE_NAME)
+            for item in session.list_index_coverage(table_name)
         ]
     except Exception as exc:
         summary["errors"].append(
@@ -177,9 +183,18 @@ def maintain_env_config_indexes(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Create missing evaluation_env_config indexes, compact fragments, "
-            "refresh indexes, and clean old versions"
+            "Create missing profile-selected env-config indexes, compact "
+            "fragments, refresh indexes, and clean old versions"
         )
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("test", "prod", "production"),
+        default="test",
+        help=(
+            "Select env_config_test for test or evaluation_env_config for "
+            "production. Defaults to test."
+        ),
     )
     parser.add_argument(
         "--db-uri",
@@ -210,9 +225,10 @@ def main() -> int:
         parser.error("both maintenance actions cannot be disabled")
 
     db_uri = resolve_env_config_db_uri(args.db_uri)
+    table_name = resolve_env_config_table_name(profile=args.profile)
     print(f"Environment-config database: {db_uri}")
-    print(f"Table: {TABLE_NAME}")
-    print(f"Table URI: {db_uri}/{TABLE_NAME}.lance")
+    print(f"Table: {table_name}")
+    print(f"Table URI: {db_uri}/{table_name}.lance")
 
     session = dldb.connect(
         db_uri,
@@ -221,6 +237,7 @@ def main() -> int:
     try:
         summary = maintain_env_config_indexes(
             session,
+            table_name=table_name,
             create_missing=not args.no_create_missing,
             optimize=not args.no_optimize,
             dry_run=args.dry_run,

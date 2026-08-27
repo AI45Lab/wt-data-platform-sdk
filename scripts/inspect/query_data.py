@@ -18,8 +18,8 @@ Usage:
   # Query from custom database
   python scripts/inspect/query_data.py --db-uri s3://my-bucket --table my_table --query "reward > 0.5"
 
-  # Query the separate environment-config database by table name
-  python scripts/inspect/query_data.py --table evaluation_env_config --limit 5
+  # Query the separate test environment-config table by name
+  python scripts/inspect/query_data.py --table env_config_test --limit 5
 
   # Query with filter and limit
   python scripts/inspect/query_data.py --table landing_test --query "reward > 0.9" --limit 2
@@ -71,8 +71,10 @@ import pandas as pd
 import dldb
 from wt_sdk.client import WTGatewayClient
 from wt_sdk.config import (
+    DEFAULT_ENV_CONFIG_TABLE,
     DEFAULT_LANDING_TABLE,
     DEFAULT_SERVING_TABLE,
+    TEST_ENV_CONFIG_TABLE,
     TEST_LANDING_TABLE,
     TEST_SERVING_TABLE,
     GatewayConfig,
@@ -90,7 +92,7 @@ JSON_COLUMNS = {
     "meta_json",
 }
 
-ENV_CONFIG_TABLE_NAMES = {"evaluation_env_config"}
+ENV_CONFIG_TABLE_NAMES = {DEFAULT_ENV_CONFIG_TABLE, TEST_ENV_CONFIG_TABLE}
 TRAJECTORY_TABLE_NAMES = {
     DEFAULT_LANDING_TABLE,
     DEFAULT_SERVING_TABLE,

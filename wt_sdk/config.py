@@ -13,8 +13,10 @@ DEFAULT_DB_URI = "s3://wind-tunnel-dldb"
 DEFAULT_ENV_CONFIG_DB_URI = "s3://wind-tunnel-env-config"
 DEFAULT_LANDING_TABLE = "wind_tunnel_landing"
 DEFAULT_SERVING_TABLE = "wind_tunnel_serving"
+DEFAULT_ENV_CONFIG_TABLE = "evaluation_env_config"
 TEST_LANDING_TABLE = "landing_test"
 TEST_SERVING_TABLE = "serving_test"
+TEST_ENV_CONFIG_TABLE = "env_config_test"
 
 
 def _env(*names: str) -> Optional[str]:
@@ -37,6 +39,20 @@ def _resolve_table_profile(profile: Optional[str]) -> str:
 def resolve_env_config_db_uri(explicit_db_uri: Optional[str] = None) -> str:
     """Resolve the separate database used by evaluation environment configs."""
     return explicit_db_uri or _env("WT_SDK_ENV_CONFIG_DB_URI") or DEFAULT_ENV_CONFIG_DB_URI
+
+
+def resolve_env_config_table_name(
+    explicit_table_name: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> str:
+    """Resolve the profile-specific environment-config table name."""
+    if explicit_table_name and explicit_table_name.strip():
+        return explicit_table_name.strip()
+
+    resolved_profile = _resolve_table_profile(profile)
+    if resolved_profile == "test":
+        return TEST_ENV_CONFIG_TABLE
+    return DEFAULT_ENV_CONFIG_TABLE
 
 
 @dataclass

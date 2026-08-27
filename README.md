@@ -82,10 +82,10 @@ services:
 `WT_SDK_PROFILE` selects default logical tables. Explicit `GatewayConfig`
 values and method arguments such as `search(table="...")` take precedence.
 
-| Profile | Landing table | Serving table | ETL checkpoint table (only when ETL runs) |
-| --- | --- | --- | --- |
-| `test` or omitted | `landing_test` | `serving_test` | `etl_checkpoints_test` |
-| `production` or `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `wind_tunnel_etl_checkpoints` |
+| Profile | Landing table | Serving table | Environment-config table | ETL checkpoint table (only when ETL runs) |
+| --- | --- | --- | --- | --- |
+| `test` or omitted | `landing_test` | `serving_test` | `env_config_test` | `etl_checkpoints_test` |
+| `production` or `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `evaluation_env_config` | `wind_tunnel_etl_checkpoints` |
 
 Omitting `WT_SDK_PROFILE` safely defaults to `test`. Production access must be
 selected explicitly with `production` or `prod`.
@@ -98,10 +98,11 @@ manual ETL by job/session/time/filter do not require or read this setting.
 Missing it does not affect `WT_SDK_PROFILE` resolution. When the ETL state
 database is used, the same profile selects the checkpoint table shown above.
 
-`EnvConfigManager` uses the separate `WT_SDK_ENV_CONFIG_DB_URI` database for
-`evaluation_env_config`; it is not affected by `WT_SDK_PROFILE`. The endpoint
-and AWS credentials above are shared by both databases. An explicit `db_uri=`
-passed to `EnvConfigManager` takes precedence.
+`EnvConfigManager` uses the separate `WT_SDK_ENV_CONFIG_DB_URI` database. The
+same profile selects `env_config_test` or `evaluation_env_config`; an explicit
+`table_name=` overrides the profile, and an explicit `db_uri=` overrides the
+environment-config database URI. The endpoint and AWS credentials above are
+shared by both databases.
 Environment-config reads use `checkout_latest=True` by default so a long-lived
 process can see configs committed by another process after it started.
 The default is backward-compatible with existing callers; pass
@@ -494,10 +495,19 @@ current result frame.
 
 ### Environment Configs
 
-Environment configs live in the separate `evaluation_env_config` table selected
-by `WT_SDK_ENV_CONFIG_DB_URI`. Read APIs default to `checkout_latest=True` so a
-long-lived gateway process can see configs written by a launcher process after
-the gateway started.
+Environment configs live in the separate database selected by
+`WT_SDK_ENV_CONFIG_DB_URI`. `WT_SDK_PROFILE` selects `env_config_test` for test
+or `evaluation_env_config` for production. An explicit `table_name=` overrides
+the profile. Read APIs default to `checkout_latest=True` so a long-lived gateway
+process can see configs written by a launcher process after the gateway started.
+
+```python
+from wt_sdk import EnvConfigManager
+
+test_envs = EnvConfigManager()  # test is the safe default
+production_envs = EnvConfigManager(profile="production")
+explicit_envs = EnvConfigManager(table_name="evaluation_env_config")
+```
 
 | Method | Purpose |
 | --- | --- |
@@ -514,8 +524,8 @@ names. The exact table name selects the landing or serving index definitions.
 Callers must provide raw job IDs/HASH bucket integers or `all_partitions=True`;
 the method creates missing indexes and runs dldb optimize by default.
 
-The unpartitioned `evaluation_env_config` table uses its own database and
-maintenance command. Its default database URI is
+The two unpartitioned environment-config tables use their own database and
+maintenance command. The default database URI is
 `s3://wind-tunnel-env-config`, overridden by `WT_SDK_ENV_CONFIG_DB_URI` or
 `--db-uri`. Run a read-only preview first, then create missing configured
 indexes and perform full table maintenance:
@@ -523,6 +533,11 @@ indexes and perform full table maintenance:
 ```bash
 python scripts/ops/maintain_env_config_indexes.py --dry-run
 python scripts/ops/maintain_env_config_indexes.py
+
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production --dry-run
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production
 ```
 
 By default the command calls dldb's full `optimize()`: it compacts fragments,
@@ -593,13 +608,17 @@ python scripts/ops/table_manager.py show-schema wind_tunnel_landing
 # List physical dldb/Lance tables behind a logical table
 python scripts/ops/table_manager.py show-physical landing_test
 
-# Inspect the separate environment-config table
+# Inspect the production environment-config table
 python scripts/ops/table_manager.py show-schema evaluation_env_config \
   --db-uri "$WT_SDK_ENV_CONFIG_DB_URI"
 
-# Environment-config initialization is destructive; preview or explicitly confirm it
+# Environment-config initialization defaults to the test profile and is destructive
 python scripts/ops/init_evaluation_env_table.py --dry-run
 python scripts/ops/init_evaluation_env_table.py --confirm-recreate
+
+# Production requires an explicit profile as well as destructive confirmation
+python scripts/ops/init_evaluation_env_table.py \
+  --profile production --dry-run
 
 # Interactive delete: type the exact table name, then DROP
 python scripts/ops/table_manager.py drop landing_test
@@ -649,14 +668,14 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing \
   --distinct "job_id,session_id" \
   --output ./artifacts/panjia_distinct_sessions.json
 
-# Query the separate environment-config table; the script automatically uses
-# WT_SDK_ENV_CONFIG_DB_URI for this table name
-python scripts/inspect/query_data.py --table evaluation_env_config \
+# Query the test environment-config table; both env table names automatically
+# use WT_SDK_ENV_CONFIG_DB_URI
+python scripts/inspect/query_data.py --table env_config_test \
   --query "job_id = 'job-001'" \
   --columns "id,job_id,env_id,env_name,group_id,finished" \
   --limit 20
 
-# Count environment configs for one job
+# Count production environment configs for one job
 python scripts/inspect/query_data.py --table evaluation_env_config \
   --query "job_id = 'job-001'" --count
 
@@ -727,12 +746,12 @@ python scripts/ops/cleanup_data.py --table landing_test \
 python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
 
-# Preview dirty env config rows; this table automatically uses WT_SDK_ENV_CONFIG_DB_URI
-python scripts/ops/cleanup_data.py --table evaluation_env_config \
+# Preview dirty test env config rows; this table automatically uses WT_SDK_ENV_CONFIG_DB_URI
+python scripts/ops/cleanup_data.py --table env_config_test \
   --query "job_id = 'gateway'" --dry-run
 
-# Delete dirty env config rows after preview
-python scripts/ops/cleanup_data.py --table evaluation_env_config \
+# Delete dirty test env config rows after preview
+python scripts/ops/cleanup_data.py --table env_config_test \
   --query "job_id = 'gateway'"
 
 # Preview and patch filtered landing rows in the test profile
