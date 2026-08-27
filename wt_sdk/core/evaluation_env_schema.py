@@ -53,6 +53,7 @@ EVALUATION_ENV_SCHEMA = pa.schema([
 SCALAR_INDEX_COLUMNS = [
     "env_name",   # For filtering by environment name
     "env_id",     # For lookups by environment ID
+    "job_id",     # For job-scoped config reads and cleanup
     "group_id",   # For grouping queries (GRPO)
     "finished",   # For filtering by completion status
 ]

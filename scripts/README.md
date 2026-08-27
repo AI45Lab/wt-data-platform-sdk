@@ -23,6 +23,21 @@ python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_serving --all-partitions
 ```
 
+The separate, unpartitioned environment-config table has its own maintenance
+command and automatically resolves `WT_SDK_ENV_CONFIG_DB_URI` (default
+`s3://wind-tunnel-env-config`):
+
+```bash
+python scripts/ops/maintain_env_config_indexes.py --dry-run
+python scripts/ops/maintain_env_config_indexes.py
+```
+
+It creates missing indexes configured in
+`wt_sdk/core/evaluation_env_schema.py`, then calls dldb's full `optimize()` to
+compact fragments, clean old versions according to dldb's retention policy,
+and refresh index coverage. Pass `--no-optimize` only to create missing indexes
+without the full maintenance pass.
+
 Load the integrating service's environment configuration before invoking a
 script. For local development:
 

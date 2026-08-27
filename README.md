@@ -514,6 +514,22 @@ names. The exact table name selects the landing or serving index definitions.
 Callers must provide raw job IDs/HASH bucket integers or `all_partitions=True`;
 the method creates missing indexes and runs dldb optimize by default.
 
+The unpartitioned `evaluation_env_config` table uses its own database and
+maintenance command. Its default database URI is
+`s3://wind-tunnel-env-config`, overridden by `WT_SDK_ENV_CONFIG_DB_URI` or
+`--db-uri`. Run a read-only preview first, then create missing configured
+indexes and perform full table maintenance:
+
+```bash
+python scripts/ops/maintain_env_config_indexes.py --dry-run
+python scripts/ops/maintain_env_config_indexes.py
+```
+
+By default the command calls dldb's full `optimize()`: it compacts fragments,
+cleans old versions according to dldb's retention policy, and refreshes index
+coverage. Use `--no-optimize` only when the operation should create missing
+indexes without the full maintenance pass.
+
 ## Timing and Metrics
 
 ```bash
