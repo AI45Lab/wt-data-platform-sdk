@@ -148,18 +148,31 @@ class WTGatewayClient:
         extra: Optional[Dict[str, Any]] = None,
     ) -> pd.DataFrame:
         self._pin_exact_dldb_table(table_name)
-        df = self.session.filter(
-            table_name,
-            query=query,
-            limit=limit,
-            columns=columns,
-            offset=offset,
-            partitions=partitions,
-            partition_cond=partition_cond,
-            order_by=order_by,
-            ascending=ascending,
-            checkout_latest=checkout_latest,
-        )
+        try:
+            df = self.session.filter(
+                table_name,
+                query=query,
+                limit=limit,
+                columns=columns,
+                offset=offset,
+                partitions=partitions,
+                partition_cond=partition_cond,
+                order_by=order_by,
+                ascending=ascending,
+                checkout_latest=checkout_latest,
+            )
+        except ValueError as exc:
+            # HASH partition pruning can target a bucket that was never created
+            # (partitions are created lazily on first write). For a read that is
+            # only checking for existing rows this means "no rows yet", not an
+            # error: return an empty result instead of propagating the dldb
+            # "partition ... does not exist" ValueError.
+            if "does not exist" in str(exc) and "partition" in str(exc):
+                logger.warning(
+                    f"Skipping non-existent partition(s) for table '{table_name}': {exc}"
+                )
+                return pd.DataFrame()
+            raise
         timing = self._extract_dldb_timing_from_df(df) or self._extract_dldb_last_call()
         log_extra = {
             "limit": limit,

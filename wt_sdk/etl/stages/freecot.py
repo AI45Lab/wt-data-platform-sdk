@@ -1,13 +1,14 @@
-"""Replay Claude encrypted reasoning into landing messages."""
+"""Replay encrypted reasoning into landing messages for Claude and GPT models."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
+import time
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
+from urllib import error, request
 
 from ..exceptions import StageTransformError
 from ..stage import ETLStage, Session, SessionPatch, StageContext
@@ -17,28 +18,164 @@ _ANT_THINKING_PATTERN = re.compile(
 )
 _COT_TOKENS_PATTERN = re.compile(r"<!--\s*cot_tokens\s*:\s*\d+\s*-->", re.IGNORECASE)
 
+_RETRYABLE_HTTP_CODES = {408, 422, 429}
+
+_CLAUDE_ENDPOINT = "extract-claude-cot"
+_GPT_ENDPOINT = "extract-gpt-cot"
+
+
+class _ReplayError(RuntimeError):
+    pass
+
+
+def _provider_family(agent_model: str) -> str | None:
+    """Classify the provider family from an agent model name."""
+
+    model = (agent_model or "").lower()
+    if "claude" in model:
+        return "claude"
+    if "gpt" in model:
+        return "gpt"
+    return None
+
+
+def _service_base_url(url: str) -> str:
+    """Normalize a service URL to a base URL ending with ``/v1/``.
+
+    Accepts either a bare base URL (``http://host:8080/v1/``) or a full
+    endpoint URL (``http://host:8080/v1/extract-claude-cot``) and returns
+    the base URL with a trailing slash.
+    """
+
+    if not isinstance(url, str) or not url:
+        raise ValueError("service_url must be a non-empty string")
+    stripped = url.rstrip("/")
+    for endpoint in (_CLAUDE_ENDPOINT, _GPT_ENDPOINT, "extract-fable-cot"):
+        suffix = f"/v1/{endpoint}"
+        if stripped.endswith(suffix):
+            stripped = stripped[: -len(endpoint)]
+            break
+    if not stripped.endswith("/v1"):
+        raise ValueError(
+            "service_url must end with /v1/ or /v1/<endpoint>"
+        )
+    return stripped + "/"
+
+
+class _HttpReplayClient:
+    """Minimal HTTP client for the Origin-CoT extraction service.
+
+    Supports both Claude (``extract-claude-cot`` with ``x-api-key``) and
+    GPT (``extract-gpt-cot`` with ``Authorization: Bearer``) families.
+    """
+
+    def __init__(
+        self,
+        service_url: str,
+        wrapper_key: str,
+        *,
+        upstream_api_key: str | None = None,
+        timeout_seconds: float = 300.0,
+        max_attempts: int = 3,
+    ) -> None:
+        if not service_url.startswith(("http://", "https://")):
+            raise ValueError("service_url must be an HTTP(S) URL")
+        if not wrapper_key:
+            raise ValueError("wrapper_key must not be empty")
+        if timeout_seconds <= 0 or max_attempts <= 0:
+            raise ValueError("timeout_seconds and max_attempts must be positive")
+        self._base_url = _service_base_url(service_url)
+        self.wrapper_key = wrapper_key
+        self.upstream_api_key = upstream_api_key
+        self.timeout_seconds = timeout_seconds
+        self.max_attempts = max_attempts
+
+    def extract(
+        self,
+        signature: str | list[dict[str, Any]],
+        model: str,
+        max_tokens: int,
+        *,
+        family: str,
+    ) -> str:
+        if family == "claude":
+            endpoint = _CLAUDE_ENDPOINT
+            auth_header = ("x-api-key", self.wrapper_key)
+        elif family == "gpt":
+            endpoint = _GPT_ENDPOINT
+            auth_header = ("Authorization", f"Bearer {self.wrapper_key}")
+        else:
+            raise ValueError(f"unsupported provider family: {family!r}")
+
+        payload: dict[str, object] = {
+            "signature": signature,
+            "model": model,
+            "max_tokens": max_tokens,
+        }
+        if self.upstream_api_key:
+            payload["api_key"] = self.upstream_api_key
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        http_request = request.Request(
+            self._base_url + endpoint,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                auth_header[0]: auth_header[1],
+            },
+            method="POST",
+        )
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                with request.urlopen(
+                    http_request,
+                    timeout=self.timeout_seconds,
+                ) as response:
+                    text = response.read().decode("utf-8")
+            except error.HTTPError as failure:
+                retryable = (
+                    failure.code in _RETRYABLE_HTTP_CODES or failure.code >= 500
+                )
+                if retryable and attempt < self.max_attempts:
+                    time.sleep(2**attempt)
+                    continue
+                raise _ReplayError(
+                    f"replay service returned HTTP {failure.code}"
+                ) from failure
+            except (error.URLError, TimeoutError) as failure:
+                if attempt < self.max_attempts:
+                    time.sleep(2**attempt)
+                    continue
+                raise _ReplayError("replay service is unavailable") from failure
+            if not text.strip():
+                raise _ReplayError("replay service returned empty reasoning")
+            return text
+        raise AssertionError("unreachable replay retry state")
+
 
 class FreeCotStage(ETLStage):
-    """Decode each unique Claude ``encrypted_content`` in a session."""
+    """Decode each unique ``encrypted_content`` in a session.
+
+    Supports Claude models (encrypted reasoning inside assistant messages)
+    and GPT models (encrypted reasoning inside ``type: "reasoning"`` items).
+    """
 
     name = "freecot"
     version = "1"
     required_fields = (
+        "id",
         "agent_model",
+        "is_trainable",
         "is_session_completed",
         "messages",
-        "session_id",
-        "step_id",
     )
     output_fields = ("messages",)
-    dependencies = ()
+    dependencies = ("update_is_trainable",)
     job_discovery_filter = "is_session_completed = true"
 
     def __init__(
         self,
         replay_client: Any | None = None,
         *,
-        env_path: Path | None = None,
         max_tokens: int = 128000,
         timeout_seconds: float = 300.0,
         max_attempts: int = 3,
@@ -46,7 +183,6 @@ class FreeCotStage(ETLStage):
         if timeout_seconds <= 0 or max_attempts <= 0:
             raise ValueError("timeout_seconds and max_attempts must be positive")
         self._replay_client = replay_client
-        self._env_path = env_path
         self._max_tokens = max_tokens
         self._timeout_seconds = timeout_seconds
         self._max_attempts = max_attempts
@@ -56,11 +192,14 @@ class FreeCotStage(ETLStage):
         del context
         if not any(record.get("is_session_completed") is True for record in session):
             return {}
+        if not any(record.get("is_trainable") is True for record in session):
+            return {}
         decoded_by_signature: dict[str, str] = {}
         model_by_signature: dict[str, str] = {}
 
         for record in session:
-            if "claude" not in str(record.get("agent_model") or "").lower():
+            family = _provider_family(str(record.get("agent_model") or ""))
+            if family is None:
                 continue
             record_id = str(record["id"])
             try:
@@ -82,9 +221,13 @@ class FreeCotStage(ETLStage):
                 ):
                     continue
                 model_by_signature.setdefault(signature, model)
+                wire_signature = _wire_signature(signature, message, family)
                 try:
                     decoded = self._client().extract(
-                        signature, model_by_signature[signature], self._max_tokens
+                        wire_signature,
+                        model_by_signature[signature],
+                        self._max_tokens,
+                        family=family,
                     )
                     decoded = _reasoning_content(decoded)
                     if not decoded:
@@ -101,7 +244,8 @@ class FreeCotStage(ETLStage):
 
         patches: SessionPatch = {}
         for record in session:
-            if "claude" not in str(record.get("agent_model") or "").lower():
+            family = _provider_family(str(record.get("agent_model") or ""))
+            if family is None:
                 continue
             record_id = str(record["id"])
             try:
@@ -131,22 +275,30 @@ class FreeCotStage(ETLStage):
     def _client(self) -> Any:
         if self._replay_client is not None:
             return self._replay_client
-        config = _environment(self._env_path)
+        service_url = os.environ.get("ORIGIN_COT_SERVICE_URL")
+        wrapper_key = os.environ.get("ORIGIN_COT_WRAPPER_KEY")
+        upstream_api_key = os.environ.get("NEW_API_KEY")
+        missing = [
+            key
+            for key, value in (
+                ("ORIGIN_COT_SERVICE_URL", service_url),
+                ("ORIGIN_COT_WRAPPER_KEY", wrapper_key),
+            )
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(
+                f"missing FreeCoT configuration: {', '.join(missing)}"
+            )
         self._secrets = tuple(
             value
-            for value in (
-                config["ORIGIN_COT_SERVICE_URL"],
-                config["ORIGIN_COT_WRAPPER_KEY"],
-                config.get("NEW_API_KEY"),
-            )
+            for value in (service_url, wrapper_key, upstream_api_key)
             if value
         )
-        from freecot import HttpReplayClient
-
-        self._replay_client = HttpReplayClient(
-            config["ORIGIN_COT_SERVICE_URL"],
-            config["ORIGIN_COT_WRAPPER_KEY"],
-            upstream_api_key=config.get("NEW_API_KEY"),
+        self._replay_client = _HttpReplayClient(
+            service_url,
+            wrapper_key,
+            upstream_api_key=upstream_api_key,
             timeout_seconds=self._timeout_seconds,
             max_attempts=self._max_attempts,
         )
@@ -157,6 +309,29 @@ class FreeCotStage(ETLStage):
         for secret in self._secrets:
             message = message.replace(secret, "[redacted]")
         return message[:500] or type(exc).__name__
+
+
+def _wire_signature(
+    signature: str,
+    message: Mapping[str, Any],
+    family: str,
+) -> str | list[dict[str, Any]]:
+    """Build the wire signature payload for the extraction service.
+
+    Claude signatures are plain strings; GPT signatures are ordered arrays
+    of reasoning objects.
+    """
+
+    if family == "gpt":
+        return [
+            {
+                "type": "reasoning",
+                "encrypted_content": signature,
+                "summary": list(message.get("summary") or []),
+                "content": list(message.get("content") or []),
+            }
+        ]
+    return signature
 
 
 def _messages(value: object) -> list[dict[str, Any]]:
@@ -180,29 +355,3 @@ def _reasoning_content(value: object) -> str:
 
 def _json_string(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def _environment(env_path: Path | None) -> dict[str, str]:
-    values = dict(os.environ)
-    candidate = env_path or _nearest_dotenv()
-    if candidate is not None and candidate.is_file():
-        for line in candidate.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            key, separator, value = line.removeprefix("export ").strip().partition("=")
-            if separator and key.strip() and key.strip() not in values:
-                values[key.strip()] = value.strip().strip("'\"")
-    required = ("ORIGIN_COT_SERVICE_URL", "ORIGIN_COT_WRAPPER_KEY")
-    missing = [key for key in required if not values.get(key)]
-    if missing:
-        raise RuntimeError(f"missing FreeCoT configuration: {', '.join(missing)}")
-    return {key: values[key] for key in (*required, "NEW_API_KEY") if values.get(key)}
-
-
-def _nearest_dotenv() -> Path | None:
-    for directory in (Path.cwd(), *Path.cwd().parents):
-        candidate = directory / ".env"
-        if candidate.is_file():
-            return candidate
-    return None
