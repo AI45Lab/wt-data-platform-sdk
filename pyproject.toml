@@ -33,8 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # ETL-specific third-party dependencies must be declared here, never in the
-# core dependency list. The v1 engine currently needs no packages beyond the
-# core SDK stack, so this extra intentionally starts empty.
+# core dependency list.
 etl = []
 dev = [
     "pytest>=7.4.0",
