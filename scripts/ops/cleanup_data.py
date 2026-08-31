@@ -220,33 +220,6 @@ def _cleanup_trajectory_table(
         client.close()
 
 
-def _is_partitioned_schema_record(record) -> bool:
-    """Return whether a dldb schema record describes a partitioned table."""
-    partition_type = str(getattr(record, "partition_type", "") or "").upper()
-    partition_column = str(getattr(record, "partition_column", "") or "").strip()
-    return partition_type in {"VALUE", "HASH"} and bool(partition_column)
-
-
-def _pin_exact_dldb_table(session, table_name: str) -> None:
-    """Open the exact logical table by dldb metadata, avoiding prefix collisions."""
-    try:
-        record = session.schema_table.get(table_name)
-        if record is None:
-            return
-        if not _is_partitioned_schema_record(record):
-            return
-        from dldb.table import open_table_by_partition_type
-
-        session.tables[table_name] = open_table_by_partition_type(
-            session.db_conn,
-            session.schema_table,
-            table_name,
-            record.partition_type,
-        )
-    except Exception as exc:
-        print(f"Warning: failed to pin exact table '{table_name}': {exc}")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Cleanup wind tunnel data tables",
@@ -326,8 +299,6 @@ def main():
         print("\nTip: Use 'python scripts/ops/table_manager.py list' to see all tables")
         session.shutdown()
         return 1
-    _pin_exact_dldb_table(session, table_name)
-
     # Get current count
     try:
         current_count = session.count_rows(table_name)

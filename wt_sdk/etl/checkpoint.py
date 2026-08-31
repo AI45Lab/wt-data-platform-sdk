@@ -160,41 +160,6 @@ class DldbCheckpointStore:
                 f"checkpoint table '{self.table_name}' schema does not match "
                 "ETL_CHECKPOINT_SCHEMA"
             )
-        self._pin_exact_table()
-
-    def _pin_exact_table(self) -> None:
-        """Avoid dldb's prefix lookup selecting a similarly named table."""
-
-        schema_table = getattr(self.session, "schema_table", None)
-        record = schema_table.get(self.table_name) if schema_table is not None else None
-        if record is None:
-            raise CheckpointError(
-                f"checkpoint metadata is missing for exact table '{self.table_name}'"
-            )
-        try:
-            if not getattr(record, "partition_column", None):
-                from dldb.table import open_table
-
-                table = open_table(
-                    self.session.db_conn,
-                    schema_table,
-                    self.table_name,
-                    self.table_name,
-                )
-            else:
-                from dldb.table import open_table_by_partition_type
-
-                table = open_table_by_partition_type(
-                    self.session.db_conn,
-                    schema_table,
-                    self.table_name,
-                    record.partition_type,
-                )
-            self.session.tables[self.table_name] = table
-        except Exception as exc:
-            raise CheckpointError(
-                f"failed to open exact checkpoint table '{self.table_name}': {exc}"
-            ) from exc
 
     def load(
         self,

@@ -179,8 +179,8 @@ def _error_report(partition: int, exc: BaseException) -> PartitionReport:
     )
 
 
-def _pin_exact_hash_table(session, table_name: str):
-    """Pin one exact logical table and return its information-schema record."""
+def _get_hash_table_record(session, table_name: str):
+    """Validate and return one exact HASH-table information-schema record."""
     record = session.schema_table.get(table_name)
     if record is None:
         raise ValueError(f"Logical table not found: {table_name}")
@@ -192,14 +192,6 @@ def _pin_exact_hash_table(session, table_name: str):
     if not isinstance(record.partitions, int) or record.partitions <= 0:
         raise ValueError(f"{table_name!r} has invalid HASH partition count: {record.partitions!r}")
 
-    from dldb.table import open_table_by_partition_type
-
-    session.tables[table_name] = open_table_by_partition_type(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-        record.partition_type,
-    )
     return record
 
 
@@ -363,7 +355,7 @@ def inspect_table(
                 "Installed dldb does not expose partition_status(); upgrade dldb first"
             )
 
-        record = _pin_exact_hash_table(session, table_name)
+        record = _get_hash_table_record(session, table_name)
         partitions = _resolve_partitions(
             requested_partitions,
             all_partitions,

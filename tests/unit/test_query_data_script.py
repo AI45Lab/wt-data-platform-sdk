@@ -1,8 +1,6 @@
 import importlib.util
 import json
 from pathlib import Path
-from types import SimpleNamespace
-
 import pandas as pd
 
 
@@ -83,36 +81,6 @@ def test_resolve_db_uri_respects_explicit_database(monkeypatch):
     )
     assert query_data._resolve_db_uri("landing_test", "s3://override-db") == "s3://override-db"
     assert query_data._uses_latest_snapshot_by_default("landing_test") is False
-
-
-def test_pin_exact_table_skips_unpartitioned_schema_record(capsys):
-    session = SimpleNamespace(
-        schema_table=SimpleNamespace(
-            get=lambda table_name: SimpleNamespace(
-                partition_type="VALUE",
-                partition_column="",
-            )
-        ),
-        tables={},
-        db_conn=object(),
-    )
-
-    query_data._pin_exact_dldb_table(session, "evaluation_env_config")
-
-    assert session.tables == {}
-    assert capsys.readouterr().out == ""
-
-
-def test_partitioned_schema_record_detection():
-    assert query_data._is_partitioned_schema_record(
-        SimpleNamespace(partition_type="HASH", partition_column="job_id")
-    )
-    assert not query_data._is_partitioned_schema_record(
-        SimpleNamespace(partition_type="VALUE", partition_column="")
-    )
-    assert not query_data._is_partitioned_schema_record(
-        SimpleNamespace(partition_type="", partition_column="")
-    )
 
 
 def test_parse_column_list_rejects_empty_and_wildcard():

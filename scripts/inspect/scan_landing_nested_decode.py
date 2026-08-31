@@ -19,17 +19,6 @@ NESTED_COLUMNS = [
 ]
 
 
-def _pin_exact_dldb_table(session, table_name: str, record) -> None:
-    from dldb.table import open_table_by_partition_type
-
-    session.tables[table_name] = open_table_by_partition_type(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-        record.partition_type,
-    )
-
-
 def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -76,8 +65,7 @@ def scan_table(table_name: str, db_uri: str, batch_size: int, max_output: int) -
         if str(record.partition_type).upper() != "HASH":
             raise ValueError(f"{table_name} is {record.partition_type}, not a HASH table")
 
-        _pin_exact_dldb_table(session, table_name, record)
-        table = session.tables[table_name]
+        table = session._get_table(table_name)
         buckets = table.list_partitions()
         print(f"Scanning {table_name}: {len(buckets)} existing HASH bucket(s)")
 

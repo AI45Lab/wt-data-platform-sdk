@@ -13,21 +13,6 @@ import dldb
 from wt_sdk.config import default_config
 
 
-def _pin_exact_dldb_table(session, table_name: str) -> None:
-    """Open the exact logical table recorded in dldb information_schema."""
-    from dldb.table import open_table_by_partition_type
-
-    record = session.schema_table.get(table_name)
-    if record is None:
-        raise ValueError(f"Table '{table_name}' does not exist in dldb information_schema")
-    session.tables[table_name] = open_table_by_partition_type(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-        record.partition_type,
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(description="Get unique tags from a table")
     parser.add_argument("--table", type=str, required=True,
@@ -61,8 +46,6 @@ def main():
         print(f"Available tables: {session.list_tables()}")
         session.shutdown()
         return 1
-    _pin_exact_dldb_table(session, table_name)
-
     # Get total count
     try:
         total_count = session.count_rows(table_name)
@@ -73,7 +56,7 @@ def main():
     # Fetch data
     print("Fetching records...")
     try:
-        # dldb 1.0 rejects an empty WHERE expression.
+        # dldb rejects an empty WHERE expression.
         df = session.filter(
             table_name,
             query="id IS NOT NULL",

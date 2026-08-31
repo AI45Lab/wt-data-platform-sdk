@@ -70,21 +70,6 @@ def _get_exact_table_record(session, table_name: str):
     return schema_table.get(table_name) if schema_table is not None else None
 
 
-def _pin_exact_dldb_table(session, table_name: str, record) -> None:
-    """Avoid dldb table-cache lookup ambiguity for similarly named logical tables."""
-    if record is None:
-        return
-
-    from dldb.table import open_table_by_partition_type
-
-    session.tables[table_name] = open_table_by_partition_type(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-        record.partition_type,
-    )
-
-
 def _confirm_drop(table_name: str, partition: Optional[str], force: bool, confirm_table: Optional[str]) -> bool:
     """Require deliberate confirmation before a destructive table operation."""
     if force:
@@ -151,7 +136,6 @@ def drop_table(
         return False
 
     try:
-        _pin_exact_dldb_table(session, table_name, record)
         session.drop_table(table_name, partition=partition)
         if partition:
             print(f"✓ Dropped partition '{partition}' from table '{table_name}'")
@@ -333,16 +317,8 @@ def show_schema(table_name: str, db_uri: str = None) -> dict:
     # Get indexes using DLDB's list_indices method
     print(f"\nScalar Indexes:")
     try:
-        if record is not None and record.partition_type in {"VALUE", "HASH"}:
-            from dldb.table import open_table_by_partition_type
-
-            session.tables[table_name] = open_table_by_partition_type(
-                session.db_conn,
-                session.schema_table,
-                table_name,
-                record.partition_type,
-            )
-            table = session.tables[table_name]
+        if record is not None and record.partition_column:
+            table = session._get_table(table_name)
             partitions = sorted(table.list_partitions())
             if not partitions:
                 print("  No physical partitions found")

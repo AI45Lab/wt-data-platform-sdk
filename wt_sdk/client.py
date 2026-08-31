@@ -72,13 +72,6 @@ class WTGatewayClient:
             self.config.tables.db_uri,
             **dldb_config
         )
-        # Keep the exact logical-table wrappers that this client pinned.  A
-        # partitioned dldb wrapper owns its opened physical-bucket objects, so
-        # replacing it before every operation discards that useful cache.  We
-        # deliberately cache wrappers only: query results and table snapshots
-        # are still controlled by dldb and ``checkout_latest``.
-        self._exact_pinned_tables: Dict[str, Any] = {}
-
         self.landing_uri = self.config.tables.landing_uri()
         self.serving_uri = self.config.tables.serving_uri()
         logger.info(f"WTGatewayClient initialized")
@@ -147,7 +140,6 @@ class WTGatewayClient:
         checkout_latest: bool = False,
         extra: Optional[Dict[str, Any]] = None,
     ) -> pd.DataFrame:
-        self._pin_exact_dldb_table(table_name)
         try:
             df = self.session.filter(
                 table_name,
@@ -189,7 +181,6 @@ class WTGatewayClient:
         return df
 
     def _count_rows(self, table_name: str, partition: Optional[str] = None) -> int:
-        self._pin_exact_dldb_table(table_name)
         count = self.session.count_rows(table_name, partition)
         self._log_dldb_timing(
             "count_rows",
@@ -233,64 +224,21 @@ class WTGatewayClient:
             pass
         return metadata
 
-    def _pin_exact_dldb_table(self, table_name: str) -> None:
-        """Pin and reuse one exact logical-table wrapper for this client.
-
-        Reuse is valid only while the same object remains registered in the
-        dldb session.  Catalog-management code that removes or replaces the
-        session entry therefore triggers a fresh exact pin automatically.
-        """
-        try:
-            tables = getattr(self.session, "tables", None)
-            cached = self._exact_pinned_tables.get(table_name)
-            if (
-                cached is not None
-                and tables is not None
-                and tables.get(table_name) is cached
-            ):
-                return
-
-            schema_table = getattr(self.session, "schema_table", None)
-            record = schema_table.get(table_name) if schema_table is not None else None
-            if record is None:
-                self._exact_pinned_tables.pop(table_name, None)
-                return
-            from dldb.table import open_table_by_partition_type
-            exact_table = open_table_by_partition_type(
-                self.session.db_conn,
-                self.session.schema_table,
-                table_name,
-                record.partition_type,
-            )
-            self.session.tables[table_name] = exact_table
-            self._exact_pinned_tables[table_name] = exact_table
-        except Exception as exc:
-            logger.debug(f"Failed to pin exact dldb table '{table_name}': {exc}")
-
     def invalidate_table_cache(self, table_name: Optional[str] = None) -> None:
-        """Invalidate SDK-owned exact-table wrappers after catalog mutation.
+        """Invalidate dldb's table-wrapper cache after catalog mutation.
 
         Ordinary reads and writes do not need this.  A script that creates,
         drops, or replaces a logical table through this client's underlying
-        dldb session should invalidate that table before the next SDK call.
-        Physical wrappers registered by dldb are removed only when they are
-        still the SDK-cached objects, so externally replaced entries survive.
+        dldb session should invalidate that table before the next SDK call so
+        dldb 1.1.0 resolves it again from the exact information-schema record.
         """
-
-        names = (
-            tuple(self._exact_pinned_tables)
-            if table_name is None
-            else (table_name,)
-        )
         tables = getattr(self.session, "tables", None)
-        for name in names:
-            cached = self._exact_pinned_tables.pop(name, None)
-            if (
-                cached is not None
-                and tables is not None
-                and tables.get(name) is cached
-            ):
-                tables.pop(name, None)
+        if tables is None:
+            return
+        if table_name is None:
+            tables.clear()
+        else:
+            tables.pop(table_name, None)
 
     def _extract_partition_values_from_query(self, query: str, partition_key: str) -> Optional[List[str]]:
         """Extract simple equality/IN filters for the partition key from SQL text."""
@@ -375,8 +323,7 @@ class WTGatewayClient:
 
     def _list_existing_partitions_for_table(self, table_name: str) -> List[Union[str, int]]:
         """List existing dldb logical partitions/buckets for a table."""
-        self._pin_exact_dldb_table(table_name)
-        table = self.session.tables.get(table_name)
+        table = self.session._get_table(table_name)
         if table is None or not hasattr(table, "list_partitions"):
             return []
         return sorted(table.list_partitions())
@@ -432,7 +379,6 @@ class WTGatewayClient:
         """Return metadata and record converters for landing or serving."""
         if table == "landing":
             table_name = self.config.tables.landing_table
-            self._pin_exact_dldb_table(table_name)
             return {
                 "table_name": table_name,
                 "partition_key": self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)["partition_column"],
@@ -443,7 +389,6 @@ class WTGatewayClient:
             }
         elif table == "serving":
             table_name = self.config.tables.serving_table
-            self._pin_exact_dldb_table(table_name)
             return {
                 "table_name": table_name,
                 "partition_key": self._get_partition_key_for_table(table_name, self.SERVING_PARTITION_KEY),
@@ -1512,14 +1457,6 @@ class WTGatewayClient:
                 f"Unsupported index-maintenance table {table_name!r}; "
                 f"expected one of: {', '.join(supported)}"
             )
-
-        # dldb's lazy table lookup uses a physical-table prefix scan. Without
-        # pinning the exact information-schema record first, a table such as
-        # ``wind_tunnel_landing`` can be opened as
-        # ``wind_tunnel_landing_legacy`` and fail with a partition-type
-        # mismatch. Index listing, creation, and optimization all use the
-        # session table cache, so pin once before any of those operations.
-        self._pin_exact_dldb_table(table_name)
 
         metadata = self._get_partition_metadata_for_table(table_name, fallback_key)
         if str(metadata.get("partition_type") or "").upper() != "HASH":

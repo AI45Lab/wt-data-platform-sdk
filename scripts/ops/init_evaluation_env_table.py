@@ -65,9 +65,10 @@ def init_evaluation_env_table(
     except Exception as e:
         if "already exists" in str(e):
             print(f"Table '{table_name}' already exists with a different schema.")
-            print(f"Please manually drop it first using LanceDB directly:")
-            print(f"  db = lancedb.connect('{db_uri}', storage_options=...)")
-            print(f"  db.drop_table('{table_name}')")
+            print(
+                "Use this script with --confirm-recreate after verifying the "
+                "selected profile and table."
+            )
             raise
         raise
 

@@ -123,15 +123,6 @@ def test_resolve_db_uri_uses_env_config_database(monkeypatch):
     assert cleanup_data._uses_latest_snapshot_by_default("landing_test") is False
 
 
-def test_pin_exact_table_skips_unpartitioned_schema_record(capsys):
-    session = FakeCleanupSession()
-
-    cleanup_data._pin_exact_dldb_table(session, "evaluation_env_config")
-
-    assert session.tables == {}
-    assert capsys.readouterr().out == ""
-
-
 def test_cleanup_env_config_dry_run_uses_env_db_and_latest(monkeypatch):
     fake_session = FakeCleanupSession()
     connect_args = {}

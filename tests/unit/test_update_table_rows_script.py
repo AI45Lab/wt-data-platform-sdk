@@ -105,9 +105,6 @@ class _FakeClient:
     def query_data(self, **kwargs):
         return list(self.verified_rows)
 
-    def _pin_exact_dldb_table(self, table_name):
-        self.pinned_table = table_name
-
     def _resolve_explicit_partition_for_table(self, table_name, job_id, fallback_key):
         assert table_name == "serving_test"
         assert fallback_key == "job_id"

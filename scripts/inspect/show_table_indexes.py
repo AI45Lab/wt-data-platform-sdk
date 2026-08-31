@@ -29,26 +29,10 @@ TABLE_INDEXES = {
 }
 
 
-def _pin_exact_dldb_table(session, table_name: str) -> None:
-    """Open the logical table by information_schema metadata, avoiding prefix collisions."""
-    from dldb.table import open_table_by_partition_type
-
-    record = session.schema_table.get(table_name)
-    if record is None:
-        raise ValueError(f"Table '{table_name}' does not exist in dldb information_schema")
-    session.tables[table_name] = open_table_by_partition_type(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-        record.partition_type,
-    )
-
-
 def get_partitions(session, table_name: str) -> List:
     """Get all partition values or hash buckets for a partitioned table."""
     try:
-        _pin_exact_dldb_table(session, table_name)
-        table = session.tables[table_name]
+        table = session._get_table(table_name)
         if hasattr(table, "list_partitions"):
             return sorted(table.list_partitions())
     except Exception:

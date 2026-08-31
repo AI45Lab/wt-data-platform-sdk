@@ -148,32 +148,6 @@ def _build_gateway_client(table_name: str, db_uri: str) -> WTGatewayClient:
     )
 
 
-def _is_partitioned_schema_record(record) -> bool:
-    """Return whether a dldb schema record describes a partitioned table."""
-    partition_type = str(getattr(record, "partition_type", "") or "").upper()
-    partition_column = str(getattr(record, "partition_column", "") or "").strip()
-    return partition_type in {"VALUE", "HASH"} and bool(partition_column)
-
-
-def _pin_exact_dldb_table(session, table_name: str) -> None:
-    """Open the exact logical table by dldb metadata, avoiding prefix collisions."""
-    try:
-        record = session.schema_table.get(table_name)
-        if record is None:
-            return
-        if not _is_partitioned_schema_record(record):
-            return
-        from dldb.table import open_table_by_partition_type
-        session.tables[table_name] = open_table_by_partition_type(
-            session.db_conn,
-            session.schema_table,
-            table_name,
-            record.partition_type,
-        )
-    except Exception as exc:
-        print(f"Warning: failed to pin exact table '{table_name}': {exc}")
-
-
 def _parse_column_list(raw_columns: str | None) -> list[str] | None:
     """Parse a comma-separated column list."""
     if raw_columns is None:
@@ -528,7 +502,7 @@ def main():
         print("Checkout latest: true")
     print("=" * 80)
 
-    # dldb 1.0 rejects an empty WHERE expression, so use a universal
+    # dldb rejects an empty WHERE expression, so use a universal
     # predicate internally while keeping the CLI output as "(all rows)".
     requested_query = args.query.strip() if args.query else ""
     query = requested_query or "1 = 1"
@@ -699,9 +673,7 @@ def main():
         print("\nTip: Use 'python scripts/ops/table_manager.py list' to see all tables")
         session.shutdown()
         return 1
-    _pin_exact_dldb_table(session, table_name)
-
-    # dldb 1.0 rejects an empty WHERE expression, so use a universal
+    # dldb rejects an empty WHERE expression, so use a universal
     # predicate internally while keeping the CLI output as "(all rows)".
     requested_query = args.query.strip() if args.query else ""
     query = requested_query or "1 = 1"

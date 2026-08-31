@@ -64,7 +64,6 @@ def _drop_temporary_archive(table_name: str) -> None:
     )
     try:
         if session.table_exists(table_name):
-            archive.pin_exact_dldb_table(session, table_name)
             session.drop_table(table_name)
         assert not session.table_exists(table_name)
     finally:

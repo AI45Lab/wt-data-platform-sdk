@@ -44,21 +44,6 @@ def _default_archive_table(today: str | None = None) -> str:
     return f"archived_{date_str}_{DEFAULT_LANDING_TABLE}"
 
 
-def _pin_exact_dldb_table(session, table_name: str) -> None:
-    """Open exactly ``table_name`` rather than a similarly prefixed table."""
-    from dldb.table import open_table_by_partition_type
-
-    record = session.schema_table.get(table_name)
-    if record is None:
-        raise ValueError(f"Table '{table_name}' does not exist in dldb information_schema")
-    session.tables[table_name] = open_table_by_partition_type(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-        record.partition_type,
-    )
-
-
 def _partition_metadata(record) -> Dict[str, Any]:
     return {
         "partition_column": record.partition_column,
@@ -103,8 +88,7 @@ def _assert_matching_metadata_and_schema(
 
 
 def _list_partitions(session, table_name: str) -> List[int]:
-    _pin_exact_dldb_table(session, table_name)
-    partitions = session.tables[table_name].list_partitions()
+    partitions = session._get_table(table_name).list_partitions()
     return sorted(int(partition) for partition in partitions)
 
 
@@ -210,7 +194,6 @@ def create_archive_and_copy(
         if not session.table_exists(source_table):
             raise ValueError(f"Source table '{source_table}' does not exist")
 
-        _pin_exact_dldb_table(session, source_table)
         source_record = session.schema_table.get(source_table)
         source_schema = session.get_schema(source_table)
         _assert_landing_hash_metadata(source_table, source_record)
@@ -257,7 +240,6 @@ def create_archive_and_copy(
                     f"Archive table '{archive_table}' already exists. Refusing to append. "
                     "Use --resume only for a previous incomplete run of this script."
                 )
-            _pin_exact_dldb_table(session, archive_table)
             archive_record = session.schema_table.get(archive_table)
             archive_schema = session.get_schema(archive_table)
             _assert_matching_metadata_and_schema(
@@ -274,7 +256,6 @@ def create_archive_and_copy(
                 partition_type=source_record.partition_type,
                 partitions=source_record.partitions,
             )
-            _pin_exact_dldb_table(session, archive_table)
             print(f"Created archive table '{archive_table}'.")
 
         for partition, expected_count in source_counts:
@@ -311,8 +292,6 @@ def create_archive_and_copy(
                 )
             print(f"bucket {partition}: verified {archive_count} rows.")
 
-        _pin_exact_dldb_table(session, source_table)
-        _pin_exact_dldb_table(session, archive_table)
         source_total_after = session.count_rows(source_table)
         archive_total = session.count_rows(archive_table)
         archive_record = session.schema_table.get(archive_table)

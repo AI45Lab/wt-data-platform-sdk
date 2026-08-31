@@ -10,8 +10,9 @@ Python SDK for writing, querying, and managing agent trajectory data on the Wind
 
 dldb is installed from the public
 [DeepLink-org/Persisting](https://github.com/DeepLink-org/Persisting) repository
-declared in `pyproject.toml`. The supported Python versions are 3.10 through
-3.12.
+at the `dldb-v1.1.0` tag declared in `pyproject.toml`. This version is required
+for exact logical-table resolution and unpartitioned SimpleTable reopening.
+The supported Python versions are 3.10 through 3.12.
 
 ```bash
 python -m pip install -e .
@@ -425,11 +426,12 @@ strings by default; `deserialize_json=True` returns Python values while
 preserving JSON-internal nulls. Malformed JSON remains unchanged as a string so
 a presentation option cannot make an otherwise readable row fail.
 
-Within one `WTGatewayClient` lifetime, the SDK reuses its exact dldb logical-table
-wrapper and the physical bucket objects opened by that wrapper. This applies to
-reads, writes, index maintenance, and scripts built on the client; it does not
-cache query results or change `checkout_latest`. Code that mutates the logical
-catalog through `client.session` must call
+Within one `WTGatewayClient` lifetime, dldb 1.1.0 resolves the exact
+information-schema record and reuses its logical-table wrapper and opened
+physical bucket objects. The SDK does not reconstruct or pin dldb wrappers.
+This applies to reads, writes, index maintenance, and scripts built on the
+client; it does not cache query results or change `checkout_latest`. Code that
+mutates the logical catalog through `client.session` must call
 `client.invalidate_table_cache(table_name)` before the next SDK operation.
 
 ## Client Interface

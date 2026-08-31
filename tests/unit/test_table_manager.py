@@ -22,7 +22,6 @@ class _FakeSession:
 def test_drop_table_requires_exact_noninteractive_confirmation(monkeypatch):
     session = _FakeSession()
     monkeypatch.setattr(table_manager.dldb, "connect", lambda *args, **kwargs: session)
-    monkeypatch.setattr(table_manager, "_pin_exact_dldb_table", lambda *args: None)
 
     assert not table_manager.drop_table("landing_test", force=True)
     assert session.dropped == []
@@ -51,7 +50,6 @@ def test_drop_table_refuses_unknown_exact_metadata(monkeypatch):
 def test_drop_table_interactive_requires_table_name_and_drop(monkeypatch):
     session = _FakeSession()
     monkeypatch.setattr(table_manager.dldb, "connect", lambda *args, **kwargs: session)
-    monkeypatch.setattr(table_manager, "_pin_exact_dldb_table", lambda *args: None)
     inputs = iter(["landing_test", "DROP"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
 

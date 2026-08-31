@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import pytest
-import dldb.table as dldb_table_module
 from dldb.utils import stable_hash
 
 import wt_sdk._time as sdk_time
@@ -243,64 +242,20 @@ class _FakeSchemaTable:
         return self._record
 
 
-def test_exact_table_pin_reuses_wrapper_and_repins_after_external_replacement(
-    monkeypatch,
-):
+def test_table_cache_invalidation_removes_dldb_wrapper(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     fake_session.db_conn = object()
     fake_session.tables = {}
-    opened = []
-
-    def fake_open(db_conn, schema_table, table_name, partition_type):
-        wrapper = object()
-        opened.append((db_conn, schema_table, table_name, partition_type, wrapper))
-        return wrapper
-
-    monkeypatch.setattr(dldb_table_module, "open_table_by_partition_type", fake_open)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
     client = WTGatewayClient(
         GatewayConfig(tables=TableConfig(landing_table="landing_test"))
     )
-
-    client._pin_exact_dldb_table("landing_test")
-    first = fake_session.tables["landing_test"]
-    client._pin_exact_dldb_table("landing_test")
-
-    assert len(opened) == 1
-    assert fake_session.tables["landing_test"] is first
-
     fake_session.tables["landing_test"] = object()
-    client._pin_exact_dldb_table("landing_test")
-
-    assert len(opened) == 2
-    assert fake_session.tables["landing_test"] is opened[-1][-1]
-
-
-def test_exact_table_cache_invalidation_preserves_externally_replaced_wrapper(
-    monkeypatch,
-):
-    fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
-    fake_session.db_conn = object()
-    fake_session.tables = {}
-    monkeypatch.setattr(
-        dldb_table_module,
-        "open_table_by_partition_type",
-        lambda *args: object(),
-    )
-    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
-    client = WTGatewayClient(
-        GatewayConfig(tables=TableConfig(landing_table="landing_test"))
-    )
-    client._pin_exact_dldb_table("landing_test")
-    replacement = object()
-    fake_session.tables["landing_test"] = replacement
 
     client.invalidate_table_cache("landing_test")
 
-    assert fake_session.tables["landing_test"] is replacement
-    assert "landing_test" not in client._exact_pinned_tables
+    assert "landing_test" not in fake_session.tables
 
 
 def _capture_logger(monkeypatch, module):
@@ -936,18 +891,13 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
     ]
 
 
-def test_index_maintenance_pins_exact_table_before_listing_indexes(monkeypatch):
+def test_index_maintenance_uses_dldb_table_resolution(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
     calls = []
-    monkeypatch.setattr(
-        client,
-        "_pin_exact_dldb_table",
-        lambda table_name: calls.append(("pin", table_name)),
-    )
     original_list_indices = fake_session.list_indices
 
     def list_indices(table_name, partition=None):
@@ -963,10 +913,7 @@ def test_index_maintenance_pins_exact_table_before_listing_indexes(monkeypatch):
         optimize=False,
     )
 
-    assert calls[:2] == [
-        ("pin", "landing_test"),
-        ("list_indices", "landing_test"),
-    ]
+    assert calls[0] == ("list_indices", "landing_test")
 
 
 def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatch):

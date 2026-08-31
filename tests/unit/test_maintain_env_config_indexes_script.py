@@ -49,16 +49,10 @@ class FakeSession:
         ]
 
 
-def test_maintain_creates_missing_job_index_and_fully_optimizes(monkeypatch):
+def test_maintain_creates_missing_job_index_and_fully_optimizes():
     session = FakeSession(
         ["env_name_idx", "env_id_idx", "group_id_idx", "finished_idx"]
     )
-    monkeypatch.setattr(
-        script,
-        "_pin_exact_dldb_table",
-        lambda value, table_name: None,
-    )
-
     summary = script.maintain_env_config_indexes(session)
 
     assert session.created == [("job_id", "BTREE")]
@@ -75,35 +69,8 @@ def test_maintain_creates_missing_job_index_and_fully_optimizes(monkeypatch):
     assert summary["errors"] == []
 
 
-def test_pin_exact_treats_blank_partition_column_as_simple_table(monkeypatch):
+def test_dry_run_reports_missing_without_writes():
     session = FakeSession([])
-    marker = object()
-    calls = []
-
-    def fake_from_table_name(db_conn, schema_table, table_name):
-        calls.append((db_conn, schema_table, table_name))
-        return marker
-
-    monkeypatch.setattr(
-        "dldb.table.SimpleTable.from_table_name",
-        fake_from_table_name,
-    )
-
-    script._pin_exact_dldb_table(session, script.TEST_ENV_CONFIG_TABLE)
-
-    assert session.tables[script.TEST_ENV_CONFIG_TABLE] is marker
-    assert calls == [
-        (session.db_conn, session.schema_table, script.TEST_ENV_CONFIG_TABLE)
-    ]
-
-
-def test_dry_run_reports_missing_without_writes(monkeypatch):
-    session = FakeSession([])
-    monkeypatch.setattr(
-        script,
-        "_pin_exact_dldb_table",
-        lambda value, table_name: None,
-    )
 
     summary = script.maintain_env_config_indexes(session, dry_run=True)
 
@@ -113,15 +80,9 @@ def test_dry_run_reports_missing_without_writes(monkeypatch):
     assert summary["coverage"] == []
 
 
-def test_production_table_can_be_selected_explicitly(monkeypatch):
+def test_production_table_can_be_selected_explicitly():
     production_table = "evaluation_env_config"
     session = FakeSession([], table_name=production_table)
-    monkeypatch.setattr(
-        script,
-        "_pin_exact_dldb_table",
-        lambda value, table_name: None,
-    )
-
     summary = script.maintain_env_config_indexes(
         session,
         table_name=production_table,
@@ -131,14 +92,9 @@ def test_production_table_can_be_selected_explicitly(monkeypatch):
     assert summary["table_name"] == production_table
 
 
-def test_schema_mismatch_stops_before_index_mutation(monkeypatch):
+def test_schema_mismatch_stops_before_index_mutation():
     session = FakeSession([])
     session.get_schema = lambda table_name: pa.schema([pa.field("id", pa.int64())])
-    monkeypatch.setattr(
-        script,
-        "_pin_exact_dldb_table",
-        lambda value, table_name: None,
-    )
 
     try:
         script.maintain_env_config_indexes(session)

@@ -156,25 +156,9 @@ def expected_landing_metadata() -> Dict[str, Any]:
     }
 
 
-def pin_exact_dldb_table(session, table_name: str) -> None:
-    """Open the exact logical table instead of a similarly prefixed table."""
-    from dldb.table import open_table_by_partition_type
-
-    record = session.schema_table.get(table_name)
-    if record is None:
-        raise ValueError(f"Table {table_name!r} is missing from dldb information_schema")
-    session.tables[table_name] = open_table_by_partition_type(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-        record.partition_type,
-    )
-
-
 def verify_landing_layout(session, table_name: str) -> None:
     if not session.table_exists(table_name):
         raise ValueError(f"Required table {table_name!r} does not exist")
-    pin_exact_dldb_table(session, table_name)
     record = session.schema_table.get(table_name)
     if partition_metadata(record) != expected_landing_metadata():
         raise ValueError(
@@ -186,8 +170,8 @@ def verify_landing_layout(session, table_name: str) -> None:
 
 
 def list_partitions(session, table_name: str) -> List[int]:
-    pin_exact_dldb_table(session, table_name)
-    return sorted(int(value) for value in session.tables[table_name].list_partitions())
+    table = session._get_table(table_name)
+    return sorted(int(value) for value in table.list_partitions())
 
 
 def query_partition(
@@ -201,7 +185,6 @@ def query_partition(
 ) -> pd.DataFrame:
     if existing_partitions is not None and partition not in existing_partitions:
         return pd.DataFrame(columns=list(columns))
-    pin_exact_dldb_table(session, table_name)
     frame = session.filter(
         table_name,
         query=query,

@@ -83,7 +83,7 @@ def test_checkpoint_table_follows_shared_profile_unless_overridden():
     assert resolve_checkpoint_table("test", "custom_checkpoint") == "custom_checkpoint"
 
 
-def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
+def test_dldb_checkpoint_store_round_trips_without_manual_table_open(monkeypatch):
     class Record:
         partition_column = "job_id"
         partition_type = ""
@@ -128,16 +128,7 @@ def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
             return None
 
     session = Session()
-    sentinel = object()
     monkeypatch.setattr(checkpoint_module.dldb, "connect", lambda *args, **kwargs: session)
-
-    import dldb.table
-
-    monkeypatch.setattr(
-        dldb.table,
-        "open_table_by_partition_type",
-        lambda *args, **kwargs: sentinel,
-    )
     store = DldbCheckpointStore("s3://state")
     checkpoint = Checkpoint(
         pipeline_name="serving_publish",
@@ -161,7 +152,7 @@ def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
     )
 
     assert loaded == checkpoint
-    assert session.tables[PRODUCTION_CHECKPOINT_TABLE] is sentinel
+    assert session.tables == {}
     assert store.delete(
         pipeline_name="serving_publish",
         pipeline_version="1",
@@ -178,7 +169,7 @@ def test_dldb_checkpoint_store_pins_exact_table_and_round_trips(monkeypatch):
     ) is None
 
 
-def test_checkpoint_store_opens_non_partitioned_table_as_simple_table(monkeypatch):
+def test_checkpoint_store_relies_on_dldb_for_non_partitioned_table_resolution(monkeypatch):
     class Record:
         partition_column = ""
         partition_type = "VALUE"
@@ -205,17 +196,12 @@ def test_checkpoint_store_opens_non_partitioned_table_as_simple_table(monkeypatc
             return None
 
     session = Session()
-    simple_table = object()
     monkeypatch.setattr(checkpoint_module.dldb, "connect", lambda *args, **kwargs: session)
-
-    import dldb.table
-
-    monkeypatch.setattr(dldb.table, "open_table", lambda *args, **kwargs: simple_table)
     store = DldbCheckpointStore("s3://state", table_name=TEST_CHECKPOINT_TABLE)
 
     store.verify_ready()
 
-    assert session.tables[TEST_CHECKPOINT_TABLE] is simple_table
+    assert session.tables == {}
 
 
 def test_init_script_creates_test_and_production_tables_by_default(

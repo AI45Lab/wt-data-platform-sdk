@@ -239,7 +239,6 @@ def update_and_verify(
                     partition=job_id,
                 )
             else:
-                client._pin_exact_dldb_table(table_name)
                 resolved_partition = (
                     client._resolve_explicit_partition_for_table(
                         table_name,

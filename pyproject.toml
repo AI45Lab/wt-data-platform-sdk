@@ -23,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "dldb @ git+https://github.com/DeepLink-org/Persisting.git@dldb-v1.0.0#subdirectory=persisting/dldb",
+    "dldb @ git+https://github.com/DeepLink-org/Persisting.git@dldb-v1.1.0#subdirectory=persisting/dldb",
     "pydantic>=2.5.0",
     "loguru>=0.7.2",
     "pandas>=2.3.3",

@@ -34,29 +34,6 @@ from wt_sdk.core.evaluation_env_schema import (
 INDEX_TYPE = "BTREE"
 
 
-def _pin_exact_dldb_table(session, table_name: str) -> None:
-    """Pin the exact information-schema record before index operations."""
-    from dldb.table import SimpleTable
-
-    record = session.schema_table.get(table_name)
-    if record is None:
-        raise ValueError(
-            f"Table {table_name!r} does not exist in dldb information_schema"
-        )
-    if getattr(record, "partition_column", None):
-        raise ValueError(f"Table {table_name!r} must be unpartitioned")
-
-    # This legacy table has no partition column, although older dldb metadata
-    # may report partition_type="VALUE". The missing column is authoritative:
-    # opening it as a ValuePartitionTable raises "Partition column must be
-    # specified". Pin the exact physical table as an unpartitioned table.
-    session.tables[table_name] = SimpleTable.from_table_name(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-    )
-
-
 def _index_name(index: Any) -> str:
     if isinstance(index, dict):
         return str(index["name"])
@@ -86,8 +63,6 @@ def maintain_env_config_indexes(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Create missing indexes, compact fragments, and refresh index tails."""
-    _pin_exact_dldb_table(session, table_name)
-
     actual_schema = session.get_schema(table_name)
     expected_fields = set(EVALUATION_ENV_SCHEMA.names)
     actual_fields = set(actual_schema.names)

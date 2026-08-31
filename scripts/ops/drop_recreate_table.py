@@ -32,21 +32,6 @@ def _default_archive_table(today: str | None = None) -> str:
     return f"archived_{date_str}_{DEFAULT_LANDING_TABLE}"
 
 
-def _pin_exact_dldb_table(session, table_name: str) -> None:
-    """Open exactly ``table_name`` rather than a similarly prefixed table."""
-    from dldb.table import open_table_by_partition_type
-
-    record = session.schema_table.get(table_name)
-    if record is None:
-        raise ValueError(f"Table '{table_name}' does not exist in dldb information_schema")
-    session.tables[table_name] = open_table_by_partition_type(
-        session.db_conn,
-        session.schema_table,
-        table_name,
-        record.partition_type,
-    )
-
-
 def _metadata(record) -> Dict[str, Any]:
     return {
         "partition_column": record.partition_column,
@@ -72,7 +57,6 @@ def _verify_archive_matches_source(
     for table_name in (source_table, archive_table):
         if not session.table_exists(table_name):
             raise ValueError(f"Required table '{table_name}' does not exist")
-        _pin_exact_dldb_table(session, table_name)
 
     source_record = session.schema_table.get(source_table)
     archive_record = session.schema_table.get(archive_table)
@@ -165,7 +149,6 @@ def drop_and_recreate_landing(
             )
 
         print(f"Dropping active production table '{source_table}'...")
-        _pin_exact_dldb_table(session, source_table)
         session.drop_table(source_table)
 
         print(
@@ -179,7 +162,6 @@ def drop_and_recreate_landing(
             partition_type=LANDING_PARTITION_TYPE,
             partitions=LANDING_PARTITIONS,
         )
-        _pin_exact_dldb_table(session, source_table)
         new_record = session.schema_table.get(source_table)
         if _metadata(new_record) != _expected_landing_metadata():
             raise RuntimeError(
@@ -191,7 +173,6 @@ def drop_and_recreate_landing(
         if new_count != 0:
             raise RuntimeError(f"New table should be empty, found {new_count} rows")
 
-        _pin_exact_dldb_table(session, archive_table)
         archive_count_after = session.count_rows(archive_table)
         if archive_count_after != archived_rows:
             raise RuntimeError(
