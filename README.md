@@ -529,8 +529,18 @@ the method creates missing indexes and runs dldb optimize by default.
 The two unpartitioned environment-config tables use their own database and
 maintenance command. The default database URI is
 `s3://wind-tunnel-env-config`, overridden by `WT_SDK_ENV_CONFIG_DB_URI` or
-`--db-uri`. Run a read-only preview first, then create missing configured
-indexes and perform full table maintenance:
+`--db-uri`. Inspect production fragment and index health without modifying the
+table:
+
+```bash
+python scripts/inspect/show_env_config_status.py --profile production
+python scripts/inspect/show_env_config_status.py --profile production --json
+```
+
+The report includes row/byte counts, fragment statistics, configured versus
+existing indexes, and indexed/unindexed row coverage. Run a read-only
+maintenance preview first, then create missing configured indexes and perform
+full table maintenance:
 
 ```bash
 python scripts/ops/maintain_env_config_indexes.py --dry-run

@@ -488,6 +488,26 @@ dataset type 和普通 SQL 条件仍可作为过滤器。设置 `stream=True` �
 原始 `job_id`/HASH bucket，或使用 `all_partitions=True`；方法会创建缺失索引，
 并默认执行 dldb optimize。
 
+两张未分区的 env-config 表位于独立数据库中。可以先用只读命令查看生产 env 表
+的行数、空间、fragment、预期/现有索引和索引覆盖情况：
+
+```bash
+python scripts/inspect/show_env_config_status.py --profile production
+python scripts/inspect/show_env_config_status.py --profile production --json
+```
+
+索引与 fragment 需要维护时，先 dry-run，再正式创建缺失索引并执行完整 optimize：
+
+```bash
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production --dry-run
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production
+```
+
+正式维护会执行 dldb 的完整 `optimize()`，用于合并 fragment、按 retention 策略
+清理旧版本并刷新索引覆盖。
+
 ## 时延与指标
 
 ```bash
