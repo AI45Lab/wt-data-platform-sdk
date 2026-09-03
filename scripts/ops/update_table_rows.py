@@ -278,7 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         required=True,
         choices=("test", "prod", "production"),
-        help="Select landing_test/serving_test or the production pair.",
+        help="Select v2_landing_test/serving_test or the production pair.",
     )
     parser.add_argument(
         "--table",

@@ -1,7 +1,7 @@
 """Real test-table coverage for the built-in landing-to-serving ETL stages.
 
 The test uses a unique HASH key and always deletes and verifies its rows in
-both ``landing_test`` and ``serving_test`` before the client is closed.
+both ``v2_landing_test`` and ``serving_test`` before the client is closed.
 """
 
 import json
@@ -143,7 +143,7 @@ def _unused_test_job_and_bucket(
         bucket = stable_hash(job_id) % LANDING_PARTITIONS
         if bucket not in existing:
             return job_id, bucket
-    raise AssertionError("could not find an unused landing_test HASH bucket")
+    raise AssertionError("could not find an unused v2_landing_test HASH bucket")
 
 
 def _incremental_record(

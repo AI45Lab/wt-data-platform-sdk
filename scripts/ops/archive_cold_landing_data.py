@@ -667,11 +667,11 @@ def run_archive(
             raise ValueError("archive_table_override is restricted to test profile")
         valid_test_archive_name = (
             archive_table_override.startswith("archived_")
-            and archive_table_override.endswith("_landing_test")
+            and archive_table_override.endswith("_v2_landing_test")
         )
         if not valid_test_archive_name:
             raise ValueError(
-                "test archive override must match archived_*_landing_test"
+                "test archive override must match archived_*_v2_landing_test"
             )
         target = ArchiveTarget(
             profile=target.profile,
@@ -815,7 +815,7 @@ def main() -> int:
         choices=("test", "production", "prod"),
         default="test",
         help=(
-            "Select landing_test/serving_test or the production pair. "
+            "Select v2_landing_test/serving_test or the production pair. "
             "The default is deliberately test-safe."
         ),
     )

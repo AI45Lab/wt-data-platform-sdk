@@ -56,7 +56,7 @@ script. For local development:
 
 ```bash
 set -a && source .env && set +a
-python scripts/inspect/query_data.py --table landing_test --count
+python scripts/inspect/query_data.py --table v2_landing_test --count
 ```
 
 ### HASH Partition Fragment and Index Status
@@ -67,7 +67,7 @@ expected index names and types come from `wt_sdk/core/schemas.py`:
 
 ```bash
 python scripts/inspect/show_partition_status.py \
-  --table landing_test --partition 34 --partition 94
+  --table v2_landing_test --partition 34 --partition 94
 python scripts/inspect/show_partition_status.py \
   --table wind_tunnel_landing --all-partitions
 ```
@@ -261,7 +261,7 @@ python scripts/ops/cleanup_data.py \
   --dry-run
 
 python scripts/ops/cleanup_data.py \
-  --table landing_test \
+  --table v2_landing_test \
   --query "job_id = 'gateway'" \
   --dry-run
 ```

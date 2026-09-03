@@ -1,5 +1,5 @@
 """
-Initialize landing_test table for testing Wind Tunnel data platform.
+Initialize v2_landing_test table for testing Wind Tunnel data platform.
 This creates a test table in s3://wind-tunnel-dldb for testing purposes.
 """
 import dldb
@@ -13,12 +13,12 @@ from wt_sdk.core.schemas import (
 )
 
 
-TABLE_NAME = "landing_test"
+TABLE_NAME = "v2_landing_test"
 PARTITION_COLUMN = LANDING_PARTITION_COLUMN  # job_id
 
 
 def init_landing_test_table():
-    """Initialize landing_test table with DLDB wrapper SDK."""
+    """Initialize v2_landing_test table with DLDB wrapper SDK."""
     print(f"Connecting to {default_config.tables.db_uri}...")
 
     # Use DLDB wrapper SDK instead of LanceDB native

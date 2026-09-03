@@ -12,6 +12,7 @@ Safe to run periodically - it won't recreate existing indexes.
 Usage:
     python scripts/ops/add_missing_indexes.py wind_tunnel_serving
     python scripts/ops/add_missing_indexes.py wind_tunnel_landing
+    python scripts/ops/add_missing_indexes.py v2_landing_test
     python scripts/ops/add_missing_indexes.py wind_tunnel_serving --dry-run
 """
 import argparse
@@ -27,7 +28,7 @@ from wt_sdk.core.schemas import SERVING_SCALAR_INDEXES, LANDING_SCALAR_INDEXES
 TABLE_INDEXES = {
     "wind_tunnel_landing": LANDING_SCALAR_INDEXES,
     "wind_tunnel_serving": SERVING_SCALAR_INDEXES,
-    "landing_test": LANDING_SCALAR_INDEXES,
+    "v2_landing_test": LANDING_SCALAR_INDEXES,
     "serving_test": SERVING_SCALAR_INDEXES,
 }
 

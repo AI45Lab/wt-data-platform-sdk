@@ -232,7 +232,7 @@ def test_trainability_stage_inside_canonical_landing_pipeline():
             )
 
 
-def test_trainability_stage_handles_shuffled_step_ids_in_landing_test():
+def test_trainability_stage_handles_shuffled_step_ids_in_v2_landing_test():
     suffix = f"{uuid.uuid4().hex}_shuffled_steps"
     job_id = f"landing-enrichment#integration#shuffled-steps#{suffix}"
     session_id = f"shuffled-step-session-{suffix}"

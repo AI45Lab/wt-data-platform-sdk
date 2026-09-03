@@ -63,9 +63,9 @@ def test_resolve_archive_target_is_test_safe_and_uses_test_archive_name():
     )
 
     assert target.profile == "test"
-    assert target.source_table == "landing_test"
+    assert target.source_table == "v2_landing_test"
     assert target.serving_table == "serving_test"
-    assert target.archive_table == "archived_20260825_landing_test"
+    assert target.archive_table == "archived_20260825_v2_landing_test"
 
 
 def test_evaluate_cold_job_requires_complete_enriched_whole_job():
@@ -182,9 +182,9 @@ def test_dry_run_discovers_without_creating_archive(monkeypatch):
         "resolve_archive_target",
         lambda profile: archive.ArchiveTarget(
             profile="test",
-            source_table="landing_test",
+            source_table="v2_landing_test",
             serving_table="serving_test",
-            archive_table="archived_20260825_landing_test",
+            archive_table="archived_20260825_v2_landing_test",
         ),
     )
 
@@ -198,8 +198,8 @@ def test_dry_run_discovers_without_creating_archive(monkeypatch):
         profile="test",
     )
 
-    assert result["archive_table"] == "archived_20260825_landing_test"
-    assert result["source_table"] == "landing_test"
+    assert result["archive_table"] == "archived_20260825_v2_landing_test"
+    assert result["source_table"] == "v2_landing_test"
     assert result["eligible_jobs"] == 1
     assert result["eligible_rows"] == 2
     assert result["affected_buckets"] == [7]
@@ -253,7 +253,7 @@ def test_rollback_removes_staged_archive_only_when_source_is_intact(monkeypatch)
     assert archive.rollback_archive_job_if_source_intact(
         session,
         job=job,
-        source_table="landing_test",
+        source_table="v2_landing_test",
         archive_table="archived_20260825_wind_tunnel_landing",
     ) is True
     assert session.deleted == [

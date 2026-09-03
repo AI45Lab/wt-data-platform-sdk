@@ -50,7 +50,7 @@ def test_build_config_pins_production_and_allows_explicit_test(monkeypatch):
     assert production.tables.landing_table == "wind_tunnel_landing"
     assert production.tables.serving_table == "wind_tunnel_serving"
     assert test.tables.profile == "test"
-    assert test.tables.landing_table == "landing_test"
+    assert test.tables.landing_table == "v2_landing_test"
     assert test.tables.serving_table == "serving_test"
 
 

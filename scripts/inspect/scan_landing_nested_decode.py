@@ -122,7 +122,7 @@ def scan_table(table_name: str, db_uri: str, batch_size: int, max_output: int) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scan a HASH landing table for nested decode failures")
-    parser.add_argument("--table", default="landing_test", help="HASH landing table to scan")
+    parser.add_argument("--table", default="v2_landing_test", help="HASH landing table to scan")
     parser.add_argument("--db-uri", default=None, help="Database URI (default: WT_SDK_DB_URI)")
     parser.add_argument("--batch-size", type=int, default=64, help="IDs per narrowing probe")
     parser.add_argument("--max-output", type=int, default=100, help="Maximum candidates to print per failure")

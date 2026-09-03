@@ -209,7 +209,7 @@ def test_cybergym_fixture_reports_stage_results_for_200_sessions():
         )
         rows = _query_fixture_rows(client)
 
-    assert rows, f"no landing_test rows found for job_id={FIXTURE_JOB_ID!r}"
+    assert rows, f"no v2_landing_test rows found for job_id={FIXTURE_JOB_ID!r}"
     rows_by_session: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in rows:
         assert row.get("job_id") == FIXTURE_JOB_ID

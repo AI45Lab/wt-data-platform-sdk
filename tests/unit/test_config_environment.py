@@ -41,7 +41,7 @@ def test_table_config_defaults_to_test_without_etl_configuration(monkeypatch):
     config = TableConfig()
 
     assert config.profile == "test"
-    assert config.landing_table == "landing_test"
+    assert config.landing_table == "v2_landing_test"
     assert config.serving_table == "serving_test"
 
 
@@ -53,7 +53,7 @@ def test_gateway_config_switches_to_test_profile_from_environment(monkeypatch):
 
     assert config.tables.db_uri == "s3://test-dldb"
     assert config.tables.profile == "test"
-    assert config.tables.landing_table == "landing_test"
+    assert config.tables.landing_table == "v2_landing_test"
     assert config.tables.serving_table == "serving_test"
 
 

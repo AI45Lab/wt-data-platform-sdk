@@ -5,7 +5,7 @@ import uuid
 from wt_sdk import GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
 
 
-TEST_TABLE_CONFIG = GatewayConfig(tables=TableConfig(landing_table="landing_test"))
+TEST_TABLE_CONFIG = GatewayConfig(tables=TableConfig(landing_table="v2_landing_test"))
 
 
 def _message(text: str) -> dict:

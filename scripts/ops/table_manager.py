@@ -20,10 +20,10 @@ Physical table naming pattern for HASH partitions:
 Example:
     python scripts/ops/table_manager.py list
     python scripts/ops/table_manager.py list --db-uri s3://wind-tunnel-dldb
-    python scripts/ops/table_manager.py drop landing_test
+    python scripts/ops/table_manager.py drop v2_landing_test
     python scripts/ops/table_manager.py drop evaluation_env_config --db-uri s3://wind-tunnel-env-config
-    python scripts/ops/table_manager.py drop landing_test --partition SFT
-    python scripts/ops/table_manager.py show-physical landing_test
+    python scripts/ops/table_manager.py drop v2_landing_test --partition SFT
+    python scripts/ops/table_manager.py show-physical v2_landing_test
     python scripts/ops/table_manager.py show-schema wind_tunnel_landing
     python scripts/ops/table_manager.py show-schema evaluation_env_config --db-uri s3://wind-tunnel-env-config
 """
@@ -181,7 +181,7 @@ def show_physical_tables(table_name: str, db_uri: str = None) -> List[str]:
     all_tables = db.list_tables().tables
 
     # Filter tables that belong to the given logical table.
-    # Use the full partition marker so landing_test does not match landing_test_backup.
+    # Use the full partition marker so similarly named tables cannot be confused.
     physical_tables = [
         t for t in all_tables
         if (
@@ -370,16 +370,16 @@ Examples:
   python scripts/ops/table_manager.py list --db-uri s3://my-bucket
 
   # Drop a table (with confirmation)
-  python scripts/ops/table_manager.py drop landing_test
+  python scripts/ops/table_manager.py drop v2_landing_test
 
   # Drop a table non-interactively (table name must be repeated exactly)
-  python scripts/ops/table_manager.py drop landing_test --force --confirm-table landing_test
+  python scripts/ops/table_manager.py drop v2_landing_test --force --confirm-table v2_landing_test
 
   # Drop a specific partition
-  python scripts/ops/table_manager.py drop landing_test --partition SFT
+  python scripts/ops/table_manager.py drop v2_landing_test --partition SFT
 
   # Show physical tables for a logical table
-  python scripts/ops/table_manager.py show-physical landing_test
+  python scripts/ops/table_manager.py show-physical v2_landing_test
 
   # Show schema and indexes for a table
   python scripts/ops/table_manager.py show-schema wind_tunnel_landing

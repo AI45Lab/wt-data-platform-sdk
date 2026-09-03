@@ -7,7 +7,7 @@ the id column from the logical table.
 
 Usage:
     AWS_EC2_METADATA_DISABLED=true python scripts/inspect/scan_duplicate_id.py
-    AWS_EC2_METADATA_DISABLED=true python scripts/inspect/scan_duplicate_id.py --table landing_test
+    AWS_EC2_METADATA_DISABLED=true python scripts/inspect/scan_duplicate_id.py --table v2_landing_test
     AWS_EC2_METADATA_DISABLED=true python scripts/inspect/scan_duplicate_id.py --table wind_tunnel_landing --max-output 200
 """
 import argparse
@@ -101,8 +101,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--table",
-        default="landing_test",
-        help="Logical table name to scan (default: landing_test)",
+        default="v2_landing_test",
+        help="Logical table name to scan (default: v2_landing_test)",
     )
     parser.add_argument(
         "--db-uri",

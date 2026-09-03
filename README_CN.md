@@ -84,7 +84,7 @@ services:
 
 | Profile | Landing 表 | Serving 表 | ETL checkpoint 表（仅运行 ETL 时使用） |
 | --- | --- | --- | --- |
-| `test` 或未配置 | `landing_test` | `serving_test` | `etl_checkpoints_test` |
+| `test` 或未配置 | `v2_landing_test` | `serving_test` | `etl_checkpoints_test` |
 | `production` 或 `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `wind_tunnel_etl_checkpoints` |
 
 未配置 `WT_SDK_PROFILE` 时会安全地默认使用 `test`；访问生产表必须显式配置
@@ -533,7 +533,7 @@ pytest -q
 
 ### 真实 DLDB/S3 集成测试
 
-集成测试会向现有 `landing_test` 和 `serving_test` 写入少量使用唯一范围的数据，
+集成测试会向现有 `v2_landing_test` 和 `serving_test` 写入少量使用唯一范围的数据，
 并在 `finally` 中清理和验证。测试显式使用这两张测试表，不受
 `WT_SDK_PROFILE` 影响；数据库由 `WT_SDK_DB_URI` 选择。两张表都必须使用当前的
 `HASH(job_id)` schema。
@@ -569,7 +569,7 @@ python scripts/ops/table_manager.py list --db-uri s3://my-dldb-bucket
 python scripts/ops/table_manager.py show-schema wind_tunnel_landing
 
 # 列出一个逻辑表背后的 dldb/Lance 物理表
-python scripts/ops/table_manager.py show-physical landing_test
+python scripts/ops/table_manager.py show-physical v2_landing_test
 
 # 查看独立的环境配置表
 python scripts/ops/table_manager.py show-schema evaluation_env_config \
@@ -580,11 +580,11 @@ python scripts/ops/init_evaluation_env_table.py --dry-run
 python scripts/ops/init_evaluation_env_table.py --confirm-recreate
 
 # 交互式删除：输入完整表名，然后输入 DROP
-python scripts/ops/table_manager.py drop landing_test
+python scripts/ops/table_manager.py drop v2_landing_test
 
 # 非交互式删除：再次传入完全相同的目标表名
-python scripts/ops/table_manager.py drop landing_test \
-  --force --confirm-table landing_test
+python scripts/ops/table_manager.py drop v2_landing_test \
+  --force --confirm-table v2_landing_test
 
 # 删除可丢弃测试表中的一个 HASH bucket
 python scripts/ops/table_manager.py drop serving_test --partition 42
@@ -643,7 +643,7 @@ python scripts/inspect/query_data.py --table evaluation_env_config \
   --output ./artifacts/job_001_env_configs.json
 
 # 查询指定列
-python scripts/inspect/query_data.py --table landing_test \
+python scripts/inspect/query_data.py --table v2_landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
 # 按 SQL 条件统计行数
@@ -651,11 +651,11 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing \
   --query "job_id LIKE '%panjia%' AND is_trainable = true" --count
 
 # 解码并查看 JSON payload 列，同时关闭显示截断
-python scripts/inspect/query_data.py --table landing_test --limit 1 \
+python scripts/inspect/query_data.py --table v2_landing_test --limit 1 \
   --show-nested --no-truncate
 
 # dump 一条 sample 到本地 JSON 文件，并展开 JSON payload 列
-python scripts/inspect/query_data.py --table landing_test \
+python scripts/inspect/query_data.py --table v2_landing_test \
   --query "job_id = 'job-001'" --limit 1 \
   --output ./artifacts/landing_job_001_sample.json
 
@@ -666,13 +666,13 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing \
   --output ./artifacts/panjia_trainable_rows.json
 
 # 按分区对比预期标量索引和现有标量索引
-python scripts/inspect/show_table_indexes.py landing_test
+python scripts/inspect/show_table_indexes.py v2_landing_test
 
 # 扫描逻辑表中的重复 ID
-python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 100
+python scripts/inspect/scan_duplicate_id.py --table v2_landing_test --max-output 100
 
 # 旧 schema 数据的 payload 解码失败诊断工具
-python scripts/inspect/scan_landing_nested_decode.py --table landing_test
+python scripts/inspect/scan_landing_nested_decode.py --table v2_landing_test
 
 # 查看 serving 标签和 ETL 生成的搜索文本
 python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
@@ -687,11 +687,11 @@ python scripts/inspect/check_search_text.py --table wind_tunnel_serving
 
 ```bash
 # 删除前预览匹配的 landing 数据
-python scripts/ops/cleanup_data.py --table landing_test \
+python scripts/ops/cleanup_data.py --table v2_landing_test \
   --query "job_id = 'job-001'" --dry-run
 
 # 删除匹配的测试数据
-python scripts/ops/cleanup_data.py --table landing_test \
+python scripts/ops/cleanup_data.py --table v2_landing_test \
   --query "job_id = 'job-001'"
 
 # 预览 env config 脏数据；该表会自动使用 WT_SDK_ENV_CONFIG_DB_URI

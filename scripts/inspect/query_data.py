@@ -7,13 +7,13 @@ buckets. Use --with-total-count only when the full table size is needed.
 
 Usage:
   # Query from default database (s3://wind-tunnel-dldb)
-  python scripts/inspect/query_data.py --table landing_test
+  python scripts/inspect/query_data.py --table v2_landing_test
 
   # Show only filtered row count
-  python scripts/inspect/query_data.py --table landing_test --count
+  python scripts/inspect/query_data.py --table v2_landing_test --count
 
   # Query with filter
-  python scripts/inspect/query_data.py --table landing_test --query "dataset_type = 'TEST'"
+  python scripts/inspect/query_data.py --table v2_landing_test --query "dataset_type = 'TEST'"
 
   # Query from custom database
   python scripts/inspect/query_data.py --db-uri s3://my-bucket --table my_table --query "reward > 0.5"
@@ -22,10 +22,10 @@ Usage:
   python scripts/inspect/query_data.py --table env_config_test --limit 5
 
   # Query with filter and limit
-  python scripts/inspect/query_data.py --table landing_test --query "reward > 0.9" --limit 2
+  python scripts/inspect/query_data.py --table v2_landing_test --query "reward > 0.9" --limit 2
 
   # Select specific columns
-  python scripts/inspect/query_data.py --table landing_test --columns "id,dataset_type,agent_model,reward"
+  python scripts/inspect/query_data.py --table v2_landing_test --columns "id,dataset_type,agent_model,reward"
 
   # List distinct values and their count
   python scripts/inspect/query_data.py --table wind_tunnel_landing --distinct job_id
@@ -34,13 +34,13 @@ Usage:
   python scripts/inspect/query_data.py --table wind_tunnel_landing --query "job_id = 'job-001'" --distinct session_id
 
   # Show full content (no truncation)
-  python scripts/inspect/query_data.py --table landing_test --query "dataset_type = 'TEST'" --limit 1 --no-truncate
+  python scripts/inspect/query_data.py --table v2_landing_test --query "dataset_type = 'TEST'" --limit 1 --no-truncate
 
   # Show full nested structures (DataFrame format)
-  python scripts/inspect/query_data.py --table landing_test --query "dataset_type = 'TEST'" --limit 1 --show-nested
+  python scripts/inspect/query_data.py --table v2_landing_test --query "dataset_type = 'TEST'" --limit 1 --show-nested
 
   # Write nested results as pretty JSON instead of printing them
-  python scripts/inspect/query_data.py --table landing_test --limit 1 --output ./artifacts/sample.json
+  python scripts/inspect/query_data.py --table v2_landing_test --limit 1 --output ./artifacts/sample.json
 
 Examples:
   # Get chat training data
@@ -53,7 +53,7 @@ Examples:
   python scripts/inspect/query_data.py --table wind_tunnel_landing --query "is_session_completed = true"
 
   # Count test data
-  python scripts/inspect/query_data.py --table landing_test --count
+  python scripts/inspect/query_data.py --table v2_landing_test --count
 
   # Filter by meta_json JSON string (use LIKE for string matching)
   python scripts/inspect/query_data.py --table wind_tunnel_landing --query "meta_json LIKE '%safety_image_ch%'" --count

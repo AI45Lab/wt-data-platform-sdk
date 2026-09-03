@@ -7,7 +7,7 @@ from pathlib import Path
 from wt_sdk import GatewayConfig, TableConfig, WTGatewayClient
 
 
-LANDING_TEST_TABLE = "landing_test"
+LANDING_TEST_TABLE = "v2_landing_test"
 SERVING_TEST_TABLE = "serving_test"
 
 

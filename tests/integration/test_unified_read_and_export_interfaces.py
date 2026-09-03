@@ -1,6 +1,6 @@
 """Real DLDB/S3 coverage for unified read APIs and reliable serving export.
 
-Every operation is pinned to ``landing_test`` or ``serving_test``.  Each test
+Every operation is pinned to ``v2_landing_test`` or ``serving_test``.  Each test
 uses a unique ``job_id`` and verifies cleanup in ``finally`` before exiting.
 """
 
@@ -18,7 +18,7 @@ from wt_sdk import (
 )
 
 
-LANDING_TEST_TABLE = "landing_test"
+LANDING_TEST_TABLE = "v2_landing_test"
 SERVING_TEST_TABLE = "serving_test"
 TEST_TABLE_CONFIG = GatewayConfig(
     tables=TableConfig(

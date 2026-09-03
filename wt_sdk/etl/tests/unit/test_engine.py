@@ -23,7 +23,7 @@ class FakeGatewayClient:
         self.rows = [dict(row) for row in rows]
         self.config = SimpleNamespace(
             tables=SimpleNamespace(
-                landing_table="landing_test",
+                landing_table="v2_landing_test",
                 serving_table="serving_test",
             )
         )
@@ -178,9 +178,9 @@ def _checkpoint(store, pipeline, bucket=3):
     return store.load(
         pipeline_name=pipeline.name,
         pipeline_version=pipeline.version,
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table=(
-            "landing_test"
+            "v2_landing_test"
             if pipeline.mode is PipelineMode.LANDING
             else "serving_test"
         ),

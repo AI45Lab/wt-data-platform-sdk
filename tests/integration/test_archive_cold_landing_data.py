@@ -1,6 +1,6 @@
 """Real dldb/S3 validation for the online cold landing archive workflow.
 
-The test is scoped to unique rows in ``landing_test``/``serving_test`` and a
+The test is scoped to unique rows in ``v2_landing_test``/``serving_test`` and a
 unique temporary archive table. Cleanup runs even when the archive assertion
 fails. Production tables are never selected.
 """
@@ -25,7 +25,7 @@ from wt_sdk import (
 TEST_CONFIG = GatewayConfig(
     tables=TableConfig(
         profile="test",
-        landing_table="landing_test",
+        landing_table="v2_landing_test",
         serving_table="serving_test",
     )
 )
@@ -76,12 +76,12 @@ def _unique_job_in_existing_landing_bucket() -> tuple[str, int, str]:
         storage_options=TEST_CONFIG.s3.to_storage_options(),
     )
     try:
-        landing_buckets = set(archive.list_partitions(session, "landing_test"))
+        landing_buckets = set(archive.list_partitions(session, "v2_landing_test"))
     finally:
         session.shutdown()
 
     if not landing_buckets:
-        raise RuntimeError("landing_test has no existing HASH bucket")
+        raise RuntimeError("v2_landing_test has no existing HASH bucket")
     target_bucket = sorted(landing_buckets)[0]
     for _ in range(1_000):
         suffix = uuid.uuid4().hex
@@ -99,7 +99,7 @@ def test_archive_cold_landing_data_real_copy_delete_and_cleanup():
         datetime(2026, 8, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
         * 1000
     )
-    archive_table = f"archived_integration_{suffix}_landing_test"
+    archive_table = f"archived_integration_{suffix}_v2_landing_test"
     record_ids = [f"archive-integration-{suffix}-{index}" for index in range(3)]
     landing_records = [
         _record(
@@ -130,7 +130,7 @@ def test_archive_cold_landing_data_real_copy_delete_and_cleanup():
                 archive_table_override=archive_table,
             )
             assert result["profile"] == "test"
-            assert result["source_table"] == "landing_test"
+            assert result["source_table"] == "v2_landing_test"
             assert result["serving_table"] == "serving_test"
             assert result["archive_table"] == archive_table
             assert result["archived_jobs"] == [
@@ -144,7 +144,7 @@ def test_archive_cold_landing_data_real_copy_delete_and_cleanup():
 
             source_rows = client.query_data(
                 filter_query=filter_query,
-                table="landing_test",
+                table="v2_landing_test",
                 checkout_latest=True,
             )
             assert source_rows == []

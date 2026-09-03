@@ -13,7 +13,7 @@ from scripts.ops.update_table_rows import (
 
 
 def test_profile_table_name_resolves_only_active_tables():
-    assert profile_table_name("test", "landing") == "landing_test"
+    assert profile_table_name("test", "landing") == "v2_landing_test"
     assert profile_table_name("test", "serving") == "serving_test"
     assert profile_table_name("prod", "landing") == "wind_tunnel_landing"
     assert profile_table_name("production", "serving") == "wind_tunnel_serving"
@@ -117,7 +117,7 @@ def test_update_and_verify_uses_landing_api_and_preserves_source_filter():
     verified = update_and_verify(
         client,
         "landing",
-        "landing_test",
+        "v2_landing_test",
         [{"id": "record-1", "job_id": "job-1"}],
         {"is_session_completed": True},
         "is_session_completed = false",

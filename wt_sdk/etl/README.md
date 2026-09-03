@@ -6,7 +6,7 @@
 
 本文面向 ETL pipeline 的使用、测试与运维。如果要开发或接入新 stage，请直接阅读
 [`README_STAGE_DEVELOPMENT.md`](README_STAGE_DEVELOPMENT.md)，其中包含 stage contract、
-依赖声明、接入步骤、单元测试和 `landing_test` 集成测试规范；本文不再重复这些内容。
+依赖声明、接入步骤、单元测试和 `v2_landing_test` 集成测试规范；本文不再重复这些内容。
 
 ETL 的 runtime、CLI、运维/检查工具、文档和测试全部收敛在 `wt_sdk/etl/`：业务规则放在
 `stages/`，pipeline 放在 `pipelines/`，入口放在 `cli/`，fixture/只读检查工具放在 `tools/`，
@@ -372,7 +372,7 @@ run 结构化查询、告警、重试次数和保留周期，再增加单独的 
 | `--list-pipelines` | 可选 | 列出 `wt_sdk/etl/pipelines/` 下可用 pipeline 名称；不需要 `--pipeline`/profile。 | `--list-pipelines` |
 | `--list-stages` | 可选，默认关闭 | 加载并校验所选 pipeline，输出 stage、字段、顺序和依赖边；不创建 SDK client。 | `--pipeline landing_to_serving_pipeline --list-stages` |
 | `--validate-only` | 可选，默认关闭 | 只做 pipeline/stage DAG 静态校验；不访问数据库、不执行 transform。 | `--validate-only` |
-| `--landing-table` | 可选，按 profile | 覆盖 source landing 逻辑表名。 | `--landing-table landing_test` |
+| `--landing-table` | 可选，按 profile | 覆盖 source landing 逻辑表名。 | `--landing-table v2_landing_test` |
 | `--serving-table` | 可选，按 profile | 覆盖 serving 目标逻辑表名。 | `--serving-table serving_test` |
 | `--page-size` | 可选，默认 `1000` | 每页轻量 discovery 行数；不是 session scope 截断大小，跨 page 的同一 session 会去重并整组加载。 | `--page-size 500` |
 | `--session-batch-size` | 可选，默认 `25` | 每次源表查询合并加载的 session scope 数；stage 仍逐个 session scope 执行。 | `--session-batch-size 25` |
@@ -401,7 +401,7 @@ pipeline 之前。
 
 | `WT_SDK_PROFILE` | 业务表 | Checkpoint 表 |
 | --- | --- | --- |
-| `test` | `landing_test` / `serving_test` | `etl_checkpoints_test` |
+| `test` | `v2_landing_test` / `serving_test` | `etl_checkpoints_test` |
 | `production` | `wind_tunnel_landing` / `wind_tunnel_serving` | `wind_tunnel_etl_checkpoints` |
 
 它们不是直接通过原生 LanceDB API 定义或访问的；SDK 使用 PyArrow schema 描述字段，并统一

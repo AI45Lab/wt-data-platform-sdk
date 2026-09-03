@@ -79,8 +79,8 @@ def test_resolve_db_uri_respects_explicit_database(monkeypatch):
         query_data._resolve_db_uri("evaluation_env_config", "s3://override-db")
         == "s3://override-db"
     )
-    assert query_data._resolve_db_uri("landing_test", "s3://override-db") == "s3://override-db"
-    assert query_data._uses_latest_snapshot_by_default("landing_test") is False
+    assert query_data._resolve_db_uri("v2_landing_test", "s3://override-db") == "s3://override-db"
+    assert query_data._uses_latest_snapshot_by_default("v2_landing_test") is False
 
 
 def test_parse_column_list_rejects_empty_and_wildcard():

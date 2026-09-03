@@ -50,8 +50,8 @@ def run_pagination_demo():
     print("      - May skip records with the same created_at as cursor")
 
     print("\n[1] Initializing WTGatewayClient...")
-    # Create custom config to use landing_test table
-    test_config = GatewayConfig(tables=TableConfig(landing_table="landing_test"))
+    # Create custom config to use the test landing table
+    test_config = GatewayConfig(tables=TableConfig(landing_table="v2_landing_test"))
     client = WTGatewayClient(test_config)
     print(f"    Client initialized")
     print(f"    Using table: {test_config.tables.landing_table}")

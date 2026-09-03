@@ -232,11 +232,11 @@ python -m pytest -q
 
 ## 贡献者的真实 pipeline 测试
 
-每个 stage PR 都应在 `landing_test` 测试“自己的 stage + 该 pipeline 原有 stages”。优先使用
+每个 stage PR 都应在 `v2_landing_test` 测试“自己的 stage + 该 pipeline 原有 stages”。优先使用
 `run_sessions()`：它读取真实 landing、执行 canonical pipeline 并写目标表，但不创建或推进
 checkpoint。
 
-测试必须使用 UUID 生成独立的 `job_id/session_id/id`，只操作 `landing_test/serving_test`，
+测试必须使用 UUID 生成独立的 `job_id/session_id/id`，只操作 `v2_landing_test/serving_test`，
 并在 `finally` 中删除并验证测试数据。可复用
 `wt_sdk.etl.tests.integration.helpers.cleanup_test_trajectory`。
 

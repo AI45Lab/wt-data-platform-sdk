@@ -14,7 +14,7 @@ DEFAULT_ENV_CONFIG_DB_URI = "s3://wind-tunnel-env-config"
 DEFAULT_LANDING_TABLE = "wind_tunnel_landing"
 DEFAULT_SERVING_TABLE = "wind_tunnel_serving"
 DEFAULT_ENV_CONFIG_TABLE = "evaluation_env_config"
-TEST_LANDING_TABLE = "landing_test"
+TEST_LANDING_TABLE = "v2_landing_test"
 TEST_SERVING_TABLE = "serving_test"
 TEST_ENV_CONFIG_TABLE = "env_config_test"
 

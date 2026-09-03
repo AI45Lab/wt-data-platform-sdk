@@ -10,6 +10,7 @@ Displays:
 Usage:
     python scripts/inspect/show_table_indexes.py wind_tunnel_serving
     python scripts/inspect/show_table_indexes.py wind_tunnel_landing
+    python scripts/inspect/show_table_indexes.py v2_landing_test
 """
 import argparse
 import sys
@@ -24,7 +25,7 @@ from wt_sdk.core.schemas import SERVING_SCALAR_INDEXES, LANDING_SCALAR_INDEXES
 TABLE_INDEXES = {
     "wind_tunnel_landing": LANDING_SCALAR_INDEXES,
     "wind_tunnel_serving": SERVING_SCALAR_INDEXES,
-    "landing_test": LANDING_SCALAR_INDEXES,
+    "v2_landing_test": LANDING_SCALAR_INDEXES,
     "serving_test": SERVING_SCALAR_INDEXES,
 }
 

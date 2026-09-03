@@ -36,7 +36,7 @@ def _status(*, rows, fragments, small_fragments, coverage):
 
 
 def test_expected_indexes_use_role_specific_sdk_definitions():
-    landing = expected_indexes_for_table("landing_test")
+    landing = expected_indexes_for_table("v2_landing_test")
     serving = expected_indexes_for_table("wind_tunnel_serving")
 
     assert landing["id_idx"] == "BTREE"

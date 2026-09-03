@@ -85,7 +85,7 @@ values and method arguments such as `search(table="...")` take precedence.
 
 | Profile | Landing table | Serving table | Environment-config table | ETL checkpoint table (only when ETL runs) |
 | --- | --- | --- | --- | --- |
-| `test` or omitted | `landing_test` | `serving_test` | `env_config_test` | `etl_checkpoints_test` |
+| `test` or omitted | `v2_landing_test` | `serving_test` | `env_config_test` | `etl_checkpoints_test` |
 | `production` or `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `evaluation_env_config` | `wind_tunnel_etl_checkpoints` |
 
 Omitting `WT_SDK_PROFILE` safely defaults to `test`. Production access must be
@@ -582,7 +582,7 @@ The timing test writes a readable JSONL example to the ignored
 
 ### Real DLDB/S3 integration tests
 
-Integration tests write a few uniquely scoped rows to the existing `landing_test`
+Integration tests write a few uniquely scoped rows to the existing `v2_landing_test`
 and `serving_test` tables, then clean and verify them in `finally`. They target
 these explicit test tables independently of `WT_SDK_PROFILE`; `WT_SDK_DB_URI`
 chooses the database. Both tables must use the current `HASH(job_id)` schema.
@@ -618,7 +618,7 @@ python scripts/ops/table_manager.py list --db-uri s3://my-dldb-bucket
 python scripts/ops/table_manager.py show-schema wind_tunnel_landing
 
 # List physical dldb/Lance tables behind a logical table
-python scripts/ops/table_manager.py show-physical landing_test
+python scripts/ops/table_manager.py show-physical v2_landing_test
 
 # Inspect the production environment-config table
 python scripts/ops/table_manager.py show-schema evaluation_env_config \
@@ -633,11 +633,11 @@ python scripts/ops/init_evaluation_env_table.py \
   --profile production --dry-run
 
 # Interactive delete: type the exact table name, then DROP
-python scripts/ops/table_manager.py drop landing_test
+python scripts/ops/table_manager.py drop v2_landing_test
 
 # Non-interactive delete: repeat the exact target
-python scripts/ops/table_manager.py drop landing_test \
-  --force --confirm-table landing_test
+python scripts/ops/table_manager.py drop v2_landing_test \
+  --force --confirm-table v2_landing_test
 
 # Delete one HASH bucket from a disposable test table
 python scripts/ops/table_manager.py drop serving_test --partition 42
@@ -697,7 +697,7 @@ python scripts/inspect/query_data.py --table evaluation_env_config \
   --output ./artifacts/job_001_env_configs.json
 
 # Query selected columns
-python scripts/inspect/query_data.py --table landing_test \
+python scripts/inspect/query_data.py --table v2_landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
 # Count rows matching a SQL filter
@@ -705,11 +705,11 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing \
   --query "job_id LIKE '%panjia%' AND is_trainable = true" --count
 
 # Decode and inspect JSON payload columns without display truncation
-python scripts/inspect/query_data.py --table landing_test --limit 1 \
+python scripts/inspect/query_data.py --table v2_landing_test --limit 1 \
   --show-nested --no-truncate
 
 # Dump one sample row to a local JSON file, expanding JSON payload columns
-python scripts/inspect/query_data.py --table landing_test \
+python scripts/inspect/query_data.py --table v2_landing_test \
   --query "job_id = 'job-001'" --limit 1 \
   --output ./artifacts/landing_job_001_sample.json
 
@@ -720,10 +720,10 @@ python scripts/inspect/query_data.py --table wind_tunnel_landing \
   --output ./artifacts/panjia_trainable_rows.json
 
 # Show expected versus existing scalar indexes by partition
-python scripts/inspect/show_table_indexes.py landing_test
+python scripts/inspect/show_table_indexes.py v2_landing_test
 
 # Show aggregate fragment statistics and index coverage for selected HASH buckets
-python scripts/inspect/show_partition_status.py --table landing_test \
+python scripts/inspect/show_partition_status.py --table v2_landing_test \
   --partition 34 --partition 94
 
 # Inspect every logical bucket, including buckets that have not materialized yet
@@ -733,10 +733,10 @@ python scripts/inspect/show_partition_status.py \
 # Column definitions and STATE meanings are documented in scripts/README.md.
 
 # Scan a logical table for duplicate IDs
-python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 100
+python scripts/inspect/scan_duplicate_id.py --table v2_landing_test --max-output 100
 
 # Legacy diagnostic for payload decode failures in pre-JSON-schema data
-python scripts/inspect/scan_landing_nested_decode.py --table landing_test
+python scripts/inspect/scan_landing_nested_decode.py --table v2_landing_test
 
 # Inspect serving tags and ETL-generated search text
 python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
@@ -751,11 +751,11 @@ preview/count columns during dry-runs.
 
 ```bash
 # Preview matching landing data before deletion
-python scripts/ops/cleanup_data.py --table landing_test \
+python scripts/ops/cleanup_data.py --table v2_landing_test \
   --query "job_id = 'job-001'" --dry-run
 
 # Delete matching test data
-python scripts/ops/cleanup_data.py --table landing_test \
+python scripts/ops/cleanup_data.py --table v2_landing_test \
   --query "job_id = 'job-001'"
 
 # Preview dirty test env config rows; this table automatically uses WT_SDK_ENV_CONFIG_DB_URI

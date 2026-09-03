@@ -117,10 +117,10 @@ def test_resolve_db_uri_uses_env_config_database(monkeypatch):
 
     assert cleanup_data._resolve_db_uri("evaluation_env_config", None) == "s3://env-config-db"
     assert cleanup_data._resolve_db_uri("env_config_test", None) == "s3://env-config-db"
-    assert cleanup_data._resolve_db_uri("landing_test", "s3://override") == "s3://override"
+    assert cleanup_data._resolve_db_uri("v2_landing_test", "s3://override") == "s3://override"
     assert cleanup_data._uses_latest_snapshot_by_default("evaluation_env_config") is True
     assert cleanup_data._uses_latest_snapshot_by_default("env_config_test") is True
-    assert cleanup_data._uses_latest_snapshot_by_default("landing_test") is False
+    assert cleanup_data._uses_latest_snapshot_by_default("v2_landing_test") is False
 
 
 def test_cleanup_env_config_dry_run_uses_env_db_and_latest(monkeypatch):

@@ -6,10 +6,10 @@ Uses DLDB SDK to properly handle logical tables and their physical partitions.
 
 Usage:
   # Cleanup from default database (s3://wind-tunnel-dldb)
-  python scripts/ops/cleanup_data.py --table landing_test --query "dataset_type = 'TEST'"
+  python scripts/ops/cleanup_data.py --table v2_landing_test --query "dataset_type = 'TEST'"
 
   # Preview what would be deleted (dry run)
-  python scripts/ops/cleanup_data.py --table landing_test --query "dataset_type = 'TEST'" --dry-run
+  python scripts/ops/cleanup_data.py --table v2_landing_test --query "dataset_type = 'TEST'" --dry-run
 
   # Delete from custom database
   python scripts/ops/cleanup_data.py --db-uri s3://my-bucket --table my_table --query "dataset_type = 'SFT'"
@@ -18,7 +18,7 @@ Usage:
   python scripts/ops/cleanup_data.py --table env_config_test --query "job_id = 'gateway'" --dry-run
 
   # Delete all data from a table (requires --force flag)
-  python scripts/ops/cleanup_data.py --table landing_test --force
+  python scripts/ops/cleanup_data.py --table v2_landing_test --force
 
   # Use legacy --uri format (backward compatible)
   python scripts/ops/cleanup_data.py --uri s3://wind-tunnel-dldb/wind_tunnel_landing.lance --query "dataset_type = 'SFT'"
@@ -28,13 +28,13 @@ Examples:
   python scripts/ops/table_manager.py list
 
   # 2. Preview what to delete
-  python scripts/ops/cleanup_data.py --table landing_test --query "session_id = 'test_session_0'" --dry-run
+  python scripts/ops/cleanup_data.py --table v2_landing_test --query "session_id = 'test_session_0'" --dry-run
 
   # 3. Confirm and delete
-  python scripts/ops/cleanup_data.py --table landing_test --query "session_id = 'test_session_0'"
+  python scripts/ops/cleanup_data.py --table v2_landing_test --query "session_id = 'test_session_0'"
 
   # 4. Verify deletion
-  python scripts/inspect/query_data.py --table landing_test --count
+  python scripts/inspect/query_data.py --table v2_landing_test --count
 """
 import argparse
 import sys

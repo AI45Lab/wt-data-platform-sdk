@@ -6,7 +6,7 @@ actual index coverage returned by dldb, and the indexes expected by the SDK.
 
 Examples:
   python scripts/inspect/show_partition_status.py \
-    --table landing_test --partition 34 --partition 94
+    --table v2_landing_test --partition 34 --partition 94
 
   python scripts/inspect/show_partition_status.py \
     --table wind_tunnel_landing --all-partitions

@@ -68,7 +68,7 @@ def test_build_config_allows_explicit_serving_test():
     config = export_script.build_config("serving_test")
 
     assert config.tables.profile == "test"
-    assert config.tables.landing_table == "landing_test"
+    assert config.tables.landing_table == "v2_landing_test"
     assert config.tables.serving_table == "serving_test"
 
 

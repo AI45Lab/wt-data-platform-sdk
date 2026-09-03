@@ -21,7 +21,7 @@ def test_in_memory_checkpoint_identity_includes_pipeline_version_and_bucket():
     checkpoint = Checkpoint(
         pipeline_name="serving_publish",
         pipeline_version="2",
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table="serving_test",
         bucket=17,
         committed_until_ms=123,
@@ -33,33 +33,33 @@ def test_in_memory_checkpoint_identity_includes_pipeline_version_and_bucket():
         store.load(
             pipeline_name="serving_publish",
             pipeline_version="2",
-            source_table="landing_test",
+            source_table="v2_landing_test",
             target_table="serving_test",
             bucket=17,
         )
         == checkpoint
     )
     assert checkpoint.checkpoint_id == (
-        "serving_publish|2|landing_test|serving_test|17"
+        "serving_publish|2|v2_landing_test|serving_test|17"
     )
     assert store.delete(
         pipeline_name="serving_publish",
         pipeline_version="2",
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table="serving_test",
         bucket=17,
     ) is True
     assert store.load(
         pipeline_name="serving_publish",
         pipeline_version="2",
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table="serving_test",
         bucket=17,
     ) is None
     assert store.delete(
         pipeline_name="serving_publish",
         pipeline_version="2",
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table="serving_test",
         bucket=17,
     ) is False
@@ -114,14 +114,14 @@ def test_dldb_checkpoint_store_round_trips_without_manual_table_open(monkeypatch
 
         def filter(self, table_name, query, limit, checkout_latest):
             assert table_name == PRODUCTION_CHECKPOINT_TABLE
-            assert "serving_publish|1|landing_test|serving_test|3" in query
+            assert "serving_publish|1|v2_landing_test|serving_test|3" in query
             assert limit == 1
             assert checkout_latest is True
             return self.frame
 
         def delete(self, table_name, query):
             assert table_name == PRODUCTION_CHECKPOINT_TABLE
-            assert "serving_publish|1|landing_test|serving_test|3" in query
+            assert "serving_publish|1|v2_landing_test|serving_test|3" in query
             self.frame = pd.DataFrame()
 
         def shutdown(self):
@@ -133,7 +133,7 @@ def test_dldb_checkpoint_store_round_trips_without_manual_table_open(monkeypatch
     checkpoint = Checkpoint(
         pipeline_name="serving_publish",
         pipeline_version="1",
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table="serving_test",
         bucket=3,
         committed_until_ms=5_000,
@@ -146,7 +146,7 @@ def test_dldb_checkpoint_store_round_trips_without_manual_table_open(monkeypatch
     loaded = store.load(
         pipeline_name="serving_publish",
         pipeline_version="1",
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table="serving_test",
         bucket=3,
     )
@@ -156,14 +156,14 @@ def test_dldb_checkpoint_store_round_trips_without_manual_table_open(monkeypatch
     assert store.delete(
         pipeline_name="serving_publish",
         pipeline_version="1",
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table="serving_test",
         bucket=3,
     ) is True
     assert store.load(
         pipeline_name="serving_publish",
         pipeline_version="1",
-        source_table="landing_test",
+        source_table="v2_landing_test",
         target_table="serving_test",
         bucket=3,
     ) is None

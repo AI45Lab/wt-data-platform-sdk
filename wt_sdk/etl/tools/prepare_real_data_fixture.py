@@ -13,7 +13,7 @@ from uuid import uuid4
 from wt_sdk import GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
 
 
-LANDING_TEST_TABLE = "landing_test"
+LANDING_TEST_TABLE = "v2_landing_test"
 SERVING_TEST_TABLE = "serving_test"
 
 
@@ -31,7 +31,7 @@ def _decode_meta(value: object) -> dict[str, object]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Create a persistent 20-row landing_test ETL fixture"
+        description="Create a persistent 20-row v2_landing_test ETL fixture"
     )
     parser.add_argument("--source-job-id", default="gateway")
     parser.add_argument("--row-count", type=int, default=20)
@@ -46,7 +46,7 @@ def main() -> int:
     if not 0 <= args.trainable_count <= args.row_count:
         raise SystemExit("--trainable-count must be between 0 and --row-count")
     if not args.confirm_create:
-        raise SystemExit("refusing to write landing_test without --confirm-create")
+        raise SystemExit("refusing to write v2_landing_test without --confirm-create")
 
     batch_id = args.batch_id or uuid4().hex[:12]
     copied_job_id = (

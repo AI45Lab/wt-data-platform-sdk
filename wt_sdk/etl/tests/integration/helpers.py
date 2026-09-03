@@ -1,4 +1,4 @@
-"""Reusable safety helpers for contributor-owned ``landing_test`` tests."""
+"""Reusable safety helpers for contributor-owned ``v2_landing_test`` tests."""
 
 import time
 
@@ -8,7 +8,7 @@ from wt_sdk import GatewayConfig, TableConfig, WTGatewayClient
 from wt_sdk.core.schemas import LANDING_PARTITIONS, SERVING_PARTITIONS
 
 
-LANDING_TEST_TABLE = "landing_test"
+LANDING_TEST_TABLE = "v2_landing_test"
 SERVING_TEST_TABLE = "serving_test"
 TEST_TABLE_CONFIG = GatewayConfig(
     tables=TableConfig(
