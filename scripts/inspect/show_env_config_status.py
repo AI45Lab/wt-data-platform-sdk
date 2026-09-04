@@ -78,7 +78,7 @@ def inspect_env_config_status(
         key=lambda item: str(item["index_name"]),
     )
 
-    # dldb 1.1.0 exposes partition_status only for HASH tables. Resolve the
+    # dldb 1.1.2 exposes partition_status only for HASH tables. Resolve the
     # exact SimpleTable through dldb and read its non-mutating Lance stats.
     table = session._get_table(table_name)
     lance_table = getattr(table, "table", None)

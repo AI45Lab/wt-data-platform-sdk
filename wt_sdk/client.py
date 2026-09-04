@@ -230,7 +230,7 @@ class WTGatewayClient:
         Ordinary reads and writes do not need this.  A script that creates,
         drops, or replaces a logical table through this client's underlying
         dldb session should invalidate that table before the next SDK call so
-        dldb 1.1.0 resolves it again from the exact information-schema record.
+        dldb 1.1.2 resolves it again from the exact information-schema record.
         """
         tables = getattr(self.session, "tables", None)
         if tables is None:

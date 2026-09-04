@@ -10,7 +10,7 @@
 
 dldb 当前通过 `pyproject.toml` 中声明的公开仓库
 [DeepLink-org/Persisting](https://github.com/DeepLink-org/Persisting) 的
-`dldb-v1.1.0` tag 安装；该版本用于精确解析逻辑表，并能正确重新打开未分区的
+`dldb-v1.1.2` tag 安装；该版本用于精确解析逻辑表，并能正确重新打开未分区的
 SimpleTable。
 当前支持 Python 3.10 至 3.12。
 
@@ -402,7 +402,7 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 `deserialize_json=True` 返回 Python 值且保留 JSON 内部 null。无法解析的 JSON
 会保持为字符串，不会因展示选项让整行读取失败。
 
-在一个 `WTGatewayClient` 生命周期内，dldb 1.1.0 会根据精确的
+在一个 `WTGatewayClient` 生命周期内，dldb 1.1.2 会根据精确的
 information-schema 记录解析逻辑表，并复用逻辑表 wrapper 及已打开的物理
 bucket；SDK 不再自行构造或 pin dldb wrapper。这不会缓存查询结果，也不会改变
 `checkout_latest`。如果代码通过 `client.session` 创建、删除或替换逻辑表，应在

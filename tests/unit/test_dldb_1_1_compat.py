@@ -27,7 +27,7 @@ def test_legacy_unpartitioned_metadata_reopens_as_simple_table(tmp_path):
         )
 
         # Reproduce the legacy metadata shape: VALUE plus an empty partition
-        # column. dldb-v1.1.0 must treat the empty column as authoritative and
+        # column. dldb-v1.1.2 must treat the empty column as authoritative and
         # reopen the physical table as an unpartitioned SimpleTable.
         session.schema_table.table.update(
             where="table_name = 'evaluation_env_config'",
