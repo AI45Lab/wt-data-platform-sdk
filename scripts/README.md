@@ -266,6 +266,31 @@ python scripts/ops/cleanup_data.py \
   --dry-run
 ```
 
+To remove stale production environment-config rows, use the dedicated
+anti-join command. It compares only `evaluation_env_config` with the current
+production `wind_tunnel_landing` job-id set; it does not read the historical
+`wind_tunnel_landing_legacy` table or any test table. Rows with a NULL/blank
+`job_id` are reported but never deleted. The default is a read-only preview:
+
+```bash
+python scripts/ops/cleanup_orphaned_production_env_configs.py --dry-run
+```
+
+After reviewing the candidate count and sample, run the revalidated delete
+explicitly. The command rescans both tables immediately before deleting and
+verifies that the requested row IDs are gone:
+
+```bash
+python scripts/ops/cleanup_orphaned_production_env_configs.py \
+  --execute --confirm-delete
+```
+
+This is a production mutation. Run it when environment-config writers are
+quiescent if possible, and retain the JSON summary for the operation record.
+For safety, the command refuses to delete when the landing scan returns zero
+non-blank job IDs while env rows exist; override that guard only after an
+independent check with `--allow-empty-landing`.
+
 Use `update_table_rows.py` for a filtered operational patch against one of the
 four active tables. The profile and role resolve the exact table; custom and
 legacy table names are intentionally unsupported:
