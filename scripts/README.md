@@ -278,7 +278,9 @@ python scripts/ops/cleanup_orphaned_production_env_configs.py --dry-run
 
 After reviewing the candidate count and sample, run the revalidated delete
 explicitly. The command rescans both tables immediately before deleting and
-verifies that the requested row IDs are gone:
+verifies that the requested job IDs are gone. Deletion is keyed by exact
+`job_id`, because historical env rows may contain duplicate numeric `id`
+values from concurrent `max(id) + 1` allocation:
 
 ```bash
 python scripts/ops/cleanup_orphaned_production_env_configs.py \

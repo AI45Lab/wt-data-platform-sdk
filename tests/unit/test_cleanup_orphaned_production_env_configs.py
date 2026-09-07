@@ -47,13 +47,33 @@ def test_find_orphan_rows_preserves_blank_job_ids_for_manual_review():
     assert blank_count == 2
 
 
-def test_delete_env_rows_by_id_batches_numeric_predicates():
+def test_delete_env_rows_by_job_id_batches_and_escapes_predicates():
     manager = FakeEnvManager()
 
-    deleted = script.delete_env_rows_by_id(manager, [4, 9, 12], batch_size=2)
+    deleted = script.delete_env_rows_by_job_id(
+        manager,
+        ["job-a", "job'b", "job-c"],
+        batch_size=2,
+    )
 
     assert deleted == 3
-    assert manager.deleted == ["id IN (4, 9)", "id IN (12)"]
+    assert manager.deleted == [
+        "job_id IN ('job-a', 'job''b')",
+        "job_id IN ('job-c')",
+    ]
+
+
+def test_exact_job_ids_deduplicates_without_using_duplicate_row_ids():
+    rows = pd.DataFrame(
+        [
+            {"id": 1, "job_id": "stale"},
+            {"id": 1, "job_id": "stale"},
+            {"id": 2, "job_id": "other"},
+            {"id": 3, "job_id": None},
+        ]
+    )
+
+    assert script._exact_job_ids(rows) == ["stale", "other"]
 
 
 def test_empty_landing_source_is_a_safety_error_when_env_rows_exist():

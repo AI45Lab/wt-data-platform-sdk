@@ -130,38 +130,52 @@ def find_orphan_rows(
     return env_rows.loc[orphan_mask].copy(), blank_count
 
 
-def _validated_integer_ids(rows: pd.DataFrame) -> list[int]:
-    """Validate env row ids before interpolating a numeric SQL IN predicate."""
-    result: list[int] = []
-    for value in rows["id"].tolist():
-        try:
-            integer = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Cannot safely delete env row with id={value!r}") from exc
-        if isinstance(value, float) and not value.is_integer():
-            raise ValueError(f"Cannot safely delete env row with non-integer id={value!r}")
-        result.append(integer)
+def _exact_job_ids(rows: pd.DataFrame) -> list[str]:
+    """Return unique exact job-id values selected by the anti-join.
+
+    Env-config ``id`` values are not concurrency-safe unique keys: the current
+    writer allocates them with ``max(id) + 1``.  Deletion therefore uses the
+    business key that was classified by this command, while preserving its
+    exact stored value for the SQL predicate.
+    """
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in rows["job_id"].tolist():
+        normalised = _normalise_job_id(value)
+        if normalised is None:
+            continue
+        exact = str(value)
+        if exact not in seen:
+            seen.add(exact)
+            result.append(exact)
     return result
 
 
-def _chunks(values: list[int], size: int) -> Iterable[list[int]]:
+def _chunks(values: list[str], size: int) -> Iterable[list[str]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
 
 
-def delete_env_rows_by_id(
+def _escape_sql_string(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def delete_env_rows_by_job_id(
     manager: EnvConfigManager,
-    row_ids: list[int],
+    job_ids: list[str],
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
-    """Submit explicit id-based deletes and return the number requested."""
+    """Submit exact job-id deletes and return the number of job IDs."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    for batch in _chunks(row_ids, batch_size):
-        predicate = "id IN (" + ", ".join(str(row_id) for row_id in batch) + ")"
+    for batch in _chunks(job_ids, batch_size):
+        literals = ", ".join(
+            f"'{_escape_sql_string(job_id)}'" for job_id in batch
+        )
+        predicate = f"job_id IN ({literals})"
         manager._delete_where(predicate)
-    return len(row_ids)
+    return len(job_ids)
 
 
 def _build_production_client() -> WTGatewayClient:
@@ -281,20 +295,24 @@ def run(
             sample_size=sample_size,
         )
 
-        row_ids = _validated_integer_ids(orphan_rows)
-        if len(row_ids) != len(set(row_ids)):
-            raise RuntimeError("Production env-config contains duplicate row IDs; refusing delete")
-        requested = delete_env_rows_by_id(manager, row_ids, batch_size=batch_size)
+        candidate_row_count = len(orphan_rows)
+        candidate_job_ids = _exact_job_ids(orphan_rows)
+        requested_job_ids = delete_env_rows_by_job_id(
+            manager,
+            candidate_job_ids,
+            batch_size=batch_size,
+        )
 
         # Verify against a latest read.  The check is intentionally based on
-        # the exact candidate IDs, not a broad NOT-IN predicate.
+        # the exact candidate job IDs, not a broad NOT-IN predicate.
         remaining_rows = load_production_env_rows(manager)
-        remaining_ids = set(_validated_integer_ids(remaining_rows)) & set(row_ids)
+        remaining_job_ids = set(_exact_job_ids(remaining_rows)) & set(candidate_job_ids)
         print(
             json.dumps(
                 {
-                    "delete_requested": requested,
-                    "candidate_ids_still_present": len(remaining_ids),
+                    "candidate_rows_before_delete": candidate_row_count,
+                    "delete_requested_job_ids": requested_job_ids,
+                    "candidate_job_ids_still_present": len(remaining_job_ids),
                     "blank_or_null_job_id_count_after_delete": int(
                         remaining_rows["job_id"].map(_normalise_job_id).isna().sum()
                     ),
@@ -303,9 +321,9 @@ def run(
                 indent=2,
             )
         )
-        if remaining_ids:
+        if remaining_job_ids:
             raise RuntimeError(
-                f"{len(remaining_ids)} requested env rows are still present after delete"
+                f"{len(remaining_job_ids)} requested env job IDs are still present after delete"
             )
         return 0
     finally:
