@@ -1,6 +1,6 @@
-"""Unit coverage for landing trainability session selection."""
+"""Unit tests for the landing trainability stage."""
 
-import json
+from copy import deepcopy
 
 import pytest
 
@@ -13,24 +13,22 @@ from wt_sdk.etl import (
 
 
 def _row(
-    record_id: str,
-    step_id: int,
-    messages: list[dict[str, str]],
+    record_id: object,
+    step_id: object,
     *,
-    completed: bool,
-    status_code: object | None = None,
-    reward: float | None = None,
+    completed: object = False,
+    reward: object = None,
+    is_trainable: bool = False,
+    messages: object = "[]",
+    meta_json: object = "{}",
 ) -> dict[str, object]:
-    metadata: dict[str, object] = {"source": "trainability-unit-test"}
-    if status_code is not None:
-        metadata["env_state"] = json.dumps({"status_code": status_code})
     return {
         "id": record_id,
         "step_id": step_id,
-        "messages": json.dumps(messages),
+        "messages": messages,
         "is_session_completed": completed,
-        "is_trainable": False,
-        "meta_json": json.dumps(metadata),
+        "is_trainable": is_trainable,
+        "meta_json": meta_json,
         "reward": reward,
     }
 
@@ -38,436 +36,179 @@ def _row(
 def _context() -> StageContext:
     return StageContext(
         pipeline_name="landing_enrichment_pipeline",
-        pipeline_version="1",
+        pipeline_version="3",
         session_key=SessionKey("job-1", "session-1"),
+        stage_name="update_is_trainable",
     )
 
 
-def test_completed_200_session_marks_only_the_append_only_chain_tail():
-    first = {"role": "user", "content": "question"}
-    response = {"role": "assistant", "content": "answer"}
+def test_stage_declares_its_pipeline_contract():
+    stage = UpdateIsTrainableStage()
+
+    assert stage.name == "update_is_trainable"
+    assert stage.version == "2"
+    assert stage.required_fields == (
+        "id",
+        "step_id",
+        "messages",
+        "is_session_completed",
+        "meta_json",
+        "reward",
+    )
+    assert stage.output_fields == ("is_trainable", "reward")
+    assert stage.dependencies == ()
+    assert stage.job_discovery_filter == "is_session_completed = true"
+
+
+def test_session_without_completion_marker_is_skipped():
     session = (
-        _row("row-1", 1, [first], completed=False, status_code=200),
-        _row("row-2", 2, [first, response], completed=True, status_code=200),
+        _row("row-1", 1, is_trainable=True),
+        _row("row-2", 2, completed=None),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {}
+
+
+@pytest.mark.parametrize("final_reward", [0.0, 0.75])
+def test_completed_session_marks_only_max_step_and_copies_reward(final_reward: float):
+    session = (
+        _row("step-30", 30, is_trainable=True, reward=0.25),
+        _row("step-10", 10),
+        _row("step-40", 40, completed=True, reward=final_reward),
+        _row("step-20", 20),
+    )
+    original = deepcopy(session)
+
+    patches = UpdateIsTrainableStage().transform_session(session, _context())
+
+    assert patches == {
+        "step-30": {"is_trainable": False},
+        "step-10": {"is_trainable": False},
+        "step-40": {"is_trainable": True, "reward": final_reward},
+        "step-20": {"is_trainable": False},
+    }
+    assert session == original
+
+
+def test_single_record_completed_session_is_trainable():
+    session = (_row("only-row", 7, completed=True, reward=1.0),)
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "only-row": {"is_trainable": True, "reward": 1.0}
+    }
+
+
+def test_null_final_reward_is_not_written_to_trainable_row():
+    session = (
+        _row("first", 1, reward=0.25),
+        _row("last", 2, completed=True, reward=None),
     )
 
     assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "row-1": {"is_trainable": False},
-        "row-2": {"is_trainable": True},
+        "first": {"is_trainable": False},
+        "last": {"is_trainable": True},
     }
 
 
-def test_equivalent_user_text_content_shapes_share_one_chain():
-    string_user = {"role": "user", "content": "hello"}
-    block_user = {
-        "role": "user",
-        "content": [{"type": "text", "text": "hello"}],
-    }
-    response = {"role": "assistant", "content": "answer"}
+def test_completion_before_max_step_warns_and_uses_completed_row_reward():
     session = (
-        _row("row-1", 1, [string_user], completed=False, status_code=200),
-        _row(
-            "row-2",
-            2,
-            [block_user, response],
-            completed=True,
-            status_code=200,
-        ),
-    )
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "row-1": {"is_trainable": False},
-        "row-2": {"is_trainable": True},
-    }
-
-
-@pytest.mark.parametrize("subagent_step", [1, 2, 3, 4, 5, 20, 100])
-def test_single_record_side_chain_is_not_trainable_at_any_step(
-    subagent_step: int,
-):
-    startup = {"role": "system", "content": "startup side task"}
-    root_start = {"role": "user", "content": "main task"}
-    root_response = {"role": "assistant", "content": "main response"}
-    session = (
-        _row(
-            "startup",
-            subagent_step,
-            [startup],
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "root-1",
-            subagent_step + 1,
-            [root_start],
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "root-2",
-            subagent_step + 2,
-            [root_start, root_response],
-            completed=True,
-            status_code=200,
-        ),
-    )
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "startup": {"is_trainable": False},
-        "root-1": {"is_trainable": False},
-        "root-2": {"is_trainable": True},
-    }
-
-
-def test_single_record_side_chain_after_step_four_is_not_trainable():
-    side = {"role": "system", "content": "independent side task"}
-    root_start = {"role": "user", "content": "main task"}
-    root_response = {"role": "assistant", "content": "main response"}
-    session = (
-        _row("side", 5, [side], completed=False, status_code=200),
-        _row("root-1", 6, [root_start], completed=False, status_code=200),
-        _row(
-            "root-2",
-            7,
-            [root_start, root_response],
-            completed=True,
-            status_code=200,
-        ),
-    )
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "side": {"is_trainable": False},
-        "root-1": {"is_trainable": False},
-        "root-2": {"is_trainable": True},
-    }
-
-
-def test_single_record_root_session_at_step_one_remains_trainable():
-    message = {"role": "user", "content": "main task"}
-    session = (_row("root", 1, [message], completed=True, status_code=200),)
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "root": {"is_trainable": True},
-    }
-
-
-def test_completion_marker_before_max_step_warns_and_continues():
-    first = {"role": "user", "content": "question"}
-    response = {"role": "assistant", "content": "answer"}
-    session = (
-        _row("row-1", 1, [first], completed=True, status_code=200),
-        _row("row-2", 2, [first, response], completed=False, status_code=200),
+        _row("completed", 4, completed=True, reward=0.625),
+        _row("tail", 5, reward=0.125),
     )
     context = _context()
 
     assert UpdateIsTrainableStage().transform_session(session, context) == {
-        "row-1": {"is_trainable": False},
-        "row-2": {"is_trainable": True},
+        "completed": {"is_trainable": False},
+        "tail": {"is_trainable": True, "reward": 0.625},
     }
-
     assert len(context.emitted_warnings) == 1
     warning = context.emitted_warnings[0]
+    assert warning.job_id == "job-1"
+    assert warning.session_id == "session-1"
+    assert warning.stage_name == "update_is_trainable"
     assert warning.warning_type == "CompletionMarkerBeforeMaxStep"
-    assert warning.stage_name == "__stage__"
     assert warning.message == (
         "is_session_completed is not set on the maximum step_id record; "
-        "completed_record_id='row-1', completed_step_id=1, max_step_id=2; "
+        "completed_record_id='completed', completed_step_id=4, max_step_id=5; "
         "continuing trainability processing"
     )
 
 
-def test_multiple_completion_markers_raise_stage_error():
-    first = {"role": "user", "content": "question"}
-    response = {"role": "assistant", "content": "answer"}
+def test_selection_does_not_depend_on_messages_or_gateway_status():
     session = (
-        _row("row-1", 1, [first], completed=True, status_code=200),
-        _row("row-2", 2, [first, response], completed=True, status_code=200),
+        _row(
+            "first",
+            1,
+            messages="malformed JSON",
+            meta_json='{"env_state": "{\\"status_code\\": 200}"}',
+        ),
+        _row(
+            "last",
+            2,
+            completed=True,
+            reward=0.5,
+            messages=None,
+            meta_json='{"env_state": "{\\"status_code\\": 500}"}',
+        ),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "first": {"is_trainable": False},
+        "last": {"is_trainable": True, "reward": 0.5},
+    }
+
+
+def test_empty_session_raises_stage_error():
+    with pytest.raises(StageTransformError, match="session must contain at least one row"):
+        UpdateIsTrainableStage().transform_session((), _context())
+
+
+def test_multiple_completion_markers_raise_stage_error_for_second_marker():
+    session = (
+        _row("first", 1, completed=True),
+        _row("second", 2, completed=True),
     )
 
     with pytest.raises(
         StageTransformError,
-        match="There is exactly one `is_session_completed`",
-    ):
+        match=r"There is exactly one `is_session_completed`\.",
+    ) as error:
         UpdateIsTrainableStage().transform_session(session, _context())
 
-
-def test_completion_marker_on_max_step_accepts_unordered_session():
-    first = {"role": "user", "content": "question"}
-    response = {"role": "assistant", "content": "answer"}
-    session = (
-        _row(
-            "row-2",
-            2,
-            [first, response],
-            completed=True,
-            status_code=200,
-            reward=0.75,
-        ),
-        _row("row-1", 1, [first], completed=False, status_code=200),
-    )
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "row-2": {"is_trainable": True, "reward": 0.75},
-        "row-1": {"is_trainable": False},
-    }
+    assert error.value.record_id == "second"
 
 
-def test_early_chain_with_multiple_records_remains_trainable():
-    first = {"role": "user", "content": "main task"}
-    response = {"role": "assistant", "content": "main response"}
-    side = {"role": "user", "content": "independent task"}
-    session = (
-        _row("root-1", 1, [first], completed=False, status_code=200),
-        _row("side", 2, [side], completed=False, status_code=200),
-        _row(
-            "root-2",
-            3,
-            [first, response],
-            completed=True,
-            status_code=200,
-        ),
-    )
+@pytest.mark.parametrize("completed", [0, 1, "true", [], {}])
+def test_non_boolean_completion_marker_raises_stage_error(completed: object):
+    session = (_row("bad-completion", 1, completed=completed),)
 
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "root-1": {"is_trainable": False},
-        "side": {"is_trainable": False},
-        "root-2": {"is_trainable": True},
-    }
+    with pytest.raises(
+        StageTransformError,
+        match="is_session_completed must be bool or null",
+    ) as error:
+        UpdateIsTrainableStage().transform_session(session, _context())
+
+    assert error.value.record_id == "bad-completion"
 
 
-@pytest.mark.parametrize("final_reward", [0.0, 0.75])
-def test_trainable_chain_tails_receive_final_session_reward(
-    final_reward: float,
-):
-    root_start = {"role": "user", "content": "main task"}
-    root_response = {"role": "assistant", "content": "main response"}
-    side_start = {"role": "user", "content": "side task"}
-    side_response = {"role": "assistant", "content": "side response"}
-    session = (
-        _row(
-            "root-1",
-            1,
-            [root_start],
-            completed=False,
-            status_code=200,
-            reward=0.1,
-        ),
-        _row(
-            "side-1",
-            2,
-            [side_start],
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "root-2",
-            3,
-            [root_start, root_response],
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "side-2",
-            4,
-            [side_start, side_response],
-            completed=True,
-            status_code=200,
-            reward=final_reward,
-        ),
-    )
+@pytest.mark.parametrize("step_id", [True, False, None, 1.5, "1"])
+def test_invalid_step_id_raises_stage_error(step_id: object):
+    session = (_row("bad-step", step_id, completed=True),)
 
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "root-1": {"is_trainable": False},
-        "side-1": {"is_trainable": False},
-        "root-2": {"is_trainable": True, "reward": final_reward},
-        "side-2": {"is_trainable": True, "reward": final_reward},
-    }
+    with pytest.raises(
+        StageTransformError,
+        match=r"record 'bad-step' has invalid step_id:",
+    ) as error:
+        UpdateIsTrainableStage().transform_session(session, _context())
+
+    assert error.value.record_id == "bad-step"
 
 
-def test_later_strict_prefix_retries_longer_chain_and_drops_singleton_subagent():
-    system = {"role": "system", "content": "instructions"}
-    user = {"role": "user", "content": "task"}
-    assistant = {"role": "assistant", "content": "attempt"}
-    tool_call = {"role": "tool", "content": "first result"}
-    second_assistant = {"role": "assistant", "content": "retry"}
-    second_tool_call = {"role": "tool", "content": "second result"}
-    retry_response = {"role": "assistant", "content": "success"}
-    title_messages = [
-        {"role": "system", "content": "generate title"},
-        {"role": "user", "content": "title input"},
-        {"role": "assistant", "content": "title"},
-    ]
-    short_prefix = [system, user]
-    abandoned_attempt = [
-        *short_prefix,
-        assistant,
-        tool_call,
-        second_assistant,
-        second_tool_call,
-    ]
-    successful_retry = [*short_prefix, retry_response]
-    session = (
-        _row(
-            "abandoned",
-            1,
-            abandoned_attempt,
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "retry-reset",
-            2,
-            short_prefix,
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "title-generator",
-            3,
-            title_messages,
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "successful",
-            4,
-            successful_retry,
-            completed=True,
-            status_code=200,
-        ),
-    )
+@pytest.mark.parametrize("record_id", [None, 7, "", "   "])
+def test_invalid_record_id_raises_stage_error(record_id: object):
+    session = (_row(record_id, 1, completed=True),)
 
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "abandoned": {"is_trainable": False},
-        "retry-reset": {"is_trainable": False},
-        "title-generator": {"is_trainable": False},
-        "successful": {"is_trainable": True},
-    }
+    with pytest.raises(StageTransformError, match="record has invalid id:") as error:
+        UpdateIsTrainableStage().transform_session(session, _context())
 
-
-def test_repeated_identical_single_record_subagents_are_not_merged():
-    root_start = {"role": "user", "content": "main task"}
-    root_response = {"role": "assistant", "content": "main response"}
-    title_messages = [
-        {"role": "system", "content": "generate title"},
-        {"role": "user", "content": "title input"},
-        {"role": "assistant", "content": "title"},
-    ]
-    session = (
-        _row("root-1", 1, [root_start], completed=False, status_code=200),
-        _row(
-            "title-1",
-            2,
-            title_messages,
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "title-2",
-            20,
-            title_messages,
-            completed=False,
-            status_code=200,
-        ),
-        _row(
-            "root-2",
-            21,
-            [root_start, root_response],
-            completed=True,
-            status_code=200,
-        ),
-    )
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "root-1": {"is_trainable": False},
-        "title-1": {"is_trainable": False},
-        "title-2": {"is_trainable": False},
-        "root-2": {"is_trainable": True},
-    }
-
-
-@pytest.mark.parametrize("status_code", [400, 429, 500, 502, 503])
-def test_non_200_row_is_excluded_while_valid_rows_are_processed(status_code: int):
-    first = {"role": "user", "content": "question"}
-    response = {"role": "assistant", "content": "answer"}
-    session = (
-        _row("row-1", 1, [first], completed=False, status_code=status_code),
-        _row("row-2", 2, [first, response], completed=True, status_code=200),
-    )
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "row-1": {"is_trainable": False},
-        "row-2": {"is_trainable": True},
-    }
-
-
-def test_non_200_row_between_valid_chain_records_does_not_break_the_chain():
-    first = {"role": "user", "content": "question"}
-    failed_attempt = {"role": "assistant", "content": "failed attempt"}
-    successful_response = {"role": "assistant", "content": "answer"}
-    session = (
-        _row("row-1", 1, [first], completed=False, status_code=200),
-        _row(
-            "row-2",
-            2,
-            [first, failed_attempt],
-            completed=False,
-            status_code=502,
-        ),
-        _row(
-            "row-3",
-            3,
-            [first, successful_response],
-            completed=True,
-            status_code=200,
-        ),
-    )
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "row-1": {"is_trainable": False},
-        "row-2": {"is_trainable": False},
-        "row-3": {"is_trainable": True},
-    }
-
-
-def test_non_200_row_messages_are_not_parsed():
-    valid = _row(
-        "valid",
-        2,
-        [{"role": "user", "content": "question"}],
-        completed=True,
-        status_code=200,
-    )
-    failed = _row(
-        "failed",
-        1,
-        [{"role": "user", "content": "ignored"}],
-        completed=False,
-        status_code=502,
-    )
-    failed["messages"] = "malformed JSON"
-
-    assert UpdateIsTrainableStage().transform_session(
-        (failed, valid), _context()
-    ) == {
-        "failed": {"is_trainable": False},
-        "valid": {"is_trainable": True},
-    }
-
-
-def test_string_200_status_is_accepted():
-    message = {"role": "user", "content": "question"}
-    session = (_row("row-1", 1, [message], completed=True, status_code="200"),)
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "row-1": {"is_trainable": True},
-    }
-
-
-def test_session_without_status_code_preserves_legacy_behavior():
-    message = {"role": "user", "content": "question"}
-    session = (_row("row-1", 1, [message], completed=True),)
-
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
-        "row-1": {"is_trainable": True},
-    }
+    assert error.value.record_id is None

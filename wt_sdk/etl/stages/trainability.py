@@ -31,7 +31,7 @@ class UpdateIsTrainableStage(ETLStage):
     """
 
     name = "update_is_trainable"
-    version = "1"
+    version = "2"
     required_fields = (
         "id",
         "step_id",
@@ -52,10 +52,8 @@ class UpdateIsTrainableStage(ETLStage):
         if not _is_completed_session(session, context):
             return {}
 
-        eligible_records = tuple(
-            record for record in session if not _has_non_200_status_code(record)
-        )
-        trainable_ids = _detect_trainable_record_ids(eligible_records)
+        max_step_record = max(session, key=_step_sort_key)
+        trainable_ids = {_record_id(max_step_record)}
         completed_record = next(
             record
             for record in session
