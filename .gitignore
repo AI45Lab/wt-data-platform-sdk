@@ -185,3 +185,4 @@ logs/
 .claude/
 tmp/
 AGENTS.md
+ETL_TASK_*.md
