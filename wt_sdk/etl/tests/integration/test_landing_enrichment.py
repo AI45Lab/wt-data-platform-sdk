@@ -104,12 +104,16 @@ def _shuffled_step_records(
     suffix: str,
     source_updated_at: int,
 ) -> list[LandingRecord]:
-    messages = [
-        {"role": "user", "content": "shuffled step task"},
-        {"role": "assistant", "content": "first response"},
-        {"role": "user", "content": "follow-up"},
-        {"role": "assistant", "content": "final response"},
-    ]
+    main_start = {"role": "user", "content": "main task"}
+    main_response = {"role": "assistant", "content": "main response"}
+    side_start = {"role": "user", "content": "independent side task"}
+    side_response = {"role": "assistant", "content": "side response"}
+    messages_by_step = {
+        10: [main_start],
+        20: [side_start],
+        30: [main_start, main_response],
+        40: [side_start, side_response],
+    }
     common = {
         "dataset_type": "ETL_SHUFFLED_STEP_INTEGRATION_TEST",
         "session_id": session_id,
@@ -118,7 +122,6 @@ def _shuffled_step_records(
         "is_truncated": False,
         "agent_model": "shuffled-step-integration-model",
         "env_name": "shuffled-step-integration-test",
-        "is_trainable": False,
         "meta_json": json.dumps(
             {
                 "source": "shuffled-step-integration-test",
@@ -135,8 +138,9 @@ def _shuffled_step_records(
             source_updated_at=source_updated_at,
             step_id=step_id,
             is_terminal=step_id == 40,
-            messages=json.dumps(messages[:index]),
+            messages=json.dumps(messages_by_step[step_id]),
             is_session_completed=step_id == 40,
+            is_trainable=step_id == 30,
             reward=0.875 if step_id == 40 else None,
         )
         for index, step_id in enumerate((10, 20, 30, 40), start=1)
@@ -145,9 +149,10 @@ def _shuffled_step_records(
 
 
 def _stage_context(job_id: str, session_id: str) -> StageContext:
+    pipeline = load_pipeline("landing_enrichment_pipeline")
     return StageContext(
-        pipeline_name="landing_enrichment_pipeline",
-        pipeline_version="1",
+        pipeline_name=pipeline.name,
+        pipeline_version=pipeline.version,
         session_key=SessionKey(job_id, session_id),
     )
 
@@ -232,7 +237,7 @@ def test_trainability_stage_inside_canonical_landing_pipeline():
             )
 
 
-def test_trainability_stage_handles_shuffled_step_ids_in_v2_landing_test():
+def test_trainability_stage_selects_only_max_step_across_shuffled_chains():
     suffix = f"{uuid.uuid4().hex}_shuffled_steps"
     job_id = f"landing-enrichment#integration#shuffled-steps#{suffix}"
     session_id = f"shuffled-step-session-{suffix}"
@@ -258,6 +263,11 @@ def test_trainability_stage_handles_shuffled_step_ids_in_v2_landing_test():
             assert sum(
                 row.get("is_session_completed") is True for row in before
             ) == 1
+            assert before_by_step[30]["is_trainable"] is True
+            assert all(
+                before_by_step[step_id]["is_trainable"] is False
+                for step_id in (10, 20, 40)
+            )
 
             shuffled_session = tuple(
                 before_by_step[step_id] for step_id in (30, 40, 10, 20)
@@ -283,7 +293,7 @@ def test_trainability_stage_handles_shuffled_step_ids_in_v2_landing_test():
             )
             assert first.failed_rows == 0
             assert first.source_rows == 4
-            assert first.landing_rows_updated == 1
+            assert first.landing_rows_updated == 2
 
             after_first = _query_test_rows(client, LANDING_TEST_TABLE, job_id)
             after_first_by_step = {
@@ -295,7 +305,12 @@ def test_trainability_stage_handles_shuffled_step_ids_in_v2_landing_test():
                 after_first_by_step[40]["source_updated_at"]
                 > before_by_step[40]["source_updated_at"]
             )
-            for step_id in (10, 20, 30):
+            assert after_first_by_step[30]["is_trainable"] is False
+            assert (
+                after_first_by_step[30]["source_updated_at"]
+                > before_by_step[30]["source_updated_at"]
+            )
+            for step_id in (10, 20):
                 assert after_first_by_step[step_id] == before_by_step[step_id]
             assert _query_test_rows(client, SERVING_TEST_TABLE, job_id) == []
 
@@ -312,6 +327,7 @@ def test_trainability_stage_handles_shuffled_step_ids_in_v2_landing_test():
                 "\nShuffled-step trainability result: "
                 "ingest_order=30,10,40,20, "
                 "stage_input_order=30,40,10,20, "
+                "chains=10->30,20->40, previous_trainable_step=30, "
                 "completed_step=40, trainable_steps=40, reward=0.875, "
                 f"first_updated={first.landing_rows_updated}, "
                 f"second_updated={second.landing_rows_updated}"
