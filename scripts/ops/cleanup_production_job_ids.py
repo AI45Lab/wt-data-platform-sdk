@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Delete matching production job IDs from env, landing, and serving tables.
+"""Delete matching job IDs from one environment's env, landing, and serving tables.
 
-The command has a production-only scope:
+The default command has a production scope:
 
 * ``evaluation_env_config`` in ``WT_SDK_ENV_CONFIG_DB_URI``;
 * ``wind_tunnel_landing`` in ``WT_SDK_DB_URI`` (or the SDK default);
 * ``wind_tunnel_serving`` in ``WT_SDK_DB_URI`` (or the SDK default).
+
+For safe integration validation, ``--profile test`` targets the corresponding
+test tables instead.  No arbitrary table names are accepted.
 
 Job IDs can be supplied repeatedly with ``--job-id`` or one per line with
 ``--job-id-file``.  The default is a read-only preview.  A destructive run
@@ -22,6 +25,9 @@ Examples::
 
     python scripts/ops/cleanup_production_job_ids.py \
         --job-id-file ./job_ids.txt --execute --confirm-delete
+
+    python scripts/ops/cleanup_production_job_ids.py \
+        --profile test --job-id test-cleanup --execute --confirm-delete
 """
 
 from __future__ import annotations
@@ -38,6 +44,9 @@ from wt_sdk.config import (
     DEFAULT_ENV_CONFIG_TABLE,
     DEFAULT_LANDING_TABLE,
     DEFAULT_SERVING_TABLE,
+    TEST_ENV_CONFIG_TABLE,
+    TEST_LANDING_TABLE,
+    TEST_SERVING_TABLE,
     GatewayConfig,
     TableConfig,
     default_config,
@@ -47,6 +56,18 @@ from wt_sdk.env_config_client import EnvConfigManager
 
 PREVIEW_COLUMNS = ["id", "job_id", "env_id", "env_name", "session_id", "created_at"]
 MISSING_PARTITION_MARKERS = ("partition", "does not exist")
+PROFILE_TABLES = {
+    "production": {
+        "env": DEFAULT_ENV_CONFIG_TABLE,
+        "landing": DEFAULT_LANDING_TABLE,
+        "serving": DEFAULT_SERVING_TABLE,
+    },
+    "test": {
+        "env": TEST_ENV_CONFIG_TABLE,
+        "landing": TEST_LANDING_TABLE,
+        "serving": TEST_SERVING_TABLE,
+    },
+}
 
 
 @dataclass
@@ -106,13 +127,25 @@ def _is_missing_partition_error(exc: Exception) -> bool:
     return all(marker in message for marker in MISSING_PARTITION_MARKERS)
 
 
-def _build_production_client() -> WTGatewayClient:
-    """Create a client pinned to production landing and serving tables."""
+def _normalize_profile(profile: str) -> str:
+    """Normalize the accepted profile aliases."""
+    normalized = profile.strip().lower()
+    if normalized == "prod":
+        normalized = "production"
+    if normalized not in PROFILE_TABLES:
+        raise ValueError("profile must be one of: production, prod, test")
+    return normalized
+
+
+def _build_client(profile: str) -> WTGatewayClient:
+    """Create a client pinned to the selected landing and serving tables."""
+    profile = _normalize_profile(profile)
+    profile_tables = PROFILE_TABLES[profile]
     tables = TableConfig(
         db_uri=default_config.tables.db_uri,
-        landing_table=DEFAULT_LANDING_TABLE,
-        serving_table=DEFAULT_SERVING_TABLE,
-        profile="production",
+        landing_table=profile_tables["landing"],
+        serving_table=profile_tables["serving"],
+        profile=profile,
     )
     return WTGatewayClient(
         GatewayConfig(
@@ -124,6 +157,15 @@ def _build_production_client() -> WTGatewayClient:
             dldb_metrics_log_path=default_config.dldb_metrics_log_path,
         )
     )
+
+
+def _table_role(table_name: str, profile: str) -> str:
+    """Return the role for a profile-specific active table."""
+    profile_tables = PROFILE_TABLES[_normalize_profile(profile)]
+    for role in ("landing", "serving"):
+        if table_name == profile_tables[role]:
+            return role
+    raise ValueError(f"unsupported active table for profile {profile}: {table_name}")
 
 
 def _query_active_job(
@@ -217,6 +259,7 @@ def _delete_table(
     *,
     table_name: str,
     job_ids: Sequence[str],
+    profile: str,
     client: WTGatewayClient | None = None,
     env_manager: EnvConfigManager | None = None,
 ) -> tuple[int, list[str]]:
@@ -240,7 +283,7 @@ def _delete_table(
                     continue
                 reported = (
                     client.delete_landing(predicate)
-                    if table_name == DEFAULT_LANDING_TABLE
+                    if _table_role(table_name, profile) == "landing"
                     else client.delete_serving(predicate)
                 )
                 deleted_rows += reported if isinstance(reported, int) else len(rows)
@@ -273,32 +316,35 @@ def run(
     *,
     job_ids: Sequence[str],
     execute: bool = False,
+    profile: str = "production",
     client: WTGatewayClient | None = None,
     env_manager: EnvConfigManager | None = None,
 ) -> int:
-    """Preview or delete the requested IDs across all three production tables."""
+    """Preview or delete exact IDs across the selected environment's tables."""
     job_ids = normalize_job_ids(job_ids)
+    profile = _normalize_profile(profile)
+    profile_tables = PROFILE_TABLES[profile]
     owns_client = client is None
     owns_env_manager = env_manager is None
     if client is None:
-        client = _build_production_client()
+        client = _build_client(profile)
     try:
         if env_manager is None:
-            env_manager = EnvConfigManager(profile="production")
+            env_manager = EnvConfigManager(profile=profile)
 
         table_results = [
             inspect_table(
-                table_name=DEFAULT_ENV_CONFIG_TABLE,
+                table_name=profile_tables["env"],
                 job_ids=job_ids,
                 env_manager=env_manager,
             ),
             inspect_table(
-                table_name=DEFAULT_LANDING_TABLE,
+                table_name=profile_tables["landing"],
                 job_ids=job_ids,
                 client=client,
             ),
             inspect_table(
-                table_name=DEFAULT_SERVING_TABLE,
+                table_name=profile_tables["serving"],
                 job_ids=job_ids,
                 client=client,
             ),
@@ -309,7 +355,10 @@ def run(
         errors = [result for result in table_results if result.error]
         matched = sum(result.count for result in table_results)
         if not execute:
-            print(f"Preview complete: {matched} matching rows across {len(table_results)} tables.")
+            print(
+                f"Preview complete: {matched} matching rows across "
+                f"{len(table_results)} {profile} tables."
+            )
             return 1 if errors else 0
         if errors:
             print("Deletion aborted because at least one table could not be inspected.")
@@ -318,17 +367,18 @@ def run(
             print("No matching rows found; nothing to delete.")
             return 0
 
-        print(f"Executing deletion for {len(job_ids)} exact production job_id values.")
+        print(f"Executing deletion for {len(job_ids)} exact {profile} job_id values.")
         deletion_errors: list[str] = []
         for table_name in (
-            DEFAULT_ENV_CONFIG_TABLE,
-            DEFAULT_LANDING_TABLE,
-            DEFAULT_SERVING_TABLE,
+            profile_tables["env"],
+            profile_tables["landing"],
+            profile_tables["serving"],
         ):
-            if table_name == DEFAULT_ENV_CONFIG_TABLE:
+            if table_name == profile_tables["env"]:
                 _, table_errors = _delete_table(
                     table_name=table_name,
                     job_ids=job_ids,
+                    profile=profile,
                     env_manager=env_manager,
                 )
                 remaining = _verify_table(
@@ -340,6 +390,7 @@ def run(
                 _, table_errors = _delete_table(
                     table_name=table_name,
                     job_ids=job_ids,
+                    profile=profile,
                     client=client,
                 )
                 remaining = _verify_table(
@@ -363,7 +414,7 @@ def run(
             for error in deletion_errors:
                 print(f"  - {error}")
             return 1
-        print("Production job-id cleanup completed successfully.")
+        print(f"{profile.capitalize()} job-id cleanup completed successfully.")
         return 0
     finally:
         if owns_client and client is not None:
@@ -394,18 +445,27 @@ def _load_job_ids(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Preview/delete exact job IDs in production "
+            "Preview/delete exact job IDs in an environment's "
             "env-config, landing, and serving tables"
         )
     )
     parser.add_argument(
         "--job-id",
         action="append",
-        help="Exact production job_id to delete; repeat for multiple IDs.",
+        help="Exact job_id in the selected profile; repeat for multiple IDs.",
     )
     parser.add_argument(
         "--job-id-file",
         help="Text file containing one exact job_id per line; blank lines and # comments are ignored.",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("production", "prod", "test"),
+        default="production",
+        help=(
+            "Environment to clean: production (default) or test. "
+            "Test uses env_config_test, v2_landing_test, and serving_test."
+        ),
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -431,7 +491,7 @@ def main() -> int:
         parser.error("--execute requires --confirm-delete")
     job_ids = _load_job_ids(args, parser)
 
-    return run(job_ids=job_ids, execute=args.execute)
+    return run(job_ids=job_ids, execute=args.execute, profile=args.profile)
 
 
 if __name__ == "__main__":

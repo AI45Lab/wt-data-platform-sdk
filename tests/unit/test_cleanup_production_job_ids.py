@@ -116,4 +116,14 @@ def test_run_preview_does_not_delete(capsys):
 
     assert manager.deleted == []
     assert client.deleted == []
-    assert "Preview complete: 3 matching rows across 3 tables." in capsys.readouterr().out
+    assert "Preview complete: 3 matching rows across 3 production tables." in capsys.readouterr().out
+
+
+def test_test_profile_uses_test_table_names_and_landing_delete():
+    assert script.PROFILE_TABLES["test"] == {
+        "env": "env_config_test",
+        "landing": "v2_landing_test",
+        "serving": "serving_test",
+    }
+    assert script._table_role("v2_landing_test", "test") == "landing"
+    assert script._table_role("serving_test", "test") == "serving"

@@ -266,11 +266,12 @@ python scripts/ops/cleanup_data.py \
   --dry-run
 ```
 
-To remove the same exact production job IDs from all three production tables,
-use `cleanup_production_job_ids.py`. It checks
+To remove the same exact job IDs from all three tables in one environment, use
+`cleanup_production_job_ids.py`. It checks
 `evaluation_env_config`, `wind_tunnel_landing`, and `wind_tunnel_serving`
-independently; a table with no matching rows is logged and skipped. The
-default is a read-only preview, while deletion requires both explicit flags:
+independently for the production profile; a table with no matching rows is
+logged and skipped. The default profile is production and the default mode is
+a read-only preview, while deletion requires both explicit flags:
 
 ```bash
 python scripts/ops/cleanup_production_job_ids.py \
@@ -284,8 +285,17 @@ python scripts/ops/cleanup_production_job_ids.py \
 ```
 
 The job-id file contains one exact value per line; blank lines and lines
-starting with `#` are ignored. This command is production-only and does not
-touch any test or legacy table.
+starting with `#` are ignored. For real validation against disposable test
+tables, pass `--profile test`; this selects `env_config_test`,
+`v2_landing_test`, and `serving_test` and never touches production or legacy
+tables:
+
+```bash
+python scripts/ops/cleanup_production_job_ids.py \
+  --profile test \
+  --job-id 'test-cleanup-job' \
+  --dry-run
+```
 
 To remove stale production environment-config rows, use the dedicated
 anti-join command. It compares only `evaluation_env_config` with the current
