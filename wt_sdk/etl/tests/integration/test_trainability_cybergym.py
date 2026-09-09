@@ -194,9 +194,10 @@ def _write_multi_trainable_sessions(
     )
 
 
-def test_cybergym_fixture_reports_stage_results_for_200_sessions():
+def test_cybergym_fixture_reports_stage_results_for_200_sessions(monkeypatch):
     """Run the stage read-only and report its result for 200 sessions."""
 
+    monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", "true")
     stage = UpdateIsTrainableStage()
     with WTGatewayClient(config=TEST_TABLE_CONFIG) as client:
         assert client.config.tables.profile == "test"
@@ -255,7 +256,13 @@ def test_cybergym_fixture_reports_stage_results_for_200_sessions():
             for row in session
             if str(row["id"]) in trainable_ids
         ]
-        assert trainable_steps == [last_step]
+        eligible_steps = [
+            int(row["step_id"])
+            for row in session
+            if not _is_non_200_status(_status_code(row))
+        ]
+        expected_trainable_steps = [max(eligible_steps)] if eligible_steps else []
+        assert trainable_steps == expected_trainable_steps
         stored_trainable_steps = [
             int(row["step_id"])
             for row in session
@@ -299,8 +306,7 @@ def test_cybergym_fixture_reports_stage_results_for_200_sessions():
             if _is_non_200_status(_status_code(row))
         )
         assert all(
-            first[str(row["id"])]["is_trainable"]
-            is (int(row["step_id"]) == last_step)
+            first[str(row["id"])]["is_trainable"] is False
             for row in session
             if int(row["step_id"]) in non_200_steps
         )

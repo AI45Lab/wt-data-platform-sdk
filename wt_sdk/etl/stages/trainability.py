@@ -1,9 +1,10 @@
-"""Mark structurally selected trajectory rows as trainable."""
+"""Mark trajectory rows as trainable using the configured policy."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -13,25 +14,27 @@ from ..stage import ETLStage, Record, Session, SessionPatch, StageContext
 
 
 class UpdateIsTrainableStage(ETLStage):
-    """Mark the tail row of every append-only chain in a completed session.
+    """Mark trainable rows in a completed session using the configured policy.
 
-    Inputs are grouped into append-only chains with canonical message-prefix
-    matching. Equivalent user text represented as either a string or one text
-    content block is normalized before matching. Each chain tail contains the
-    complete messages of one structurally separated trajectory. A later strict
-    prefix of an active chain tail is treated as a retry reset, so the abandoned
-    longer row is not a trainable tail. Identical message snapshots are separate
-    occurrences rather than append operations. In a multi-chain session, every
-    independent one-record chain is treated as a one-step subagent and is not
-    trainable.
-    Rows with an explicitly non-200 gateway status are excluded from chain
-    detection without preventing the remaining rows from being processed. This
-    stage copies the final session row's non-null ``reward`` to every trainable
-    chain tail and assigns no semantic meaning to message contents.
+    Rows with an explicitly non-200 gateway status are excluded before either
+    policy is applied. When ``TRAINABILITY_DOWNGRADE_LABEL`` is truthy, only
+    the remaining record with the greatest ``step_id`` is trainable. Otherwise,
+    the remaining inputs are grouped into append-only chains with canonical
+    message-prefix matching. Equivalent user text
+    represented as either a string or one text content block is normalized
+    before matching. Each chain tail contains the complete messages of one
+    structurally separated trajectory. A later strict prefix of an active chain
+    tail is treated as a retry reset, so the abandoned longer row is not a
+    trainable tail. Identical message snapshots are separate occurrences rather
+    than append operations. In a multi-chain session, every independent
+    one-record chain is treated as a one-step subagent and is not trainable.
+    Filtering error rows does not prevent the remaining rows from being
+    processed. This stage copies the completion record's non-null ``reward`` to
+    every selected row and assigns no semantic meaning to message contents.
     """
 
     name = "update_is_trainable"
-    version = "2"
+    version = "4"
     required_fields = (
         "id",
         "step_id",
@@ -52,8 +55,20 @@ class UpdateIsTrainableStage(ETLStage):
         if not _is_completed_session(session, context):
             return {}
 
-        max_step_record = max(session, key=_step_sort_key)
-        trainable_ids = {_record_id(max_step_record)}
+        eligible_records = tuple(
+            record
+            for record in session
+            if not _has_non_200_status_code(record)
+        )
+        if _is_trainability_downgrade_label_enabled():
+            max_step_record = max(eligible_records, key=_step_sort_key, default=None)
+            trainable_ids = (
+                {_record_id(max_step_record)}
+                if max_step_record is not None
+                else set()
+            )
+        else:
+            trainable_ids = _detect_trainable_record_ids(eligible_records)
         completed_record = next(
             record
             for record in session
@@ -69,6 +84,16 @@ class UpdateIsTrainableStage(ETLStage):
                 patch["reward"] = final_reward
             patches[record_id] = patch
         return patches
+
+
+def _is_trainability_downgrade_label_enabled() -> bool:
+    value = os.getenv("TRAINABILITY_DOWNGRADE_LABEL")
+    return value is not None and value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 @dataclass
