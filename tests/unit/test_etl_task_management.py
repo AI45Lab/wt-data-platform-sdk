@@ -8,6 +8,7 @@ from wt_sdk.etl.cli.tasks import build_parser
 from wt_sdk.etl.task_management.discovery import discover_env_jobs
 from wt_sdk.etl.task_management.models import (
     ETL_TASK_SCHEMA,
+    ETL_TASK_SCALAR_INDEXES,
     ETLTask,
     TaskStatus,
     format_task_time,
@@ -85,6 +86,7 @@ class FakeTaskSession:
     def __init__(self):
         self.rows = {}
         self.shutdown_called = False
+        self.indexes = []
 
     def table_exists(self, table_name):
         return bool(self.rows) or getattr(self, "created", False)
@@ -95,6 +97,12 @@ class FakeTaskSession:
 
     def get_schema(self, table_name):
         return ETL_TASK_SCHEMA
+
+    def list_indices(self, table_name):
+        return [SimpleNamespace(name=name) for name in self.indexes]
+
+    def create_scalar_index(self, table_name, column, *, index_type):
+        self.indexes.append(f"{column}_idx")
 
     def filter(self, table_name, *, query, limit, checkout_latest=True):
         rows = list(self.rows.values())
@@ -119,6 +127,9 @@ def test_task_store_is_idempotent_and_supports_retry(monkeypatch):
     monkeypatch.setattr("wt_sdk.etl.task_management.store.dldb.connect", lambda *a, **k: session)
     store = DldbTaskStore("s3://state", table_name="etl_tasks_test")
     assert store.initialize() is True
+    assert len(session.indexes) == len(ETL_TASK_SCALAR_INDEXES)
+    assert store.initialize() is False
+    assert len(session.indexes) == len(ETL_TASK_SCALAR_INDEXES)
 
     first, created = store.submit_if_missing("job-a", now_ms=10)
     second, created_again = store.submit_if_missing("job-a", now_ms=20)

@@ -34,6 +34,11 @@ Task timestamps retain their epoch-millisecond columns for ordering and also
 store `*_at_text` display columns formatted as `YYYY-MM-DD HH:MM` in
 `Asia/Shanghai`.
 
+The task table's dldb metadata indexes are intentionally small: BTREE indexes
+on `id`, `job_id`, `created_at_ms`, and `updated_at_ms`, plus a BITMAP index on
+`status`. They are created or repaired by the explicit `init` command; they are
+not represented inside the Arrow schema itself.
+
 Start the long-running scheduler with:
 
 ```bash

@@ -46,6 +46,17 @@ ETL_TASK_SCHEMA = pa.schema(
     ]
 )
 
+# dldb indexes are table metadata rather than Arrow schema fields. Keep the
+# small operational index contract next to the task schema so initialization
+# and diagnostics use one source of truth.
+ETL_TASK_SCALAR_INDEXES = [
+    ("id", "BTREE"),
+    ("job_id", "BTREE"),
+    ("status", "BITMAP"),
+    ("created_at_ms", "BTREE"),
+    ("updated_at_ms", "BTREE"),
+]
+
 
 @dataclass(frozen=True)
 class ETLTask:

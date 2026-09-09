@@ -8,6 +8,7 @@ orchestration state and the env-table completion trigger.
 from .discovery import EnvDiscoveryReport, EnvJobSummary, discover_env_jobs
 from .models import (
     ETL_TASK_SCHEMA,
+    ETL_TASK_SCALAR_INDEXES,
     ETLTask,
     TaskStatus,
     format_task_time,
@@ -27,6 +28,7 @@ __all__ = [
     "DldbTaskStore",
     "ETLTask",
     "ETL_TASK_SCHEMA",
+    "ETL_TASK_SCALAR_INDEXES",
     "EnvDiscoveryReport",
     "EnvJobSummary",
     "EnqueueResult",

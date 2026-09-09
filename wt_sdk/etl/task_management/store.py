@@ -14,7 +14,7 @@ from wt_sdk.config import S3Config
 from wt_sdk.etl.checkpoint import resolve_etl_state_db_uri
 from wt_sdk.etl.exceptions import CheckpointError
 
-from .models import ETL_TASK_SCHEMA, ETLTask, TaskStatus
+from .models import ETL_TASK_SCALAR_INDEXES, ETL_TASK_SCHEMA, ETLTask, TaskStatus
 
 
 class TaskStateError(ValueError):
@@ -50,9 +50,31 @@ class DldbTaskStore:
 
         if self.session.table_exists(self.table_name):
             self.verify_ready()
+            self.ensure_indexes()
             return False
         self.session.create_table(self.table_name, ETL_TASK_SCHEMA)
+        self.ensure_indexes()
         return True
+
+    def ensure_indexes(self) -> list[str]:
+        """Create configured task indexes that are not present yet."""
+
+        existing = {
+            _index_name(index)
+            for index in self.session.list_indices(self.table_name)
+        }
+        created = []
+        for column, index_type in ETL_TASK_SCALAR_INDEXES:
+            index_name = f"{column}_idx"
+            if index_name in existing:
+                continue
+            self.session.create_scalar_index(
+                self.table_name,
+                column,
+                index_type=index_type,
+            )
+            created.append(index_name)
+        return created
 
     def verify_ready(self) -> None:
         if not self.session.table_exists(self.table_name):
@@ -305,6 +327,12 @@ def _task_from_row(row: dict) -> ETLTask:
         last_error=_optional_string(row.get("last_error")),
         summary_json=_optional_string(row.get("summary_json")),
     )
+
+
+def _index_name(index) -> str:
+    if isinstance(index, dict):
+        return str(index.get("name", ""))
+    return str(getattr(index, "name", ""))
 
 
 def _normalize_job_id(job_id: str) -> str:
