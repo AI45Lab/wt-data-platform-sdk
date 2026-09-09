@@ -102,7 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--scan-interval-seconds",
         dest="scan_interval_seconds",
         type=int,
-        default=3600,
+        default=10800,
+        help="Seconds between env discovery scans (default: 10800 / 3 hours).",
     )
     worker.add_argument("--once", action="store_true")
 

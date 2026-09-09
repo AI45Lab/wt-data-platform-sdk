@@ -7,7 +7,6 @@ import json
 import re
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -332,13 +331,3 @@ def _report_error(report: dict) -> Optional[str]:
         f"{first.get('error_type', 'ETLFailure')}: "
         f"{first.get('message', 'pipeline failed')}"
     )
-
-
-def wait_until(deadline: float, *, should_stop: Callable[[], bool]) -> None:
-    """Interruptible bounded wait used by the hourly worker loop."""
-
-    while not should_stop():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        time.sleep(min(remaining, 1.0))

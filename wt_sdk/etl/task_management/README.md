@@ -26,4 +26,25 @@ python -m wt_sdk.etl.cli.tasks \
 
 The state database is resolved from `WT_SDK_ETL_STATE_DB_URI` unless
 `--state-db-uri` is provided. The worker is intentionally single-writer and
-single-job-at-a-time in v1.
+single-job-at-a-time in v1. It scans the env table every three hours by default,
+enqueues every ready job found in that scan, and drains the entire queue in
+FIFO order without waiting for the next scan.
+
+Task timestamps retain their epoch-millisecond columns for ordering and also
+store `*_at_text` display columns formatted as `YYYY-MM-DD HH:MM` in
+`Asia/Shanghai`.
+
+Start the long-running scheduler with:
+
+```bash
+python -m wt_sdk.etl.cli.tasks \
+  --profile production \
+  --state-db-uri s3://wind-tunnel-etl \
+  worker --poll-seconds 10800
+```
+
+Run it in a process supervisor or tmux if it must survive an SSH disconnect.
+Press `Ctrl-C` in the worker terminal, or send it `SIGTERM`, to request a
+graceful stop: the active job finishes, and no further discovery or queued job
+is started. `worker --once` performs one discovery and drains the resulting
+queue before exiting.

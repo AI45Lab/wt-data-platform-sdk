@@ -10,6 +10,7 @@ from .models import (
     ETL_TASK_SCHEMA,
     ETLTask,
     TaskStatus,
+    format_task_time,
     resolve_task_table,
 )
 from .store import DldbTaskStore
@@ -35,6 +36,7 @@ __all__ = [
     "build_bootstrap_plan",
     "discover_and_enqueue",
     "discover_env_jobs",
+    "format_task_time",
     "resolve_task_table",
     "submit_if_ready",
 ]
