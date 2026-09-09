@@ -266,6 +266,27 @@ python scripts/ops/cleanup_data.py \
   --dry-run
 ```
 
+To remove the same exact production job IDs from all three production tables,
+use `cleanup_production_job_ids.py`. It checks
+`evaluation_env_config`, `wind_tunnel_landing`, and `wind_tunnel_serving`
+independently; a table with no matching rows is logged and skipped. The
+default is a read-only preview, while deletion requires both explicit flags:
+
+```bash
+python scripts/ops/cleanup_production_job_ids.py \
+  --job-id 'job-001' \
+  --job-id 'job-002' \
+  --dry-run
+
+python scripts/ops/cleanup_production_job_ids.py \
+  --job-id-file ./artifacts/job_ids.txt \
+  --execute --confirm-delete
+```
+
+The job-id file contains one exact value per line; blank lines and lines
+starting with `#` are ignored. This command is production-only and does not
+touch any test or legacy table.
+
 To remove stale production environment-config rows, use the dedicated
 anti-join command. It compares only `evaluation_env_config` with the current
 production `wind_tunnel_landing` job-id set; it does not read the historical
