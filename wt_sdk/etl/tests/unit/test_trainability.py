@@ -52,7 +52,7 @@ def test_stage_declares_its_pipeline_contract():
     stage = UpdateIsTrainableStage()
 
     assert stage.name == "update_is_trainable"
-    assert stage.version == "3"
+    assert stage.version == "4"
     assert stage.required_fields == (
         "id",
         "step_id",
@@ -140,7 +140,7 @@ def test_completion_before_max_step_warns_and_uses_completed_row_reward():
     )
 
 
-def test_selection_does_not_depend_on_messages_or_gateway_status():
+def test_downgrade_filters_non_200_before_selecting_max_step():
     session = (
         _row(
             "first",
@@ -159,8 +159,26 @@ def test_selection_does_not_depend_on_messages_or_gateway_status():
     )
 
     assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "first": {"is_trainable": True, "reward": 0.5},
+        "last": {"is_trainable": False},
+    }
+
+
+def test_downgrade_marks_every_row_false_when_all_rows_are_non_200():
+    session = (
+        _row("first", 1, meta_json='{"status_code": 500}'),
+        _row(
+            "last",
+            2,
+            completed=True,
+            reward=0.5,
+            meta_json='{"telemetry": "{\\"status_code\\": 503}"}',
+        ),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
         "first": {"is_trainable": False},
-        "last": {"is_trainable": True, "reward": 0.5},
+        "last": {"is_trainable": False},
     }
 
 
@@ -193,6 +211,12 @@ def test_disabled_trainability_downgrade_label_uses_original_chain_selection(
             reward=0.75,
             messages=json.dumps([side_start, side_response]),
         ),
+        _row(
+            "error-5",
+            5,
+            messages="malformed JSON",
+            meta_json='{"status_code": 500}',
+        ),
     )
 
     assert UpdateIsTrainableStage().transform_session(session, _context()) == {
@@ -200,6 +224,7 @@ def test_disabled_trainability_downgrade_label_uses_original_chain_selection(
         "side-1": {"is_trainable": False},
         "main-2": {"is_trainable": True, "reward": 0.75},
         "side-2": {"is_trainable": True, "reward": 0.75},
+        "error-5": {"is_trainable": False},
     }
 
 
