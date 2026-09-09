@@ -44,6 +44,7 @@ dev = [
 
 [project.scripts]
 wt-etl = "wt_sdk.etl.cli.run:main"
+wt-etl-tasks = "wt_sdk.etl.cli.tasks:main"
 wt-etl-init-checkpoints = "wt_sdk.etl.cli.init_checkpoint_tables:main"
 wt-etl-prepare-fixture = "wt_sdk.etl.tools.prepare_real_data_fixture:main"
 wt-etl-inspect-fixture = "wt_sdk.etl.tools.inspect_test_fixture:main"

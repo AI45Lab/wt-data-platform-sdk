@@ -17,6 +17,11 @@ ETL 的 runtime、CLI、运维/检查工具、文档和测试全部收敛在 `wt
 `[project.optional-dependencies].etl`，使用者按需执行 `pip install ".[etl]"`；不得为了某个
 stage 把依赖加入核心 SDK dependencies。ETL tests 由 setuptools 明确排除，不会进入安装包。
 
+如果需要按 job 管理自动触发和串行执行，使用独立的
+[`task_management/README.md`](task_management/README.md) 与
+`python -m wt_sdk.etl.cli.tasks`。该层只负责 env 完成发现、任务状态和 FIFO worker，
+底层 pipeline/checkpoint 语义不变；默认每小时扫描一次，并且 v1 同时只执行一个 job。
+
 ## 核心对象与 factory 语义
 
 以下对象不要混为一谈：
