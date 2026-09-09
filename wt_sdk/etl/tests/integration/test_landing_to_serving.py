@@ -178,7 +178,8 @@ def _incremental_record(
     )
 
 
-def test_serving_incremental_rediscovers_enriched_rows_and_new_rows():
+def test_serving_incremental_rediscovers_enriched_rows_and_new_rows(monkeypatch):
+    monkeypatch.delenv("TRAINABILITY_DOWNGRADE_LABEL", raising=False)
     suffix = uuid.uuid4().hex
     session_id = f"incremental-session-{suffix}"
     pipeline = PipelineDefinition(

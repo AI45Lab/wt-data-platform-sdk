@@ -237,7 +237,10 @@ def test_trainability_stage_inside_canonical_landing_pipeline():
             )
 
 
-def test_trainability_stage_selects_only_max_step_across_shuffled_chains():
+def test_trainability_stage_selects_only_max_step_across_shuffled_chains(
+    monkeypatch,
+):
+    monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", "true")
     suffix = f"{uuid.uuid4().hex}_shuffled_steps"
     job_id = f"landing-enrichment#integration#shuffled-steps#{suffix}"
     session_id = f"shuffled-step-session-{suffix}"

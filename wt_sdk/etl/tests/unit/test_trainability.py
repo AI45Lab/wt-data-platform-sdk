@@ -1,5 +1,6 @@
 """Unit tests for the landing trainability stage."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -36,17 +37,22 @@ def _row(
 def _context() -> StageContext:
     return StageContext(
         pipeline_name="landing_enrichment_pipeline",
-        pipeline_version="3",
+        pipeline_version="4",
         session_key=SessionKey("job-1", "session-1"),
         stage_name="update_is_trainable",
     )
+
+
+@pytest.fixture(autouse=True)
+def _enable_trainability_downgrade_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", "true")
 
 
 def test_stage_declares_its_pipeline_contract():
     stage = UpdateIsTrainableStage()
 
     assert stage.name == "update_is_trainable"
-    assert stage.version == "2"
+    assert stage.version == "3"
     assert stage.required_fields == (
         "id",
         "step_id",
@@ -155,6 +161,45 @@ def test_selection_does_not_depend_on_messages_or_gateway_status():
     assert UpdateIsTrainableStage().transform_session(session, _context()) == {
         "first": {"is_trainable": False},
         "last": {"is_trainable": True, "reward": 0.5},
+    }
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "false", "no", "off"])
+def test_disabled_trainability_downgrade_label_uses_original_chain_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+):
+    if value is None:
+        monkeypatch.delenv("TRAINABILITY_DOWNGRADE_LABEL", raising=False)
+    else:
+        monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", value)
+
+    main_start = {"role": "user", "content": "main task"}
+    main_response = {"role": "assistant", "content": "main response"}
+    side_start = {"role": "user", "content": "side task"}
+    side_response = {"role": "assistant", "content": "side response"}
+    session = (
+        _row("main-1", 1, messages=json.dumps([main_start])),
+        _row("side-1", 2, messages=json.dumps([side_start])),
+        _row(
+            "main-2",
+            3,
+            messages=json.dumps([main_start, main_response]),
+        ),
+        _row(
+            "side-2",
+            4,
+            completed=True,
+            reward=0.75,
+            messages=json.dumps([side_start, side_response]),
+        ),
+    )
+
+    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+        "main-1": {"is_trainable": False},
+        "side-1": {"is_trainable": False},
+        "main-2": {"is_trainable": True, "reward": 0.75},
+        "side-2": {"is_trainable": True, "reward": 0.75},
     }
 
 

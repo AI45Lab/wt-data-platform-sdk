@@ -194,9 +194,10 @@ def _write_multi_trainable_sessions(
     )
 
 
-def test_cybergym_fixture_reports_stage_results_for_200_sessions():
+def test_cybergym_fixture_reports_stage_results_for_200_sessions(monkeypatch):
     """Run the stage read-only and report its result for 200 sessions."""
 
+    monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", "true")
     stage = UpdateIsTrainableStage()
     with WTGatewayClient(config=TEST_TABLE_CONFIG) as client:
         assert client.config.tables.profile == "test"
