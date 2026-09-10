@@ -12,6 +12,14 @@ from ..exceptions import StageTransformError
 from ..policy import TrainabilityPolicy
 from ..stage import ETLStage, Record, Session, SessionPatch, StageContext
 
+MIN_SIDE_CHAIN_LENGTH = 20
+CLAUDE_FILTER_ENABLED = os.getenv("CLAUDE_TRAINABILITY_FILTER", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 
 class UpdateIsTrainableStage(ETLStage):
     """Mark trainable rows in a completed session using the configured policy.
@@ -26,15 +34,19 @@ class UpdateIsTrainableStage(ETLStage):
     structurally separated trajectory. A later strict prefix of an active chain
     tail is treated as a retry reset, so the abandoned longer row is not a
     trainable tail. Identical message snapshots are separate occurrences rather
-    than append operations. In a multi-chain session, every independent
-    one-record chain is treated as a one-step subagent and is not trainable.
-    Filtering error rows does not prevent the remaining rows from being
-    processed. This stage copies the completion record's non-null ``reward`` to
-    every selected row and assigns no semantic meaning to message contents.
+    than append operations. In a multi-chain session, independent chains shorter
+    than ``TRAINABILITY_MIN_SIDE_CHAIN_LENGTH`` records are treated as short side
+    branches or subagents and are not trainable. A single-chain session is not
+    considered a side chain. Incomplete streaming requests with an empty finish reason and
+    rows whose top-level messages disagree with their original request are also
+    filtered. Filtering error rows does not prevent the remaining rows from
+    being processed. This stage copies the completion record's non-null
+    ``reward`` to every selected row and assigns no semantic meaning to message
+    contents.
     """
 
     name = "update_is_trainable"
-    version = "4"
+    version = "6"
     required_fields = (
         "id",
         "step_id",
@@ -58,7 +70,7 @@ class UpdateIsTrainableStage(ETLStage):
         eligible_records = tuple(
             record
             for record in session
-            if not _has_non_200_status_code(record)
+            if _is_eligible_trainability_record(record, enabled=CLAUDE_FILTER_ENABLED)
         )
         if context.trainability_policy is TrainabilityPolicy.DOWNGRADE:
             max_step_record = max(eligible_records, key=_step_sort_key, default=None)
@@ -165,12 +177,18 @@ class _Chain:
     record_ids: list[str] = field(default_factory=list)
 
 
-def _detect_trainable_record_ids(session: Sequence[Record]) -> set[str]:
+def _detect_trainable_record_ids(
+    session: Sequence[Record],
+    *,
+    diagnostics: dict[str, dict[str, Any]] | None = None,
+) -> set[str]:
+    """Select chain tails; optionally collect structural evidence for offline tests."""
     ordered = sorted(session, key=_step_sort_key)
     trie = _MessagePrefixTrie()
     chains: list[_Chain] = []
     latest_record_to_chain: dict[str, int] = {}
     record_positions: dict[str, int] = {}
+    diagnostic_fingerprints: dict[str, list[str]] = {}
 
     for position, record in enumerate(ordered):
         record_id = _record_id(record)
@@ -183,11 +201,52 @@ def _detect_trainable_record_ids(session: Sequence[Record]) -> set[str]:
             active_record_ids,
             record_positions,
         )
+        relation = "strict_prefix_reset"
         if matched_record_id is None:
             matched_record_id = trie.longest_eligible_strict_prefix_terminal(
                 fingerprints,
                 active_record_ids,
             )
+            relation = "strict_prefix_extension"
+
+        if diagnostics is not None:
+            evidence: dict[str, Any] = {
+                "message_count": len(messages),
+                "relation": relation if matched_record_id is not None else "new_chain",
+                "matched_record_id": matched_record_id,
+            }
+            if matched_record_id is None:
+                evidence["identical_active_record_ids"] = [
+                    candidate
+                    for candidate in latest_record_to_chain
+                    if diagnostic_fingerprints[candidate] == fingerprints
+                ]
+                if position:
+                    previous = ordered[position - 1]
+                    previous_id = _record_id(previous)
+                    previous_hashes = diagnostic_fingerprints[previous_id]
+                    common_length = 0
+                    for left, right in zip(previous_hashes, fingerprints):
+                        if left != right:
+                            break
+                        common_length += 1
+                    previous_messages = _decode_messages(previous.get("messages"), previous_id)
+                    evidence["previous_eligible_record_comparison"] = {
+                        "record_id": previous_id,
+                        "common_prefix_message_count": common_length,
+                        "previous_message_count": len(previous_hashes),
+                        "system_messages_equal": [
+                            _message_fingerprint(message)
+                            for message in previous_messages
+                            if isinstance(message, Mapping) and message.get("role") == "system"
+                        ] == [
+                            _message_fingerprint(message)
+                            for message in messages
+                            if isinstance(message, Mapping) and message.get("role") == "system"
+                        ],
+                    }
+            diagnostics[record_id] = evidence
+            diagnostic_fingerprints[record_id] = fingerprints
 
         if matched_record_id is not None:
             chain_index = latest_record_to_chain[matched_record_id]
@@ -202,21 +261,53 @@ def _detect_trainable_record_ids(session: Sequence[Record]) -> set[str]:
         latest_record_to_chain[record_id] = chain_index
         trie.insert(fingerprints, record_id)
 
-    # Every append-only chain tail contains the complete messages of one
-    # structurally separated trajectory. In a multi-chain session, a singleton
-    # side chain is a one-step subagent and carries no trainable trajectory.
+    if diagnostics is not None:
+        for chain_index, chain in enumerate(chains):
+            excluded = _is_short_side_chain(chain, len(chains))
+            for record_id in chain.record_ids:
+                is_tail = record_id == chain.record_ids[-1]
+                diagnostics[record_id].update({
+                    "chain_index": chain_index,
+                    "chain_count": len(chains),
+                    "chain_length": len(chain.record_ids),
+                    "chain_root_record_id": chain.record_ids[0],
+                    "chain_tail_record_id": chain.record_ids[-1],
+                    "reason_code": (
+                        "short_side_chain" if excluded
+                        else "selected_chain_tail" if is_tail
+                        else "superseded_in_chain"
+                    ),
+                })
+
+    return _select_trainable_record_ids(chains)
+
+
+def _select_trainable_record_ids(chains: Sequence[_Chain]) -> set[str]:
+    """Select tails from non-short-side chains.
+
+    Every append-only chain tail contains the complete messages of one
+    structurally separated trajectory. In a multi-chain session, short side
+    branches are subagent-like and carry no trainable trajectory.
+    """
+
+    chain_count = len(chains)
     return {
         chain.record_ids[-1]
         for chain in chains
-        if not _is_single_record_side_chain(chain, len(chains))
+        if not _is_short_side_chain(chain, chain_count)
     }
 
 
-def _is_single_record_side_chain(
+def _is_short_side_chain(
     chain: _Chain,
     chain_count: int,
 ) -> bool:
-    return chain_count > 1 and len(chain.record_ids) == 1
+    """Return whether a multi-chain side branch is shorter than the threshold."""
+
+    return (
+        chain_count > 1
+        and len(chain.record_ids) < MIN_SIDE_CHAIN_LENGTH
+    )
 
 
 def _has_non_200_status_code(record: Record) -> bool:
@@ -238,6 +329,39 @@ def _has_non_200_status_code(record: Record) -> bool:
         ):
             return True
     return False
+
+
+def _is_incomplete_stream_request(record: Record) -> bool:
+    metadata = _decode_json_object(record.get("meta_json"))
+    if metadata is None:
+        return False
+    request = _decode_json_object(metadata.get("request"))
+    stream = request.get("stream") if request is not None else metadata.get("stream")
+    if stream is not True:
+        return False
+    return metadata.get("finish_reason") in {None, "null"}
+
+
+def _is_eligible_trainability_record(record: Record, *, enabled: bool = True) -> bool:
+    return (
+        not _has_non_200_status_code(record)
+        and (
+            not enabled
+            or not _is_incomplete_stream_request(record)
+        )
+    )
+
+
+def _has_consistent_request_messages(record: Record) -> bool:
+    metadata = _decode_json_object(record.get("meta_json"))
+    request = _decode_json_object(metadata.get("request")) if metadata else None
+    if request is None or not isinstance(request.get("messages"), list):
+        return True
+    record_id = _record_id(record)
+    if not all(isinstance(message, Mapping) for message in request["messages"]):
+        return False
+    messages = _decode_messages(record.get("messages"), record_id)
+    return _message_fingerprints(messages) == _message_fingerprints(request["messages"])
 
 
 def _decode_json_object(value: object) -> Mapping[str, object] | None:
@@ -336,6 +460,10 @@ def _message_fingerprint(message: Any) -> str:
         default=str,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _message_fingerprints(messages: Sequence[Any]) -> list[str]:
+    return [_message_fingerprint(message) for message in messages]
 
 
 def _normalize_message_for_prefix_matching(message: Any) -> Any:
