@@ -7,6 +7,7 @@ from typing import Any, Optional
 from wt_sdk.models import ServingRecord
 
 from .stage import SessionKey, StageWarning
+from .policy import TrainabilityPolicy, normalize_trainability_policy
 
 
 class PipelineMode(str, Enum):
@@ -60,6 +61,7 @@ class RunSummary:
     pipeline_name: str
     pipeline_version: str
     mode: PipelineMode
+    trainability_policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL
     buckets_scanned: int = 0
     discovery_rows: int = 0
     sessions_processed: int = 0
@@ -79,6 +81,11 @@ class RunSummary:
     failures: list[RecordFailure] = field(default_factory=list)
     dirty_sessions: set[SessionKey] = field(default_factory=set)
     successful_sessions: set[SessionKey] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        self.trainability_policy = normalize_trainability_policy(
+            self.trainability_policy
+        )
 
     def add_session(self, result: SessionResult, *, dry_run: bool) -> None:
         self.sessions_processed += 1
@@ -108,10 +115,12 @@ class RunSummary:
             self.pipeline_name,
             self.pipeline_version,
             self.mode,
+            self.trainability_policy,
         ) != (
             other.pipeline_name,
             other.pipeline_version,
             other.mode,
+            other.trainability_policy,
         ):
             raise ValueError("cannot merge summaries from different pipelines")
         self.buckets_scanned += other.buckets_scanned

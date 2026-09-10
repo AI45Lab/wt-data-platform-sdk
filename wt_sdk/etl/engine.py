@@ -21,6 +21,7 @@ from .models import (
     RunSummary,
     SessionResult,
 )
+from .policy import TrainabilityPolicy, normalize_trainability_policy
 from .pipeline import PipelineDefinition
 from .stage import SessionKey
 
@@ -46,6 +47,7 @@ class ETLEngine:
         sink_batch_size: int = DEFAULT_SINK_BATCH_SIZE,
         read_max_attempts: int = DEFAULT_READ_MAX_ATTEMPTS,
         read_retry_base_delay_seconds: float = DEFAULT_READ_RETRY_BASE_DELAY_SECONDS,
+        trainability_policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL,
     ) -> None:
         _validate_positive_int(session_batch_size, "session_batch_size")
         _validate_positive_int(sink_batch_size, "sink_batch_size")
@@ -58,6 +60,9 @@ class ETLEngine:
         self.sink_batch_size = sink_batch_size
         self.read_max_attempts = read_max_attempts
         self.read_retry_base_delay_seconds = read_retry_base_delay_seconds
+        self.trainability_policy = normalize_trainability_policy(
+            trainability_policy
+        )
 
     def run_incremental(
         self,
@@ -782,7 +787,11 @@ class ETLEngine:
         rows: Sequence[dict[str, object]],
     ) -> SessionResult:
         try:
-            return pipeline.process_session(rows, collect_failures=True)
+            return pipeline.process_session(
+                rows,
+                collect_failures=True,
+                trainability_policy=self.trainability_policy,
+            )
         except SessionValidationError as exc:
             return _session_failure_result(key, rows, exc, "__session_validation__")
 
@@ -997,12 +1006,12 @@ class ETLEngine:
         )
         return source, target
 
-    @staticmethod
-    def _new_summary(pipeline: PipelineDefinition) -> RunSummary:
+    def _new_summary(self, pipeline: PipelineDefinition) -> RunSummary:
         return RunSummary(
             pipeline_name=pipeline.name,
             pipeline_version=pipeline.version,
             mode=pipeline.mode,
+            trainability_policy=self.trainability_policy,
         )
 
 

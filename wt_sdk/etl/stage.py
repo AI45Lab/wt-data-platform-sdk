@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from .policy import TrainabilityPolicy, normalize_trainability_policy
+
 
 Record = Mapping[str, Any]
 Session = tuple[Record, ...]
@@ -38,11 +40,19 @@ class StageContext:
     pipeline_version: str
     session_key: SessionKey
     stage_name: str = "__stage__"
+    trainability_policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL
     _warnings: list[StageWarning] = field(
         default_factory=list,
         repr=False,
         compare=False,
     )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "trainability_policy",
+            normalize_trainability_policy(self.trainability_policy),
+        )
 
     def warn(
         self,
@@ -108,4 +118,5 @@ __all__ = [
     "SessionPatch",
     "StageContext",
     "StageWarning",
+    "TrainabilityPolicy",
 ]

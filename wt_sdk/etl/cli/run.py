@@ -12,6 +12,7 @@ Examples:
 
 import argparse
 import json
+import os
 import re
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -30,11 +31,13 @@ from wt_sdk.etl import (
     RecordFailure,
     RunSummary,
     SessionKey,
+    TrainabilityPolicy,
     list_pipeline_names,
     load_pipeline,
     resolve_checkpoint_table,
     resolve_etl_state_db_uri,
 )
+from wt_sdk.etl.policy import trainability_policy_from_env_value
 
 
 def _parse_time(value: str) -> int:
@@ -61,6 +64,7 @@ def _summary_payload(
         "pipeline_name": summary.pipeline_name,
         "pipeline_version": summary.pipeline_version,
         "mode": summary.mode.value,
+        "trainability_policy": summary.trainability_policy.value,
         "status": summary.status,
         "started_at": _iso_time(started_at_ms),
         "ended_at": _iso_time(ended_at_ms),
@@ -359,6 +363,9 @@ def main() -> int:
             "refusing production ETL writes without --confirm-production; "
             "run --dry-run first"
         )
+    trainability_policy = trainability_policy_from_env_value(
+        os.getenv("TRAINABILITY_DOWNGRADE_LABEL")
+    )
     client = WTGatewayClient(GatewayConfig(tables=table_config))
     checkpoint_store = None
     outputs = []
@@ -382,6 +389,7 @@ def main() -> int:
             checkpoint_store=checkpoint_store,
             session_batch_size=args.session_batch_size,
             sink_batch_size=args.sink_batch_size,
+            trainability_policy=trainability_policy,
         )
         scan_started_at_ms = sdk_time.now_ms()
         dirty_sessions: set[SessionKey] = set()
@@ -449,6 +457,7 @@ def main() -> int:
                     pipeline_name=pipeline.name,
                     pipeline_version=pipeline.version,
                     mode=pipeline.mode,
+                    trainability_policy=trainability_policy,
                 )
                 summary.add_failure(
                     RecordFailure(
@@ -484,6 +493,7 @@ def main() -> int:
                             pipeline_name=pipeline.name,
                             pipeline_version=pipeline.version,
                             mode=pipeline.mode,
+                            trainability_policy=trainability_policy,
                         )
                 except ETLRunFailed as exc:
                     immediate = exc.summary

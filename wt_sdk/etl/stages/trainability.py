@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from ..exceptions import StageTransformError
+from ..policy import TrainabilityPolicy
 from ..stage import ETLStage, Record, Session, SessionPatch, StageContext
 
 
@@ -17,7 +17,7 @@ class UpdateIsTrainableStage(ETLStage):
     """Mark trainable rows in a completed session using the configured policy.
 
     Rows with an explicitly non-200 gateway status are excluded before either
-    policy is applied. When ``TRAINABILITY_DOWNGRADE_LABEL`` is truthy, only
+    policy is applied. When the run context uses the ``downgrade`` policy, only
     the remaining record with the greatest ``step_id`` is trainable. Otherwise,
     the remaining inputs are grouped into append-only chains with canonical
     message-prefix matching. Equivalent user text
@@ -60,7 +60,7 @@ class UpdateIsTrainableStage(ETLStage):
             for record in session
             if not _has_non_200_status_code(record)
         )
-        if _is_trainability_downgrade_label_enabled():
+        if context.trainability_policy is TrainabilityPolicy.DOWNGRADE:
             max_step_record = max(eligible_records, key=_step_sort_key, default=None)
             trainable_ids = (
                 {_record_id(max_step_record)}
@@ -84,16 +84,6 @@ class UpdateIsTrainableStage(ETLStage):
                 patch["reward"] = final_reward
             patches[record_id] = patch
         return patches
-
-
-def _is_trainability_downgrade_label_enabled() -> bool:
-    value = os.getenv("TRAINABILITY_DOWNGRADE_LABEL")
-    return value is not None and value.strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 @dataclass

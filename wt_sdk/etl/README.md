@@ -467,6 +467,22 @@ checkpoint 表，因此无需再写 `--profile test`。命令行 `--profile` 仍
   --dry-run
 ```
 
+Trainability labeling uses the `normal` policy by default. For one ETL
+invocation that needs the temporary downgrade policy, set the flag on that
+command only:
+
+```bash
+TRAINABILITY_DOWNGRADE_LABEL=true \
+.venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \
+  --pipeline landing_enrichment_pipeline \
+  --start-from 2026-08-01T00:00:00Z
+```
+
+The CLI resolves this environment variable once at startup and passes the
+resulting policy through the run context. It is intentionally not a persistent
+`.env` setting; the JSON report records `trainability_policy` as `normal` or
+`downgrade`.
+
 正式增量运行去掉 `--dry-run`。首次 dry run 不写 checkpoint，因此随后正式运行仍需保留
 `--start-from`。静态检查不需要 profile。只有显式通过命令行或环境变量选择 production
 才会访问生产业务表及生产 checkpoint 表；任何非 dry-run 的 production 执行还必须传入

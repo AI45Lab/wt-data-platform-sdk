@@ -9,6 +9,7 @@ from wt_sdk.etl import (
     SessionKey,
     StageContext,
     StageTransformError,
+    TrainabilityPolicy,
     UpdateIsTrainableStage,
 )
 
@@ -34,18 +35,16 @@ def _row(
     }
 
 
-def _context() -> StageContext:
+def _context(
+    policy: TrainabilityPolicy = TrainabilityPolicy.DOWNGRADE,
+) -> StageContext:
     return StageContext(
         pipeline_name="landing_enrichment_pipeline",
         pipeline_version="4",
         session_key=SessionKey("job-1", "session-1"),
         stage_name="update_is_trainable",
+        trainability_policy=policy,
     )
-
-
-@pytest.fixture(autouse=True)
-def _enable_trainability_downgrade_label(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", "true")
 
 
 def test_stage_declares_its_pipeline_contract():
@@ -116,6 +115,16 @@ def test_null_final_reward_is_not_written_to_trainable_row():
     }
 
 
+def test_stage_context_defaults_to_normal_policy():
+    context = StageContext(
+        pipeline_name="landing_enrichment_pipeline",
+        pipeline_version="4",
+        session_key=SessionKey("job-1", "session-1"),
+    )
+
+    assert context.trainability_policy is TrainabilityPolicy.NORMAL
+
+
 def test_completion_before_max_step_warns_and_uses_completed_row_reward():
     session = (
         _row("completed", 4, completed=True, reward=0.625),
@@ -182,16 +191,7 @@ def test_downgrade_marks_every_row_false_when_all_rows_are_non_200():
     }
 
 
-@pytest.mark.parametrize("value", [None, "", "0", "false", "no", "off"])
-def test_disabled_trainability_downgrade_label_uses_original_chain_selection(
-    monkeypatch: pytest.MonkeyPatch,
-    value: str | None,
-):
-    if value is None:
-        monkeypatch.delenv("TRAINABILITY_DOWNGRADE_LABEL", raising=False)
-    else:
-        monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", value)
-
+def test_normal_policy_uses_original_chain_selection():
     main_start = {"role": "user", "content": "main task"}
     main_response = {"role": "assistant", "content": "main response"}
     side_start = {"role": "user", "content": "side task"}
@@ -219,7 +219,10 @@ def test_disabled_trainability_downgrade_label_uses_original_chain_selection(
         ),
     )
 
-    assert UpdateIsTrainableStage().transform_session(session, _context()) == {
+    assert UpdateIsTrainableStage().transform_session(
+        session,
+        _context(TrainabilityPolicy.NORMAL),
+    ) == {
         "main-1": {"is_trainable": False},
         "side-1": {"is_trainable": False},
         "main-2": {"is_trainable": True, "reward": 0.75},

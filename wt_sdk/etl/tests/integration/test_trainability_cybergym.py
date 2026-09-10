@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 
 from wt_sdk import WTGatewayClient
-from wt_sdk.etl import SessionKey, StageContext, UpdateIsTrainableStage
+from wt_sdk.etl import (
+    SessionKey,
+    StageContext,
+    TrainabilityPolicy,
+    UpdateIsTrainableStage,
+)
 from wt_sdk.etl.tests.integration.helpers import (
     LANDING_TEST_TABLE,
     TEST_TABLE_CONFIG,
@@ -78,11 +83,15 @@ def _query_fixture_rows(
     )
 
 
-def _context(session_id: str) -> StageContext:
+def _context(
+    session_id: str,
+    policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL,
+) -> StageContext:
     return StageContext(
         pipeline_name="landing_enrichment_pipeline",
         pipeline_version="1",
         session_key=SessionKey(FIXTURE_JOB_ID, session_id),
+        trainability_policy=policy,
     )
 
 
@@ -194,10 +203,9 @@ def _write_multi_trainable_sessions(
     )
 
 
-def test_cybergym_fixture_reports_stage_results_for_200_sessions(monkeypatch):
+def test_cybergym_fixture_reports_stage_results_for_200_sessions():
     """Run the stage read-only and report its result for 200 sessions."""
 
-    monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", "true")
     stage = UpdateIsTrainableStage()
     with WTGatewayClient(config=TEST_TABLE_CONFIG) as client:
         assert client.config.tables.profile == "test"
@@ -237,8 +245,14 @@ def test_cybergym_fixture_reports_stage_results_for_200_sessions(monkeypatch):
         )
 
         snapshot = copy.deepcopy(session)
-        first = stage.transform_session(session, _context(session_id))
-        second = stage.transform_session(session, _context(session_id))
+        first = stage.transform_session(
+            session,
+            _context(session_id, TrainabilityPolicy.DOWNGRADE),
+        )
+        second = stage.transform_session(
+            session,
+            _context(session_id, TrainabilityPolicy.DOWNGRADE),
+        )
         assert first == second, (
             f"session {session_id!r} changed on the second stage execution"
         )

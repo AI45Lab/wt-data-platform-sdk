@@ -12,6 +12,7 @@ from wt_sdk.etl import (
     ETLEngine,
     SessionKey,
     StageContext,
+    TrainabilityPolicy,
     UpdateIsTrainableStage,
     load_pipeline,
 )
@@ -148,12 +149,17 @@ def _shuffled_step_records(
     return [records_by_step[step_id] for step_id in (30, 10, 40, 20)]
 
 
-def _stage_context(job_id: str, session_id: str) -> StageContext:
+def _stage_context(
+    job_id: str,
+    session_id: str,
+    policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL,
+) -> StageContext:
     pipeline = load_pipeline("landing_enrichment_pipeline")
     return StageContext(
         pipeline_name=pipeline.name,
         pipeline_version=pipeline.version,
         session_key=SessionKey(job_id, session_id),
+        trainability_policy=policy,
     )
 
 
@@ -237,10 +243,7 @@ def test_trainability_stage_inside_canonical_landing_pipeline():
             )
 
 
-def test_trainability_stage_selects_only_max_step_across_shuffled_chains(
-    monkeypatch,
-):
-    monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", "true")
+def test_trainability_stage_selects_only_max_step_across_shuffled_chains():
     suffix = f"{uuid.uuid4().hex}_shuffled_steps"
     job_id = f"landing-enrichment#integration#shuffled-steps#{suffix}"
     session_id = f"shuffled-step-session-{suffix}"
@@ -278,7 +281,11 @@ def test_trainability_stage_selects_only_max_step_across_shuffled_chains(
             assert int(shuffled_session[-1]["step_id"]) == 20
             direct_patches = UpdateIsTrainableStage().transform_session(
                 shuffled_session,
-                _stage_context(job_id, session_id),
+                _stage_context(
+                    job_id,
+                    session_id,
+                    TrainabilityPolicy.DOWNGRADE,
+                ),
             )
             assert direct_patches == {
                 str(before_by_step[30]["id"]): {"is_trainable": False},
@@ -290,7 +297,10 @@ def test_trainability_stage_selects_only_max_step_across_shuffled_chains(
                 str(before_by_step[20]["id"]): {"is_trainable": False},
             }
 
-            first = ETLEngine(client).run_sessions(
+            first = ETLEngine(
+                client,
+                trainability_policy=TrainabilityPolicy.DOWNGRADE,
+            ).run_sessions(
                 load_pipeline("landing_enrichment_pipeline"),
                 [SessionKey(job_id, session_id)],
             )
@@ -317,7 +327,10 @@ def test_trainability_stage_selects_only_max_step_across_shuffled_chains(
                 assert after_first_by_step[step_id] == before_by_step[step_id]
             assert _query_test_rows(client, SERVING_TEST_TABLE, job_id) == []
 
-            second = ETLEngine(client).run_sessions(
+            second = ETLEngine(
+                client,
+                trainability_policy=TrainabilityPolicy.DOWNGRADE,
+            ).run_sessions(
                 load_pipeline("landing_enrichment_pipeline"),
                 [SessionKey(job_id, session_id)],
             )

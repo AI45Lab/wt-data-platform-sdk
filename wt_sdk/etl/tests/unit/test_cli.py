@@ -11,6 +11,7 @@ from wt_sdk.etl import (
     RunSummary,
     SessionKey,
     StageWarning,
+    TrainabilityPolicy,
 )
 
 
@@ -138,6 +139,7 @@ def test_manual_etl_defaults_to_test_and_does_not_require_state_uri(
     pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
     monkeypatch.delenv("WT_SDK_PROFILE", raising=False)
     monkeypatch.delenv("WT_SDK_ETL_STATE_DB_URI", raising=False)
+    monkeypatch.delenv("TRAINABILITY_DOWNGRADE_LABEL", raising=False)
 
     class FakeClient:
         def __init__(self, config):
@@ -154,10 +156,12 @@ def test_manual_etl_defaults_to_test_and_does_not_require_state_uri(
             checkpoint_store=None,
             session_batch_size=25,
             sink_batch_size=100,
+            trainability_policy=TrainabilityPolicy.NORMAL,
         ):
             assert checkpoint_store is None
             assert session_batch_size == 25
             assert sink_batch_size == 100
+            assert trainability_policy is TrainabilityPolicy.NORMAL
 
         def run_jobs(self, pipeline, job_ids, dry_run=False):
             assert job_ids == ["job-1"]
@@ -186,6 +190,70 @@ def test_manual_etl_defaults_to_test_and_does_not_require_state_uri(
     )
 
     assert run_module.main() == 0
+
+
+def test_cli_reads_downgrade_policy_from_run_environment_and_reports_it(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def close(self):
+            return None
+
+    class FakeEngine:
+        def __init__(
+            self,
+            client,
+            checkpoint_store=None,
+            session_batch_size=25,
+            sink_batch_size=100,
+            trainability_policy=TrainabilityPolicy.NORMAL,
+        ):
+            del client, checkpoint_store, session_batch_size, sink_batch_size
+            captured["policy"] = trainability_policy
+
+        def run_jobs(self, pipeline, job_ids, dry_run=False):
+            del job_ids, dry_run
+            return RunSummary(
+                pipeline_name=pipeline.name,
+                pipeline_version=pipeline.version,
+                mode=pipeline.mode,
+                trainability_policy=captured["policy"],
+            )
+
+    monkeypatch.setenv("TRAINABILITY_DOWNGRADE_LABEL", "true")
+    monkeypatch.setenv("WT_SDK_PROFILE", "test")
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
+    monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
+    monkeypatch.setattr(run_module, "ETLEngine", FakeEngine)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run.py",
+            "--pipeline",
+            "example_pipeline",
+            "--job-id",
+            "job-1",
+            "--dry-run",
+            "--report-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert run_module.main() == 0
+    assert captured["policy"] is TrainabilityPolicy.DOWNGRADE
+    output = json.loads(capsys.readouterr().out)
+    assert output[0]["trainability_policy"] == "downgrade"
+    report_path = tmp_path / f"{output[0]['pipeline_run_id']}.json"
+    assert json.loads(report_path.read_text())["trainability_policy"] == "downgrade"
 
 
 def test_incremental_uses_env_profile_for_test_checkpoint_table(
@@ -220,11 +288,13 @@ def test_incremental_uses_env_profile_for_test_checkpoint_table(
             checkpoint_store=None,
             session_batch_size=25,
             sink_batch_size=100,
+            trainability_policy=TrainabilityPolicy.NORMAL,
         ):
             assert client.config.tables.profile == "test"
             assert checkpoint_store is not None
             assert session_batch_size == 25
             assert sink_batch_size == 100
+            assert trainability_policy is TrainabilityPolicy.NORMAL
 
         def run_incremental(self, pipeline, **kwargs):
             captured["settle_delay_ms"] = kwargs["settle_delay_ms"]
@@ -296,10 +366,12 @@ def test_open_ended_manual_range_uses_fixed_start_cutoff_and_optional_delay(
             checkpoint_store=None,
             session_batch_size=25,
             sink_batch_size=100,
+            trainability_policy=TrainabilityPolicy.NORMAL,
         ):
             assert checkpoint_store is None
             assert session_batch_size == 25
             assert sink_batch_size == 100
+            assert trainability_policy is TrainabilityPolicy.NORMAL
 
         def run_range(self, pipeline, *, start_ms, end_ms, page_size, dry_run):
             captured.update(start_ms=start_ms, end_ms=end_ms)
@@ -369,6 +441,7 @@ def test_summary_payload_contains_audit_counts_and_failed_row_ids():
     )
 
     assert payload["status"] == "FAILED"
+    assert payload["trainability_policy"] == "normal"
     assert payload["failed_row_ids"] == ["bad-row"]
     assert payload["started_at_ms"] == 1_000
     assert payload["ended_at_ms"] == 1_250
@@ -494,10 +567,12 @@ def test_failed_pipeline_prints_report_and_returns_nonzero(
             checkpoint_store=None,
             session_batch_size=25,
             sink_batch_size=100,
+            trainability_policy=TrainabilityPolicy.NORMAL,
         ):
             del client, checkpoint_store
             assert session_batch_size == 25
             assert sink_batch_size == 100
+            assert trainability_policy is TrainabilityPolicy.NORMAL
 
         def run_sessions(self, pipeline, session_keys, dry_run=False):
             del pipeline, session_keys, dry_run
@@ -573,8 +648,10 @@ def test_warning_only_pipeline_prints_report_and_returns_zero(
             checkpoint_store=None,
             session_batch_size=25,
             sink_batch_size=100,
+            trainability_policy=TrainabilityPolicy.NORMAL,
         ):
             del client, checkpoint_store, session_batch_size, sink_batch_size
+            assert trainability_policy is TrainabilityPolicy.NORMAL
 
         def run_jobs(self, pipeline, job_ids, dry_run=False):
             del pipeline, job_ids, dry_run
