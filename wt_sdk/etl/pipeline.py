@@ -22,6 +22,7 @@ from .models import (
     RecordFailure,
     SessionResult,
 )
+from .policy import TrainabilityPolicy, normalize_trainability_policy
 from .stage import (
     ETLStage,
     Session,
@@ -148,7 +149,11 @@ class PipelineDefinition:
         rows: Sequence[Mapping[str, object]],
         *,
         collect_failures: bool = False,
+        trainability_policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL,
     ) -> SessionResult:
+        effective_trainability_policy = normalize_trainability_policy(
+            trainability_policy
+        )
         (
             ordered_rows,
             session_key,
@@ -172,6 +177,7 @@ class PipelineDefinition:
                     pipeline_version=self.version,
                     session_key=session_key,
                     stage_name=stage.name,
+                    trainability_policy=effective_trainability_policy,
                 )
                 try:
                     try:

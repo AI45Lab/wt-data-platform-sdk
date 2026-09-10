@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 
 from wt_sdk import WTGatewayClient
-from wt_sdk.etl import SessionKey, StageContext, UpdateIsTrainableStage
+from wt_sdk.etl import (
+    SessionKey,
+    StageContext,
+    TrainabilityPolicy,
+    UpdateIsTrainableStage,
+)
 from wt_sdk.etl.tests.integration.helpers import (
     LANDING_TEST_TABLE,
     TEST_TABLE_CONFIG,
@@ -78,11 +83,15 @@ def _query_fixture_rows(
     )
 
 
-def _context(session_id: str) -> StageContext:
+def _context(
+    session_id: str,
+    policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL,
+) -> StageContext:
     return StageContext(
         pipeline_name="landing_enrichment_pipeline",
         pipeline_version="1",
         session_key=SessionKey(FIXTURE_JOB_ID, session_id),
+        trainability_policy=policy,
     )
 
 
@@ -236,8 +245,14 @@ def test_cybergym_fixture_reports_stage_results_for_200_sessions():
         )
 
         snapshot = copy.deepcopy(session)
-        first = stage.transform_session(session, _context(session_id))
-        second = stage.transform_session(session, _context(session_id))
+        first = stage.transform_session(
+            session,
+            _context(session_id, TrainabilityPolicy.DOWNGRADE),
+        )
+        second = stage.transform_session(
+            session,
+            _context(session_id, TrainabilityPolicy.DOWNGRADE),
+        )
         assert first == second, (
             f"session {session_id!r} changed on the second stage execution"
         )
@@ -255,7 +270,13 @@ def test_cybergym_fixture_reports_stage_results_for_200_sessions():
             for row in session
             if str(row["id"]) in trainable_ids
         ]
-        assert trainable_steps == [last_step]
+        eligible_steps = [
+            int(row["step_id"])
+            for row in session
+            if not _is_non_200_status(_status_code(row))
+        ]
+        expected_trainable_steps = [max(eligible_steps)] if eligible_steps else []
+        assert trainable_steps == expected_trainable_steps
         stored_trainable_steps = [
             int(row["step_id"])
             for row in session
@@ -299,8 +320,7 @@ def test_cybergym_fixture_reports_stage_results_for_200_sessions():
             if _is_non_200_status(_status_code(row))
         )
         assert all(
-            first[str(row["id"])]["is_trainable"]
-            is (int(row["step_id"]) == last_step)
+            first[str(row["id"])]["is_trainable"] is False
             for row in session
             if int(row["step_id"]) in non_200_steps
         )

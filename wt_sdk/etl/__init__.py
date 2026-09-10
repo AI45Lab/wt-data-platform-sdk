@@ -28,6 +28,11 @@ from .models import (
     SessionResult,
 )
 from .pipeline import PipelineDefinition
+from .policy import (
+    TrainabilityPolicy,
+    normalize_trainability_policy,
+    trainability_policy_from_env_value,
+)
 from .pipelines import list_pipeline_names, load_pipeline
 from .stage import (
     ETLStage,
@@ -80,9 +85,12 @@ __all__ = [
     "StageTransformError",
     "StageWarning",
     "TEST_CHECKPOINT_TABLE",
+    "TrainabilityPolicy",
     "UpdateIsTrainableStage",
     "list_pipeline_names",
     "load_pipeline",
     "resolve_checkpoint_table",
     "resolve_etl_state_db_uri",
+    "normalize_trainability_policy",
+    "trainability_policy_from_env_value",
 ]
