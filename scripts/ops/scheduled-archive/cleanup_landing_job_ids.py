@@ -11,10 +11,10 @@ The default mode is a read-only preview.  A destructive run requires both
 
 Examples::
 
-    python scripts/ops/cleanup_landing_job_ids.py \
+    python scripts/ops/scheduled-archive/cleanup_landing_job_ids.py \
         --job-id-file ./archive_job_ids.txt --dry-run
 
-    python scripts/ops/cleanup_landing_job_ids.py \
+    python scripts/ops/scheduled-archive/cleanup_landing_job_ids.py \
         --job-id-file ./archive_job_ids.txt \
         --execute --confirm-delete
 """
@@ -22,11 +22,15 @@ Examples::
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Iterable, Sequence
 
-# The script is normally launched as ``python scripts/ops/...``; in that
-# layout the sibling module is importable directly from the script directory.
+# The shared cleanup implementation remains in scripts/ops. Add that directory
+# explicitly because this script now lives under scheduled-archive/.
+OPS_DIR = Path(__file__).resolve().parents[1]
+if str(OPS_DIR) not in sys.path:
+    sys.path.insert(0, str(OPS_DIR))
 from cleanup_data import _cleanup_trajectory_table
 from wt_sdk.config import DEFAULT_LANDING_TABLE, default_config
 
