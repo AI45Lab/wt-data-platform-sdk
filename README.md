@@ -334,13 +334,15 @@ omits null table columns by default without modifying JSON strings.
 
 ETL should publish complete records through `upsert_serving()` or
 `upsert_serving_batch()`. These methods call dldb's native upsert path with
-`columns=["id"]`; do not implement a query-then-ingest/update sequence. Repeated
-upserts converge to the same business content, while `serving_updated_at`
+`columns=["job_id", "id"]` by default; pass `match_columns=` to override the
+dldb merge keys when an explicit upstream key contract requires it. Do not
+implement a query-then-ingest/update sequence. Repeated upserts converge to the
+same business content, while `serving_updated_at`
 records the most recent successful publication and may therefore change on a
 retry. Every upsert record requires a non-empty, immutable `job_id`. dldb HASH
-tables do not provide a uniqueness constraint across buckets, so callers must
-keep IDs globally unique and must never move an existing ID to another
-`job_id`. The append/add `ingest_serving(_batch)` methods remain available and
+tables do not provide a uniqueness constraint across buckets, so callers should
+keep IDs globally unique and must never move an existing ID to another `job_id`.
+The append/add `ingest_serving(_batch)` methods remain available and
 also stamp `serving_updated_at`.
 
 The repository now includes the ETL v1 engine, durable per-bucket checkpoints,
@@ -442,6 +444,7 @@ mutates the logical catalog through `client.session` must call
 | --- | --- |
 | ingest_landing(record) | Write one LandingRecord. |
 | ingest_landing_batch(records) | Write a list of records or LandingRecordBatch. |
+| upsert_landing(record, *, match_columns=None) / upsert_landing_batch(records, *, match_columns=None) | Upsert complete landing rows through dldb; defaults to `job_id` + `id` matching and passes selected keys through to dldb. |
 | query_data(filter_query, ..., table=None, exclude_none=True, deserialize_json=False) | Query landing by default, or a named table; always return `List[dict]`. |
 | update_landing(filter_query, updates, ..., touch_source_updated_at=True) | Patch matching rows and refresh `source_updated_at` by default. SDK timestamps, `id`, `created_at`, and `job_id` are protected. |
 | count_landing(partition=None) | Count rows, optionally in one raw job_id or hash bucket. |
@@ -481,7 +484,7 @@ partitions.
 | Method | Purpose |
 | --- | --- |
 | ingest_serving(record) / ingest_serving_batch(records) | Append processed serving records and stamp `serving_updated_at`. |
-| upsert_serving(record) / upsert_serving_batch(records) | ETL publication by globally unique `id`; preserve `source_updated_at` and refresh `serving_updated_at`. |
+| upsert_serving(record, *, match_columns=None) / upsert_serving_batch(records, *, match_columns=None) | ETL publication by dldb match keys (default `job_id` + `id`); preserve `source_updated_at` and refresh `serving_updated_at`. |
 | query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False) | Query serving with the same filtering and HASH pruning behavior; always return `List[dict]`. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
 | search(query, ..., deserialize_json=False, checkout_latest=True) | Search serving `search_text`, optionally constrained by tags/SQL filters; user `%`, `_`, and `\\` characters are treated literally. |
