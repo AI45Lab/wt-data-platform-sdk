@@ -158,6 +158,7 @@ def _cleanup_trajectory_table(
     table_name: str,
     query: str,
     dry_run: bool,
+    confirm: bool = False,
 ) -> int:
     """Fast filtered cleanup path for active landing/serving tables."""
     print(f"Filter query: {query}")
@@ -196,14 +197,15 @@ def _cleanup_trajectory_table(
             print(f"\n[DRY RUN] Would delete {delete_count} rows")
             return 0
 
-        try:
-            confirm = input(f"\nDelete {delete_count} rows? (yes/no): ")
-            if confirm.lower() != "yes":
-                print("Aborted.")
+        if not confirm:
+            try:
+                confirmation = input(f"\nDelete {delete_count} rows? (yes/no): ")
+                if confirmation.lower() != "yes":
+                    print("Aborted.")
+                    return 0
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted.")
                 return 0
-        except (EOFError, KeyboardInterrupt):
-            print("\nAborted.")
-            return 0
 
         role = _table_role(table_name)
         if role == "landing":

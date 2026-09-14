@@ -1224,7 +1224,45 @@ def test_landing_publish_time_normalization_reuses_already_clean_inputs(monkeypa
     assert client._without_serving_publish_time(batch) is batch
 
 
-def test_serving_upsert_uses_id_and_refreshes_publish_time(monkeypatch):
+def test_landing_upsert_defaults_to_composite_match_key(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    record = LandingRecord(
+        dataset_type="RL",
+        id="landing-1",
+        created_at=100,
+        source_updated_at=1_800_000_000_000,
+        job_id="job-123",
+        response='{"content":"first"}',
+    )
+
+    client.upsert_landing_batch([record])
+
+    assert fake_session.last_upsert_kwargs["table_name"] == "landing_test"
+    assert fake_session.last_upsert_kwargs["columns"] == ["job_id", "id"]
+    assert fake_session.last_upsert_kwargs["datas"]["job_id"].iloc[0] == "job-123"
+
+
+def test_landing_upsert_passes_through_custom_match_columns(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    record = LandingRecord(
+        dataset_type="RL",
+        id="landing-1",
+        session_id="session-1",
+        created_at=100,
+        source_updated_at=1_800_000_000_000,
+        job_id="job-123",
+    )
+
+    client.upsert_landing(record, match_columns=("job_id", "session_id", "id"))
+
+    assert fake_session.last_upsert_kwargs["columns"] == ["job_id", "session_id", "id"]
+
+
+def test_serving_upsert_uses_composite_match_key_and_refreshes_publish_time(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
     publish_times = iter([1_900_000_000_001, 1_900_000_000_002])
@@ -1246,7 +1284,7 @@ def test_serving_upsert_uses_id_and_refreshes_publish_time(monkeypatch):
     client.upsert_serving(replacement)
 
     assert fake_session.last_upsert_kwargs["table_name"] == "serving_test"
-    assert fake_session.last_upsert_kwargs["columns"] == ["id"]
+    assert fake_session.last_upsert_kwargs["columns"] == ["job_id", "id"]
     assert (
         fake_session.last_upsert_kwargs["datas"]["response"].dtype.pyarrow_dtype
         == JSON_TYPE
@@ -1314,7 +1352,7 @@ def test_serving_upsert_batch_validates_job_id_duplicate_ids_and_empty_input(mon
     with pytest.raises(ValueError, match="non-empty job_id"):
         client.upsert_serving(missing_job)
 
-    with pytest.raises(ValueError, match="duplicate IDs"):
+    with pytest.raises(ValueError, match="duplicate match keys"):
         client.upsert_serving_batch(
             ServingRecordBatch(records=[valid, valid.model_copy()])
         )

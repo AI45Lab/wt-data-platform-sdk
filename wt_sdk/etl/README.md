@@ -58,7 +58,8 @@ v1 只有一个执行引擎，但支持两类 pipeline：
 1. `PipelineMode.LANDING`：在 landing 内做 enrichment。引擎只提交实际发生变化的
    patch，并通过 `update_landing()` 自动刷新 `source_updated_at`。
 2. `PipelineMode.SERVING`：从 landing 读取完整记录，处理后通过
-   `upsert_serving_batch()` 按全局唯一 `id` 幂等发布到 serving。
+   `upsert_serving_batch()` 默认按 `job_id` + `id` 幂等发布到 serving；如有明确的
+   上游键契约，可通过 `match_columns=` 指定 dldb 的匹配键。
 
 两类 pipeline 在一个进程内按 **landing 在前、serving 在后** 串行执行。landing
 发生实际变化的 session 会被立即交给后续 serving pipeline；即使运维显式配置了稳定延迟，

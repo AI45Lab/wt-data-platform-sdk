@@ -2,7 +2,7 @@ import re
 import sqlite3
 import tempfile
 import time
-from typing import List, Optional, Union, Dict, Any, Iterator
+from typing import List, Optional, Union, Dict, Any, Iterator, Sequence
 from loguru import logger
 import dldb
 import pandas as pd
@@ -494,60 +494,166 @@ class WTGatewayClient:
             )
         return stamped(record_or_batch)
 
-    def _upsert_serving_batch(
-        self,
-        records: Union[List[ServingRecord], ServingRecordBatch],
-    ) -> None:
-        """Upsert a validated serving batch by globally unique business ID."""
-        from wt_sdk.core.schemas import SERVING_SCHEMA
-        from wt_sdk.utils import serving_batch_to_arrow
+    @staticmethod
+    def _normalize_upsert_match_columns(
+        match_columns: Optional[Sequence[str]],
+        *,
+        schema: Any,
+        default: Sequence[str],
+    ) -> List[str]:
+        """Validate and normalize dldb's upsert merge-key columns.
 
-        source_records = records.records if isinstance(records, ServingRecordBatch) else records
+        ``match_columns`` is intentionally passed through to dldb after basic
+        SDK validation.  It describes the columns used to match an existing
+        row; it is not a list of columns to update.
+        """
+        if match_columns is None:
+            normalized = list(default)
+        elif isinstance(match_columns, str):
+            raise TypeError("match_columns must be a sequence of column names")
+        else:
+            normalized = list(match_columns)
+
+        if not normalized:
+            raise ValueError("match_columns must contain at least one column")
+        if any(not isinstance(column, str) or not column.strip() for column in normalized):
+            raise TypeError("match_columns must contain non-empty string column names")
+
+        duplicates = sorted({column for column in normalized if normalized.count(column) > 1})
+        if duplicates:
+            raise ValueError(
+                "match_columns must not contain duplicates: "
+                f"{', '.join(duplicates)}"
+            )
+
+        schema_columns = {field.name for field in schema}
+        unknown = sorted(set(normalized) - schema_columns)
+        if unknown:
+            raise ValueError(
+                "match_columns contains columns not present in the table schema: "
+                f"{', '.join(unknown)}"
+            )
+        return normalized
+
+    @staticmethod
+    def _validate_upsert_records(
+        records: Union[List[Any], Any],
+        *,
+        match_columns: Sequence[str],
+        operation: str,
+    ) -> List[Any]:
+        """Return records as a list and validate HASH routing/key values."""
+        source_records = records.records if hasattr(records, "records") else records
         if not source_records:
-            logger.warning("Empty records list, skipping serving upsert")
-            return
+            return []
 
-        missing_job_ids = [record.id for record in source_records if not str(record.job_id or "").strip()]
+        missing_job_ids = [
+            str(record.id)
+            for record in source_records
+            if not str(record.job_id or "").strip()
+        ]
         if missing_job_ids:
             raise ValueError(
-                "serving upsert requires a non-empty job_id for every record; "
+                f"{operation} requires a non-empty job_id for every record; "
                 f"missing for IDs: {', '.join(missing_job_ids)}"
             )
 
-        seen_ids = set()
-        duplicate_ids = set()
+        missing_keys = []
         for record in source_records:
-            if record.id in seen_ids:
-                duplicate_ids.add(record.id)
-            seen_ids.add(record.id)
-        if duplicate_ids:
+            for column in match_columns:
+                value = getattr(record, column, None)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    missing_keys.append(f"{column} (record {record.id})")
+        if missing_keys:
             raise ValueError(
-                "serving upsert batch contains duplicate IDs: "
-                f"{', '.join(sorted(duplicate_ids))}"
+                f"{operation} requires non-empty values for every match column; "
+                f"missing: {', '.join(missing_keys)}"
             )
 
-        stamped = self._with_serving_publish_time(
-            ServingRecordBatch(records=list(source_records))
-        )
-        arrow_table = serving_batch_to_arrow(stamped, SERVING_SCHEMA)
-        dataframe = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
-        info = self._get_table_info("serving")
+        seen_keys = set()
+        duplicate_keys = set()
+        for record in source_records:
+            key = tuple(getattr(record, column, None) for column in match_columns)
+            try:
+                if key in seen_keys:
+                    duplicate_keys.add(key)
+                seen_keys.add(key)
+            except TypeError:
+                # dldb merge keys are expected to be scalar schema columns;
+                # leave any stricter type handling to dldb for unusual input.
+                continue
+        if duplicate_keys:
+            rendered = ", ".join(str(key) for key in sorted(duplicate_keys, key=str))
+            raise ValueError(f"{operation} batch contains duplicate match keys: {rendered}")
 
+        return list(source_records)
+
+    def _upsert_batch(
+        self,
+        table: str,
+        records: Union[List[Any], Any],
+        *,
+        match_columns: Optional[Sequence[str]],
+    ) -> None:
+        """Upsert complete rows through dldb using caller-selected match keys."""
+        from wt_sdk.core.schemas import LANDING_SCHEMA, SERVING_SCHEMA
+        from wt_sdk.utils import landing_batch_to_arrow, serving_batch_to_arrow
+
+        schema = LANDING_SCHEMA if table == "landing" else SERVING_SCHEMA
+        default_match_columns = ["job_id", "id"]
+        columns = self._normalize_upsert_match_columns(
+            match_columns,
+            schema=schema,
+            default=default_match_columns,
+        )
+        source_records = self._validate_upsert_records(
+            records,
+            match_columns=columns,
+            operation=f"{table} upsert",
+        )
+        if not source_records:
+            logger.warning(f"Empty records list, skipping {table} upsert")
+            return
+
+        if table == "landing":
+            normalized_records = self._without_serving_publish_time(source_records)
+            batch = LandingRecordBatch(records=normalized_records)
+            arrow_table = landing_batch_to_arrow(batch, schema)
+        else:
+            normalized_records = self._with_serving_publish_time(source_records)
+            batch = ServingRecordBatch(records=normalized_records)
+            arrow_table = serving_batch_to_arrow(batch, schema)
+
+        dataframe = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
+        info = self._get_table_info(table)
         self.session.upsert(
             info["table_name"],
-            columns=["id"],
+            columns=columns,
             datas=dataframe,
         )
         self._log_dldb_timing(
             "upsert",
             self._extract_dldb_last_call(),
             table_name=info["table_name"],
-            extra={"input_rows": len(arrow_table), "api": "upsert_serving_batch"},
+            extra={
+                "input_rows": len(arrow_table),
+                "api": f"upsert_{table}_batch",
+                "match_columns": columns,
+            },
         )
         logger.info(
-            f"Successfully upserted {len(arrow_table)} records to serving table "
-            "via DLDB wrapper"
+            f"Successfully upserted {len(arrow_table)} records to {table} table "
+            f"via DLDB wrapper using match columns {columns}"
         )
+
+    def _upsert_serving_batch(
+        self,
+        records: Union[List[ServingRecord], ServingRecordBatch],
+        *,
+        match_columns: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Upsert complete serving rows using caller-selected match columns."""
+        self._upsert_batch("serving", records, match_columns=match_columns)
 
     def _query(
         self,
@@ -714,6 +820,28 @@ class WTGatewayClient:
         records: Union[List[LandingRecord], LandingRecordBatch]
     ) -> None:
         self._ingest("landing", records)
+
+    def upsert_landing(
+        self,
+        record: LandingRecord,
+        *,
+        match_columns: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Upsert one complete landing row through dldb.
+
+        By default dldb matches on ``job_id`` and ``id``.  Callers may pass a
+        different schema-column sequence when their key contract requires it.
+        """
+        self._upsert_batch("landing", [record], match_columns=match_columns)
+
+    def upsert_landing_batch(
+        self,
+        records: Union[List[LandingRecord], LandingRecordBatch],
+        *,
+        match_columns: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Upsert complete landing rows using caller-selected match columns."""
+        self._upsert_batch("landing", records, match_columns=match_columns)
 
     def query_data(
         self,
@@ -895,16 +1023,23 @@ class WTGatewayClient:
     ) -> None:
         self._ingest("serving", records)
 
-    def upsert_serving(self, record: ServingRecord) -> None:
-        """Insert or replace one serving record matched by business ID."""
-        self._upsert_serving_batch([record])
+    def upsert_serving(
+        self,
+        record: ServingRecord,
+        *,
+        match_columns: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Insert or replace one complete serving row."""
+        self._upsert_serving_batch([record], match_columns=match_columns)
 
     def upsert_serving_batch(
         self,
         records: Union[List[ServingRecord], ServingRecordBatch],
+        *,
+        match_columns: Optional[Sequence[str]] = None,
     ) -> None:
-        """Insert or replace serving records matched by business ID."""
-        self._upsert_serving_batch(records)
+        """Insert or replace complete serving rows using match columns."""
+        self._upsert_serving_batch(records, match_columns=match_columns)
 
     def count_serving(self, partition: Optional[str] = None) -> int:
         return self._count("serving", partition)

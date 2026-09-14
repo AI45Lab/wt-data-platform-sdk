@@ -320,7 +320,8 @@ with WTGatewayClient() as client:
 默认省略 null 表列，但不会修改 JSON 字符串内容。
 
 ETL 应通过 `upsert_serving()` 或 `upsert_serving_batch()` 发布完整记录。
-它们直接调用 dldb 的 `columns=["id"]` upsert，不应自行实现“先查询、再决定
+它们默认调用 dldb 的 `columns=["job_id", "id"]` upsert；如上游有明确的键契约，
+可通过 `match_columns=` 覆盖匹配键。不应自行实现“先查询、再决定
 ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_updated_at` 表示
 最后一次成功发布时间，因此重试时允许变化。每条 upsert 记录都必须带非空且不可变
 的 `job_id`。dldb HASH 表不提供跨 bucket 唯一约束，因此调用方必须保证 `id`
@@ -453,7 +454,8 @@ with WTGatewayClient() as client:
 | 方法 | 用途 |
 | --- | --- |
 | `ingest_serving(record)` / `ingest_serving_batch(records)` | append 写入 serving，并刷新 `serving_updated_at`。 |
-| `upsert_serving(record)` / `upsert_serving_batch(records)` | ETL 按全局唯一 `id` 发布；保留 `source_updated_at` 并刷新 `serving_updated_at`。 |
+| `upsert_landing(record, *, match_columns=None)` / `upsert_landing_batch(records, *, match_columns=None)` | 通过 dldb upsert 完整 landing 行，默认按 `job_id` + `id` 匹配，并透传上游指定的匹配键。 |
+| `upsert_serving(record, *, match_columns=None)` / `upsert_serving_batch(records, *, match_columns=None)` | ETL 通过 dldb 匹配键发布完整记录，默认按 `job_id` + `id` 匹配；保留 `source_updated_at` 并刷新 `serving_updated_at`。 |
 | `query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
 | `search(query, ..., deserialize_json=False, checkout_latest=True)` | 只检索 serving 的 `search_text`，可额外使用 tags、dataset type 或 SQL 条件过滤。 |
