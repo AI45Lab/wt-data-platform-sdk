@@ -155,7 +155,7 @@ incremental 模式会使用 checkpoint。
 
 | Pipeline | 模式 | 当前 stage | 当前状态 |
 | --- | --- | --- | --- |
-| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable` | 业务逻辑仍为 TODO；实现合入前只能做静态检查，不能真实执行。未来 Claude normalization stage 也接入这里，并在 trainability 前完成。 |
+| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable`、`freecot` | v4；完整 session 上计算 trainability，并在后续 stage 中补充可用的 Claude/GPT reasoning。 |
 | `landing_to_serving_pipeline` | landing → serving | `build_chosen_trace`、`derive_job_tags`、`build_search_text` | v3；可用于现有 OpenCode 轨迹，仅处理 `is_trainable is True` 的行。 |
 
 `build_chosen_trace` 将 `messages + response` 写入 `chosen_trace`；`derive_job_tags` 从
@@ -491,8 +491,8 @@ resulting policy through the run context. It is intentionally not a persistent
 
 同一次运行串联 landing 与 serving：
 
-> `UpdateIsTrainableStage.transform_session()` 的 TODO 实现及单测合入前，只能对 landing pipeline 使用
-> `--list-stages`/`--validate-only`，不要执行下面的真实数据命令。
+> `UpdateIsTrainableStage.transform_session()` 已接入 landing pipeline；首次运行建议先使用
+> `--dry-run` 检查实际标注范围，再执行正式写入。
 
 ```bash
 .venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \

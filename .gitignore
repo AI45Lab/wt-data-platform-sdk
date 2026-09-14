@@ -186,3 +186,5 @@ logs/
 tmp/
 AGENTS.md
 ETL_TASK_*.md
+
+query

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -291,11 +292,23 @@ def test_builtin_factories_are_no_argument_cli_factories():
         "build_search_text",
     ]
     assert landing.mode is PipelineMode.LANDING
-    assert landing.version == "3"
+    assert landing.version == "4"
     assert [type(stage) for stage in landing.ordered_stages] == [
         UpdateIsTrainableStage,
         FreeCotStage,
     ]
+
+
+def test_trainability_stage_compiles_and_runs_inside_landing_pipeline():
+    stage_path = Path(__file__).parents[2] / "stages" / "trainability.py"
+    compile(stage_path.read_text(encoding="utf-8"), str(stage_path), "exec")
+
+    pipeline = load_pipeline("landing_enrichment_pipeline")
+    result = pipeline.process_session([_row(is_trainable=False)])
+
+    assert result.successful_rows == 1
+    assert result.failures == ()
+    assert result.landing_patches[0].updates == {"is_trainable": True}
 
 
 def test_job_tags_are_best_effort_and_invalid_name_becomes_null():
