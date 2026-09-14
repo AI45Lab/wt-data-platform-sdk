@@ -1,5 +1,7 @@
 """Landing-to-serving publication pipeline."""
 
+from wt_sdk.core.schemas import LANDING_SCHEMA
+
 from ..models import PipelineInputScope, PipelineMode
 from ..pipeline import PipelineDefinition
 from ..stages import (
@@ -17,6 +19,17 @@ def build_pipeline() -> PipelineDefinition:
         version="3",
         mode=PipelineMode.SERVING,
         input_scope=PipelineInputScope.MATCHED_ROWS,
+        source_columns=tuple(
+            name
+            for name in LANDING_SCHEMA.names
+            if name
+            not in {
+                "chosen_trace",
+                "search_text",
+                "tags",
+                "serving_updated_at",
+            }
+        ),
         stages=(
             BuildChosenTraceStage(),
             DeriveJobTagsStage(),

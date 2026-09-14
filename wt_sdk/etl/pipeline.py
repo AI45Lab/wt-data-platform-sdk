@@ -42,6 +42,93 @@ IMMUTABLE_ETL_FIELDS = {
     "serving_updated_at",
 }
 ETL_SCHEMA_FIELDS = frozenset(LANDING_SCHEMA.names)
+SESSION_VALIDATION_FIELDS = (
+    "id",
+    "job_id",
+    "session_id",
+    "step_id",
+    "source_updated_at",
+    "env_id",
+)
+
+
+def _default_source_columns(
+    mode: PipelineMode,
+    ordered_stages: Sequence[ETLStage],
+) -> tuple[str, ...]:
+    """Choose a safe default projection for one session source read."""
+
+    if mode is PipelineMode.SERVING:
+        # Serving upserts complete rows. Only the publish timestamp is always
+        # replaced by the SDK and therefore never needs to be read from landing.
+        required = ETL_SCHEMA_FIELDS - {"serving_updated_at"}
+    else:
+        # Landing pipelines persist patches, so unrelated source fields are not
+        # needed. Output fields are retained to support the engine's no-op diff.
+        required = set(SESSION_VALIDATION_FIELDS)
+        for stage in ordered_stages:
+            required.update(stage.required_fields)
+            required.update(stage.output_fields)
+    return tuple(name for name in LANDING_SCHEMA.names if name in required)
+
+
+def _validate_source_columns(
+    source_columns: Sequence[str],
+    *,
+    mode: PipelineMode,
+    ordered_stages: Sequence[ETLStage],
+) -> tuple[str, ...]:
+    """Validate a pipeline projection against stage and sink requirements."""
+
+    if isinstance(source_columns, str) or not source_columns:
+        raise PipelineConfigurationError(
+            "pipeline source_columns must be a non-empty sequence of field names"
+        )
+    normalized = tuple(source_columns)
+    if any(not isinstance(name, str) or not name.strip() for name in normalized):
+        raise PipelineConfigurationError(
+            "pipeline source_columns must contain non-empty string field names"
+        )
+    if len(set(normalized)) != len(normalized):
+        raise PipelineConfigurationError("pipeline source_columns contains duplicates")
+    unknown = set(normalized) - ETL_SCHEMA_FIELDS
+    if unknown:
+        raise PipelineConfigurationError(
+            "pipeline source_columns contains fields outside the unified schema: "
+            f"{sorted(unknown)}"
+        )
+
+    missing_validation = set(SESSION_VALIDATION_FIELDS) - set(normalized)
+    if missing_validation:
+        raise PipelineConfigurationError(
+            "pipeline source_columns omits session validation fields: "
+            f"{sorted(missing_validation)}"
+        )
+
+    available = set(normalized)
+    for stage in ordered_stages:
+        missing_inputs = set(stage.required_fields) - available
+        if missing_inputs:
+            raise PipelineConfigurationError(
+                f"pipeline source_columns cannot satisfy stage '{stage.name}': "
+                f"{sorted(missing_inputs)}"
+            )
+        available.update(stage.output_fields)
+
+    if mode is PipelineMode.SERVING:
+        # The SDK supplies serving_updated_at after the transform. Every other
+        # field must either come from landing or be produced by the pipeline so
+        # a partial projection cannot silently null a complete-row upsert.
+        missing_sink_fields = ETL_SCHEMA_FIELDS - {"serving_updated_at"} - available
+        if missing_sink_fields:
+            raise PipelineConfigurationError(
+                "serving pipeline source_columns and outputs do not cover the "
+                f"complete serving row: {sorted(missing_sink_fields)}"
+            )
+
+    # Use schema order even when a contributor declared another order. Stable
+    # projections make logs/tests easier to compare and avoid accidental churn.
+    return tuple(name for name in LANDING_SCHEMA.names if name in normalized)
 
 
 @dataclass(frozen=True)
@@ -53,6 +140,7 @@ class PipelineDefinition:
     mode: PipelineMode
     stages: tuple[ETLStage, ...]
     input_scope: PipelineInputScope = PipelineInputScope.COMPLETE_SESSION
+    source_columns: tuple[str, ...] | None = None
     _ordered_stages: tuple[ETLStage, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -65,7 +153,8 @@ class PipelineDefinition:
             raise PipelineConfigurationError("pipeline name and version are required")
         if not isinstance(self.mode, PipelineMode):
             raise PipelineConfigurationError("pipeline mode must be a PipelineMode")
-        object.__setattr__(self, "_ordered_stages", self.validate_dag(self.stages))
+        ordered_stages = self.validate_dag(self.stages)
+        object.__setattr__(self, "_ordered_stages", ordered_stages)
         if not isinstance(self.input_scope, PipelineInputScope):
             raise PipelineConfigurationError(
                 "pipeline input_scope must be a PipelineInputScope"
@@ -79,6 +168,15 @@ class PipelineDefinition:
                 raise PipelineConfigurationError(
                     "matched-row input scope requires a safe pipeline discovery filter"
                 )
+        source_columns = self.source_columns
+        if source_columns is None:
+            source_columns = _default_source_columns(self.mode, ordered_stages)
+        normalized_source_columns = _validate_source_columns(
+            source_columns,
+            mode=self.mode,
+            ordered_stages=ordered_stages,
+        )
+        object.__setattr__(self, "source_columns", normalized_source_columns)
 
     @staticmethod
     def validate_dag(stages: Sequence[ETLStage]) -> tuple[ETLStage, ...]:
@@ -139,11 +237,11 @@ class PipelineDefinition:
             "pipeline_version": self.version,
             "mode": self.mode.value,
             "input_scope": self.input_scope.value,
+            "source_columns": list(self.source_columns or ()),
             "execution_order": [stage.name for stage in self.ordered_stages],
             "stages": stages,
             "edges": edges,
         }
-
     def process_session(
         self,
         rows: Sequence[Mapping[str, object]],

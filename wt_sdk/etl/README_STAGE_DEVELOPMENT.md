@@ -162,6 +162,9 @@ def transform_session(self, session, context):
 - 不得修改 `id`、`job_id`、`session_id`、`created_at`、`source_updated_at`、
   `serving_updated_at`。不要手动调用 update/upsert 或更新时间戳。
 - `required_fields` 声明 stage 会读取的 schema 字段；`output_fields` 声明唯一允许返回的字段。
+- Pipeline 的 `source_columns` 声明 dldb session load 的列投影。默认 landing projection
+  由 session 校验字段与所有 stage 输入/输出推导；serving 若使用自定义窄投影，必须确保
+  stage outputs 能补齐最终完整 serving row，不能让未读取的字段在 upsert 时被静默写成 null。
 - JSON schema 字段在 ETL 边界是 JSON 字符串；解析后必须重新序列化，不能返回 Python
   `dict/list`。
 - 同一 pipeline 内一个 output field 只能由一个 stage 拥有。

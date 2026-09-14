@@ -97,6 +97,11 @@ ETL 的正确运行要求以下约束始终成立：
 - discovery 只读取 `id/job_id/session_id/source_updated_at`。Landing enrichment 在发现任意
   一行变化后完整加载 session；内置 serving pipeline 按 session 分组，但直接加载其中
   `is_trainable=true` 的行，因为当前三个 serving stage 都只依赖并发布这些行。
+- discovery 之外的 session load 也使用 pipeline 的 `source_columns` 投影，不再默认读取整张
+  28 列 schema。Enrichment 当前只读取 stage/校验所需的 12 列；serving 仍需保留完整行 upsert
+  所需字段，但跳过由 pipeline 必然重建的 `chosen_trace`、`tags`、`search_text` 和由 SDK
+  自动刷新的 `serving_updated_at`。新增 pipeline 若自定义投影，必须保证 stage 输入和最终
+  serving 完整行都能由 source columns 与 stage outputs 覆盖。
 - `--job-id` 模式允许 stage 声明保守的 `job_discovery_filter`：当前 enrichment 用
   `is_session_completed=true` 发现完整 session，serving 用 `is_trainable=true`。只有 pipeline
   内每个 stage 都声明安全提示时才收窄，否则退回 job 全量 discovery；提示不是业务 selector。
@@ -339,6 +344,9 @@ failure 处理。
 - `sessions_warned`：至少发出一条 warning 的 session 执行次数。
 - `landing_rows_updated` / `serving_rows_upserted`：成功产生的实际写入数；dry-run 时表示计划
   写入数。
+- `serving_reward_positive_rows`：正式 serving pipeline 完成后，按本次运行涉及的每个
+  `job_id` 在交付表中复核 `reward > 0` 的当前行数之和；明细在
+  `serving_reward_positive_rows_by_job_id`。dry-run 或非 serving report 为 `null`/空对象。
 
 Report 还包含 `pipeline_run_id`、`started_at`、`ended_at`、毫秒时间、`duration_ms`、`status`、
 `phase_timings_ms`（`discovery`/`load`/`transform`/`sink` 的累计 wall time）、

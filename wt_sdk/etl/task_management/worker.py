@@ -249,6 +249,13 @@ def build_task_summary(
             "warning_count": int(report.get("warning_count") or 0),
             "landing_rows_updated": int(report.get("landing_rows_updated") or 0),
             "serving_rows_upserted": int(report.get("serving_rows_upserted") or 0),
+            "serving_reward_positive_rows": report.get(
+                "serving_reward_positive_rows"
+            ),
+            "serving_reward_positive_rows_by_job_id": report.get(
+                "serving_reward_positive_rows_by_job_id"
+            )
+            or {},
             "log_path": execution.log_path,
         }
         if execution.error:
@@ -257,6 +264,7 @@ def build_task_summary(
         for field in totals:
             totals[field] += int(payload[field] or 0)
 
+    serving_report = pipelines.get("landing_to_serving_pipeline", {})
     return {
         "task_run_id": task.last_run_id,
         "job_id": task.job_id,
@@ -264,6 +272,12 @@ def build_task_summary(
         "status": status,
         "report_dir": task.report_dir,
         "pipelines": pipelines,
+        "serving_reward_positive_rows": serving_report.get(
+            "serving_reward_positive_rows"
+        ),
+        "serving_reward_positive_rows_by_job_id": serving_report.get(
+            "serving_reward_positive_rows_by_job_id", {}
+        ),
         "totals": totals,
         "totals_semantics": "sum_of_pipeline_counters_not_unique_rows",
         "worker_error": worker_error,

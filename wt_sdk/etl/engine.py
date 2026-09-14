@@ -259,6 +259,7 @@ class ETLEngine:
         if pipeline.job_discovery_filter is not None:
             discovery_filters.append(f"({pipeline.job_discovery_filter})")
         summary = self._new_summary(pipeline)
+        summary.job_ids.add(normalized_job_id)
         discovery_started_ns = time.perf_counter_ns()
         try:
             rows = self._query_source_with_retry(
@@ -946,6 +947,7 @@ class ETLEngine:
                 f"load {len(keys)} session(s) for job {job_id!r}"
             ),
             filter_query=query,
+            columns=list(pipeline.source_columns or ()),
             partition=job_id,
             checkout_latest=checkout_latest,
             table=source_table,
@@ -996,6 +998,33 @@ class ETLEngine:
                 if delay:
                     time.sleep(delay)
         raise AssertionError("unreachable read retry state")
+
+    def count_serving_reward_positive_rows(
+        self,
+        job_ids: Iterable[str],
+    ) -> dict[str, int]:
+        """Count current serving rows with positive reward for each selected job."""
+
+        counts: dict[str, int] = {}
+        serving_table = self.client.config.tables.serving_table
+        normalized_job_ids = sorted(
+            {value.strip() for value in job_ids if isinstance(value, str) and value.strip()}
+        )
+        for job_id in normalized_job_ids:
+            rows = self._query_source_with_retry(
+                description=f"verify serving output for job {job_id!r}",
+                filter_query=(
+                    f"job_id = '{_escape_sql(job_id)}' AND reward > 0"
+                ),
+                columns=["id"],
+                partition=job_id,
+                checkout_latest=True,
+                table=serving_table,
+                exclude_none=False,
+                deserialize_json=False,
+            )
+            counts[job_id] = len(rows)
+        return counts
 
     def _table_names(self, pipeline: PipelineDefinition) -> tuple[str, str]:
         source = self.client.config.tables.landing_table
