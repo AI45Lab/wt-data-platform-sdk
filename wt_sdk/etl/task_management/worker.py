@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 from uuid import uuid4
 
 from .models import ETLTask, TaskStatus
@@ -49,6 +49,8 @@ class ETLTaskWorker:
         *,
         profile: str,
         report_root: str = "etl_reports/tasks",
+        job_ids: Optional[Iterable[str]] = None,
+        exclude_job_ids: Optional[Iterable[str]] = None,
         process_runner: Optional[
             Callable[[str, str, str, Path], PipelineExecution]
         ] = None,
@@ -61,6 +63,8 @@ class ETLTaskWorker:
         self.task_store = task_store
         self.profile = normalized_profile
         self.report_root = Path(report_root).expanduser()
+        self.job_ids = _normalize_job_ids(job_ids)
+        self.exclude_job_ids = _normalize_job_ids(exclude_job_ids)
         self.process_runner = process_runner or run_pipeline_process
         self.stop_requested = False
 
@@ -74,11 +78,20 @@ class ETLTaskWorker:
 
         completed = []
         while not self.stop_requested:
-            queued = self.task_store.list(status=TaskStatus.ENQUEUED)
+            queued = [
+                task
+                for task in self.task_store.list(status=TaskStatus.ENQUEUED)
+                if self._job_in_scope(task.job_id)
+            ]
             if not queued:
                 break
             completed.append(self.run_job(queued[0]))
         return completed
+
+    def _job_in_scope(self, job_id: str) -> bool:
+        if self.job_ids and job_id not in self.job_ids:
+            return False
+        return job_id not in self.exclude_job_ids
 
     def run_job(self, queued_task: ETLTask) -> ETLTask:
         if queued_task.status is not TaskStatus.ENQUEUED:
@@ -344,4 +357,12 @@ def _report_error(report: dict) -> Optional[str]:
     return (
         f"{first.get('error_type', 'ETLFailure')}: "
         f"{first.get('message', 'pipeline failed')}"
+    )
+
+
+def _normalize_job_ids(values: Optional[Iterable[str]]) -> frozenset[str]:
+    return frozenset(
+        value.strip()
+        for value in values or ()
+        if isinstance(value, str) and value.strip()
     )

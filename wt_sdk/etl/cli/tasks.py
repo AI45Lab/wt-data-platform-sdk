@@ -64,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--confirm-create", action="store_true")
 
     discover = subparsers.add_parser("discover", help="Scan env once and enqueue ready jobs")
+    _add_job_scope_args(discover)
     discover.set_defaults(once=True)
 
     submit = subparsers.add_parser("submit", help="Validate one job and enqueue it")
@@ -94,9 +95,22 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--execute", action="store_true")
     bootstrap.add_argument("--confirm-execute", action="store_true")
     bootstrap.add_argument("--baseline-from-serving", action="store_true")
+    bootstrap.add_argument(
+        "--job-id",
+        action="append",
+        default=[],
+        help="Restrict bootstrap discovery and serving baseline to this job (repeatable).",
+    )
+    bootstrap.add_argument(
+        "--exclude-job-id",
+        action="append",
+        default=[],
+        help="Exclude this job from bootstrap discovery and serving baseline (repeatable).",
+    )
     bootstrap.add_argument("--enqueue-job-id", action="append", default=[])
 
     worker = subparsers.add_parser("worker", help="Run the serial task worker")
+    _add_job_scope_args(worker)
     worker.add_argument(
         "--poll-seconds",
         "--scan-interval-seconds",
@@ -152,6 +166,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     env_manager,
                     store,
                     batch_size=args.env_batch_size,
+                    job_ids=args.job_id,
+                    exclude_job_ids=args.exclude_job_id,
                 )
             print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
             return 0
@@ -234,8 +250,17 @@ def _bootstrap(args, profile: str, task_table: str) -> int:
                 env_manager,
                 gateway_client,
                 batch_size=args.env_batch_size,
+                job_ids=args.job_id,
+                exclude_job_ids=args.exclude_job_id,
             )
-    payload = {"plan": plan.to_dict(), "read_only": not args.execute}
+    payload = {
+        "plan": plan.to_dict(),
+        "scope": {
+            "job_ids": args.job_id,
+            "exclude_job_ids": args.exclude_job_id,
+        },
+        "read_only": not args.execute,
+    }
     if args.execute:
         with _open_store(args, profile, task_table) as store:
             applied = apply_bootstrap(
@@ -259,6 +284,8 @@ def _run_worker(args, profile: str, task_table: str) -> int:
                 store,
                 profile=profile,
                 report_root=args.report_root,
+                job_ids=args.job_id,
+                exclude_job_ids=args.exclude_job_id,
             )
 
             def stop_handler(signum, frame):
@@ -292,6 +319,8 @@ def _run_worker(args, profile: str, task_table: str) -> int:
                         env_manager,
                         store,
                         batch_size=args.env_batch_size,
+                        job_ids=args.job_id,
+                        exclude_job_ids=args.exclude_job_id,
                     )
                     print(
                         json.dumps(
@@ -314,6 +343,21 @@ def _task_to_dict(task) -> dict:
     payload = asdict(task)
     payload["status"] = task.status.value
     return payload
+
+
+def _add_job_scope_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--job-id",
+        action="append",
+        default=[],
+        help="Restrict discovery to this job (repeatable).",
+    )
+    parser.add_argument(
+        "--exclude-job-id",
+        action="append",
+        default=[],
+        help="Exclude this job from discovery (repeatable).",
+    )
 
 
 if __name__ == "__main__":
