@@ -299,6 +299,8 @@ def _run_worker(args, profile: str, task_table: str) -> int:
                     env_manager,
                     store,
                     batch_size=args.env_batch_size,
+                    job_ids=args.job_id,
+                    exclude_job_ids=args.exclude_job_id,
                 )
                 print(
                     json.dumps(
