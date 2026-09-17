@@ -79,6 +79,7 @@ class RunSummary:
     sink_duration_ms: float = 0.0
     warnings: list[StageWarning] = field(default_factory=list)
     failures: list[RecordFailure] = field(default_factory=list)
+    job_ids: set[str] = field(default_factory=set)
     dirty_sessions: set[SessionKey] = field(default_factory=set)
     successful_sessions: set[SessionKey] = field(default_factory=set)
 
@@ -88,6 +89,8 @@ class RunSummary:
         )
 
     def add_session(self, result: SessionResult, *, dry_run: bool) -> None:
+        if result.session_key.job_id:
+            self.job_ids.add(result.session_key.job_id)
         self.sessions_processed += 1
         self.source_rows += result.source_rows
         self.selected_rows += result.selected_rows
@@ -107,6 +110,8 @@ class RunSummary:
             self.dirty_sessions.add(result.session_key)
 
     def add_failure(self, failure: RecordFailure) -> None:
+        if failure.job_id:
+            self.job_ids.add(failure.job_id)
         self.failed_rows += 1
         self.failures.append(failure)
 
@@ -140,6 +145,7 @@ class RunSummary:
         self.sink_duration_ms += other.sink_duration_ms
         self.warnings.extend(other.warnings)
         self.failures.extend(other.failures)
+        self.job_ids.update(other.job_ids)
         self.dirty_sessions.update(other.dirty_sessions)
         self.successful_sessions.update(other.successful_sessions)
 

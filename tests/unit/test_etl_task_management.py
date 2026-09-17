@@ -5,7 +5,10 @@ import pandas as pd
 import pytest
 
 from wt_sdk.etl.cli.tasks import build_parser
-from wt_sdk.etl.task_management.discovery import discover_env_jobs
+from wt_sdk.etl.task_management.discovery import (
+    build_job_scope_query,
+    discover_env_jobs,
+)
 from wt_sdk.etl.task_management.models import (
     ETL_TASK_SCHEMA,
     ETL_TASK_SCALAR_INDEXES,
@@ -14,6 +17,7 @@ from wt_sdk.etl.task_management.models import (
     format_task_time,
 )
 from wt_sdk.etl.task_management.store import DldbTaskStore, TaskStateError
+from wt_sdk.etl.task_management.service import build_bootstrap_plan
 from wt_sdk.etl.task_management.worker import (
     ETLTaskWorker,
     PipelineExecution,
@@ -51,6 +55,10 @@ class FakeEnvSession:
             selected = query.split("job_id IN (", 1)[1].split(")", 1)[0]
             selected = {part.strip().strip("'") for part in selected.split(",")}
             rows = [row for row in rows if row["job_id"] in selected]
+        if "job_id NOT IN" in query:
+            excluded = query.split("job_id NOT IN (", 1)[1].split(")", 1)[0]
+            excluded = {part.strip().strip("'") for part in excluded.split(",")}
+            rows = [row for row in rows if row["job_id"] not in excluded]
         if "id >" in query:
             lower = int(query.split("id >", 1)[1].split()[0])
             rows = [row for row in rows if row["id"] > lower]
@@ -80,6 +88,63 @@ def test_discovery_uses_bounded_keyset_batches_and_aggregates_jobs():
     assert [job.job_id for job in result.ready_jobs] == ["job-a"]
     assert [job.total_envs for job in result.jobs] == [2, 2]
     assert any(call["limit"] == 2 for call in session.calls)
+
+
+def test_discovery_supports_include_and_exclude_job_scopes():
+    rows = [
+        {"id": 1, "job_id": "job-a", "env_id": "a1", "finished": True},
+        {"id": 2, "job_id": "job-b", "env_id": "b1", "finished": True},
+        {"id": 3, "job_id": "job-c", "env_id": "c1", "finished": True},
+    ]
+    manager = SimpleNamespace(
+        session=FakeEnvSession(rows),
+        table_name="env_config_test",
+    )
+
+    result = discover_env_jobs(
+        manager,
+        job_ids=["job-a", "job-b"],
+        exclude_job_ids=["job-b"],
+    )
+
+    assert [job.job_id for job in result.jobs] == ["job-a"]
+    assert build_job_scope_query(["job-a", "job-b"], ["job-b"]) == (
+        "job_id IN ('job-a', 'job-b') AND job_id NOT IN ('job-b')"
+    )
+
+
+def test_bootstrap_scope_filters_env_and_serving_reads():
+    rows = [
+        {"id": 1, "job_id": "job-a", "env_id": "a1", "finished": True},
+        {"id": 2, "job_id": "job-b", "env_id": "b1", "finished": True},
+    ]
+
+    class FakeGateway:
+        config = SimpleNamespace(tables=SimpleNamespace(serving_table="serving_test"))
+
+        def __init__(self):
+            self.filter_query = None
+
+        def query_data(self, *, filter_query, **kwargs):
+            self.filter_query = filter_query
+            return [{"job_id": "job-a"}, {"job_id": "job-b"}]
+
+    manager = SimpleNamespace(
+        session=FakeEnvSession(rows),
+        table_name="env_config_test",
+    )
+    gateway = FakeGateway()
+
+    plan = build_bootstrap_plan(
+        manager,
+        gateway,
+        job_ids=["job-a", "job-b"],
+        exclude_job_ids=["job-b"],
+    )
+
+    assert plan.serving_job_ids == ("job-a",)
+    assert "job_id IN ('job-a', 'job-b')" in gateway.filter_query
+    assert "job_id NOT IN ('job-b')" in gateway.filter_query
 
 
 class FakeTaskSession:
@@ -161,6 +226,19 @@ def test_task_time_text_uses_shanghai_time_and_minute_precision():
 def test_worker_default_discovery_interval_is_three_hours():
     args = build_parser().parse_args(["worker"])
     assert args.scan_interval_seconds == 10800
+    scoped = build_parser().parse_args(
+        [
+            "worker",
+            "--job-id",
+            "job-a",
+            "--job-id",
+            "job-b",
+            "--exclude-job-id",
+            "job-b",
+        ]
+    )
+    assert scoped.job_id == ["job-a", "job-b"]
+    assert scoped.exclude_job_id == ["job-b"]
 
 
 def test_task_report_dir_is_unique_and_summary_contains_pipeline_metrics(tmp_path):
@@ -316,3 +394,63 @@ def test_worker_drains_all_queued_jobs_serially(tmp_path):
         ("job-b", "landing_enrichment_pipeline"),
         ("job-b", "landing_to_serving_pipeline"),
     ]
+
+
+def test_scoped_worker_does_not_consume_out_of_scope_queue(tmp_path):
+    class FakeStore:
+        def __init__(self):
+            self.tasks = {
+                job_id: ETLTask(job_id, status=TaskStatus.ENQUEUED, created_at_ms=index)
+                for index, job_id in enumerate(("job-a", "job-outside"), start=1)
+            }
+
+        def list(self, *, status=None):
+            return [task for task in self.tasks.values() if task.status is status]
+
+        def claim(self, job_id, *, run_id, report_dir):
+            task = self.tasks[job_id].with_updates(
+                status=TaskStatus.RUNNING,
+                attempt=1,
+                last_run_id=run_id,
+                report_dir=report_dir,
+            )
+            self.tasks[job_id] = task
+            return task
+
+        def set_current_pipeline(self, task, pipeline_name):
+            return task.with_updates(current_pipeline=pipeline_name)
+
+        def mark_succeeded(self, task, *, summary_json):
+            task = task.with_updates(status=TaskStatus.SUCCEEDED, summary_json=summary_json)
+            self.tasks[task.job_id] = task
+            return task
+
+        def mark_failed(self, *args, **kwargs):
+            raise AssertionError("unexpected failure")
+
+    calls = []
+
+    def runner(pipeline, job_id, profile, report_dir):
+        calls.append((job_id, pipeline))
+        return PipelineExecution(
+            pipeline,
+            0,
+            {"pipeline_name": pipeline, "status": "SUCCEEDED"},
+            str(report_dir / f"{pipeline}.log"),
+        )
+
+    store = FakeStore()
+    worker = ETLTaskWorker(
+        store,
+        profile="test",
+        report_root=str(tmp_path),
+        job_ids=["job-a"],
+        process_runner=runner,
+    )
+    worker.drain()
+
+    assert calls == [
+        ("job-a", "landing_enrichment_pipeline"),
+        ("job-a", "landing_to_serving_pipeline"),
+    ]
+    assert store.tasks["job-outside"].status is TaskStatus.ENQUEUED

@@ -97,6 +97,11 @@ ETL 的正确运行要求以下约束始终成立：
 - discovery 只读取 `id/job_id/session_id/source_updated_at`。Landing enrichment 在发现任意
   一行变化后完整加载 session；内置 serving pipeline 按 session 分组，但直接加载其中
   `is_trainable=true` 的行，因为当前三个 serving stage 都只依赖并发布这些行。
+- discovery 之外的 session load 也使用 pipeline 的 `source_columns` 投影，不再默认读取整张
+  28 列 schema。Enrichment 当前只读取 stage/校验所需的 12 列；serving 仍需保留完整行 upsert
+  所需字段，但跳过由 pipeline 必然重建的 `chosen_trace`、`tags`、`search_text` 和由 SDK
+  自动刷新的 `serving_updated_at`。新增 pipeline 若自定义投影，必须保证 stage 输入和最终
+  serving 完整行都能由 source columns 与 stage outputs 覆盖。
 - `--job-id` 模式允许 stage 声明保守的 `job_discovery_filter`：当前 enrichment 用
   `is_session_completed=true` 发现完整 session，serving 用 `is_trainable=true`。只有 pipeline
   内每个 stage 都声明安全提示时才收窄，否则退回 job 全量 discovery；提示不是业务 selector。
@@ -155,7 +160,7 @@ incremental 模式会使用 checkpoint。
 
 | Pipeline | 模式 | 当前 stage | 当前状态 |
 | --- | --- | --- | --- |
-| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable` | 业务逻辑仍为 TODO；实现合入前只能做静态检查，不能真实执行。未来 Claude normalization stage 也接入这里，并在 trainability 前完成。 |
+| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable`、`freecot` | v4；完整 session 上计算 trainability，并在后续 stage 中补充可用的 Claude/GPT reasoning。 |
 | `landing_to_serving_pipeline` | landing → serving | `build_chosen_trace`、`derive_job_tags`、`build_search_text` | v3；可用于现有 OpenCode 轨迹，仅处理 `is_trainable is True` 的行。 |
 
 `build_chosen_trace` 将 `messages + response` 写入 `chosen_trace`；`derive_job_tags` 从
@@ -339,6 +344,9 @@ failure 处理。
 - `sessions_warned`：至少发出一条 warning 的 session 执行次数。
 - `landing_rows_updated` / `serving_rows_upserted`：成功产生的实际写入数；dry-run 时表示计划
   写入数。
+- `serving_reward_positive_rows`：正式 serving pipeline 完成后，按本次运行涉及的每个
+  `job_id` 在交付表中复核 `reward > 0` 的当前行数之和；明细在
+  `serving_reward_positive_rows_by_job_id`。dry-run 或非 serving report 为 `null`/空对象。
 
 Report 还包含 `pipeline_run_id`、`started_at`、`ended_at`、毫秒时间、`duration_ms`、`status`、
 `phase_timings_ms`（`discovery`/`load`/`transform`/`sink` 的累计 wall time）、
@@ -491,8 +499,8 @@ resulting policy through the run context. It is intentionally not a persistent
 
 同一次运行串联 landing 与 serving：
 
-> `UpdateIsTrainableStage.transform_session()` 的 TODO 实现及单测合入前，只能对 landing pipeline 使用
-> `--list-stages`/`--validate-only`，不要执行下面的真实数据命令。
+> `UpdateIsTrainableStage.transform_session()` 已接入 landing pipeline；首次运行建议先使用
+> `--dry-run` 检查实际标注范围，再执行正式写入。
 
 ```bash
 .venv-dldb-v1/bin/python -m wt_sdk.etl.cli.run \

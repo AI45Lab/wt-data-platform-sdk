@@ -5,7 +5,12 @@ engine owns pipeline semantics and checkpoints; this package only owns job-level
 orchestration state and the env-table completion trigger.
 """
 
-from .discovery import EnvDiscoveryReport, EnvJobSummary, discover_env_jobs
+from .discovery import (
+    EnvDiscoveryReport,
+    EnvJobSummary,
+    build_job_scope_query,
+    discover_env_jobs,
+)
 from .models import (
     ETL_TASK_SCHEMA,
     ETL_TASK_SCALAR_INDEXES,
@@ -38,6 +43,7 @@ __all__ = [
     "build_bootstrap_plan",
     "discover_and_enqueue",
     "discover_env_jobs",
+    "build_job_scope_query",
     "format_task_time",
     "resolve_task_table",
     "submit_if_ready",

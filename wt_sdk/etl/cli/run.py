@@ -58,7 +58,9 @@ def _summary_payload(
     pipeline_run_id: str,
     started_at_ms: int,
     ended_at_ms: int,
+    serving_reward_positive_rows_by_job_id: dict[str, int] | None = None,
 ) -> dict:
+    positive_counts = serving_reward_positive_rows_by_job_id
     payload = {
         "pipeline_run_id": pipeline_run_id,
         "pipeline_name": summary.pipeline_name,
@@ -88,6 +90,11 @@ def _summary_payload(
         "failed_rows": summary.failed_rows,
         "landing_rows_updated": summary.landing_rows_updated,
         "serving_rows_upserted": summary.serving_rows_upserted,
+        "job_ids": sorted(summary.job_ids),
+        "serving_reward_positive_rows": (
+            sum(positive_counts.values()) if positive_counts is not None else None
+        ),
+        "serving_reward_positive_rows_by_job_id": positive_counts or {},
         "warning_count": summary.warning_count,
         "warnings": [asdict(warning) for warning in summary.warnings],
         "failures": [asdict(failure) for failure in summary.failures],
@@ -113,6 +120,10 @@ def _summary_payload(
         "landing_rows_updated": summary.landing_rows_updated,
         "serving_rows_upserted": summary.serving_rows_upserted,
     }
+    if positive_counts is not None:
+        payload["audit"]["serving_reward_positive_rows"] = sum(
+            positive_counts.values()
+        )
     return payload
 
 
@@ -501,12 +512,41 @@ def main() -> int:
                 summary.merge(immediate)
             if pipeline.mode is PipelineMode.LANDING:
                 dirty_sessions.update(summary.dirty_sessions)
+            serving_reward_positive_rows_by_job_id = None
+            if (
+                pipeline.mode is PipelineMode.SERVING
+                and not args.dry_run
+                and not unexpected_failure
+                and summary.job_ids
+            ):
+                try:
+                    serving_reward_positive_rows_by_job_id = (
+                        engine.count_serving_reward_positive_rows(summary.job_ids)
+                    )
+                except Exception as exc:
+                    summary.add_failure(
+                        RecordFailure(
+                            record_id=None,
+                            job_id="",
+                            session_id="",
+                            stage_name="__final_report__",
+                            error_type=type(exc).__name__,
+                            message=(
+                                "failed to count serving rows with reward > 0: "
+                                f"{exc}"
+                            ),
+                        )
+                    )
+                    exit_code = 1
             ended_at_ms = sdk_time.now_ms()
             payload = _summary_payload(
                 summary,
                 pipeline_run_id=pipeline_run_id,
                 started_at_ms=started_at_ms,
                 ended_at_ms=ended_at_ms,
+                serving_reward_positive_rows_by_job_id=(
+                    serving_reward_positive_rows_by_job_id
+                ),
             )
             _write_report(payload, args.report_dir)
             outputs.append(payload)

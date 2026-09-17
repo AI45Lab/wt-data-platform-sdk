@@ -70,6 +70,7 @@ def discover_env_jobs(
     *,
     batch_size: int = 1000,
     job_ids: Optional[Iterable[str]] = None,
+    exclude_job_ids: Optional[Iterable[str]] = None,
 ) -> EnvDiscoveryReport:
     """Scan a fixed env ``id`` window and aggregate readiness by ``job_id``.
 
@@ -79,8 +80,7 @@ def discover_env_jobs(
 
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    selected_job_ids = _normalize_job_ids(job_ids)
-    selection_query = _job_selection_query(selected_job_ids)
+    selection_query = build_job_scope_query(job_ids, exclude_job_ids)
     max_query = _combine_queries("id IS NOT NULL", selection_query)
     latest = manager.session.filter(
         manager.table_name,
@@ -173,11 +173,22 @@ def _normalize_job_ids(values: Optional[Iterable[str]]) -> tuple[str, ...]:
     )
 
 
-def _job_selection_query(job_ids: tuple[str, ...]) -> str:
-    if not job_ids:
-        return ""
-    literals = ", ".join(f"'{_escape_sql(job_id)}'" for job_id in job_ids)
-    return f"job_id IN ({literals})"
+def build_job_scope_query(
+    job_ids: Optional[Iterable[str]] = None,
+    exclude_job_ids: Optional[Iterable[str]] = None,
+) -> str:
+    """Build an exact include/exclude scope for job-level control-plane reads."""
+
+    selected = _normalize_job_ids(job_ids)
+    excluded = _normalize_job_ids(exclude_job_ids)
+    clauses = []
+    if selected:
+        literals = ", ".join(f"'{_escape_sql(job_id)}'" for job_id in selected)
+        clauses.append(f"job_id IN ({literals})")
+    if excluded:
+        literals = ", ".join(f"'{_escape_sql(job_id)}'" for job_id in excluded)
+        clauses.append(f"job_id NOT IN ({literals})")
+    return " AND ".join(clauses)
 
 
 def _combine_queries(*queries: str) -> str:

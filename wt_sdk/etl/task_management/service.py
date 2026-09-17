@@ -9,7 +9,11 @@ import wt_sdk._time as sdk_time
 from wt_sdk import WTGatewayClient
 from wt_sdk.env_config_client import EnvConfigManager
 
-from .discovery import EnvDiscoveryReport, discover_env_jobs
+from .discovery import (
+    EnvDiscoveryReport,
+    build_job_scope_query,
+    discover_env_jobs,
+)
 from .models import ETLTask
 from .store import DldbTaskStore
 
@@ -59,12 +63,14 @@ def discover_and_enqueue(
     *,
     batch_size: int = 1000,
     job_ids: Optional[Iterable[str]] = None,
+    exclude_job_ids: Optional[Iterable[str]] = None,
     now_ms: Optional[int] = None,
 ) -> EnqueueResult:
     discovery = discover_env_jobs(
         env_manager,
         batch_size=batch_size,
         job_ids=job_ids,
+        exclude_job_ids=exclude_job_ids,
     )
     timestamp = now_ms if now_ms is not None else sdk_time.now_ms()
     created = []
@@ -105,10 +111,21 @@ def build_bootstrap_plan(
     gateway_client: WTGatewayClient,
     *,
     batch_size: int = 1000,
+    job_ids: Optional[Iterable[str]] = None,
+    exclude_job_ids: Optional[Iterable[str]] = None,
 ) -> BootstrapPlan:
-    discovery = discover_env_jobs(env_manager, batch_size=batch_size)
+    discovery = discover_env_jobs(
+        env_manager,
+        batch_size=batch_size,
+        job_ids=job_ids,
+        exclude_job_ids=exclude_job_ids,
+    )
+    serving_scope = build_job_scope_query(job_ids, exclude_job_ids)
+    serving_query = "job_id IS NOT NULL"
+    if serving_scope:
+        serving_query = f"({serving_query}) AND ({serving_scope})"
     serving_rows = gateway_client.query_data(
-        filter_query="job_id IS NOT NULL",
+        filter_query=serving_query,
         limit=None,
         columns=["job_id"],
         table=gateway_client.config.tables.serving_table,
@@ -121,6 +138,11 @@ def build_bootstrap_plan(
         for row in serving_rows
         if str(row.get("job_id") or "").strip()
     }
+    selected_job_ids = _normalize_job_ids(job_ids)
+    excluded_job_ids = _normalize_job_ids(exclude_job_ids)
+    if selected_job_ids:
+        serving_job_ids.intersection_update(selected_job_ids)
+    serving_job_ids.difference_update(excluded_job_ids)
     ready_job_ids = {job.job_id for job in discovery.ready_jobs}
     known_env_job_ids = {job.job_id for job in discovery.jobs}
     invalid_job_ids = {
@@ -169,4 +191,12 @@ def apply_bootstrap(
         "baselined_job_ids": baselined,
         "enqueued_job_ids": enqueued,
         "existing_job_ids": sorted(set(existing)),
+    }
+
+
+def _normalize_job_ids(values: Optional[Iterable[str]]) -> set[str]:
+    return {
+        value.strip()
+        for value in values or ()
+        if isinstance(value, str) and value.strip()
     }

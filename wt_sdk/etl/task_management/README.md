@@ -39,6 +39,36 @@ on `id`, `job_id`, `created_at_ms`, and `updated_at_ms`, plus a BITMAP index on
 `status`. They are created or repaired by the explicit `init` command; they are
 not represented inside the Arrow schema itself.
 
+Bootstrap can be scoped without changing any business table:
+
+```bash
+python -m wt_sdk.etl.cli.tasks \
+  --profile test \
+  bootstrap \
+  --job-id 'etl-auto-it-20260915-a' \
+  --job-id 'etl-auto-it-20260915-b' \
+  --exclude-job-id 'etl-auto-it-20260915-b'
+```
+
+`--job-id` and `--exclude-job-id` are repeatable and apply to both env
+discovery and the serving baseline query. The effective scope is the included
+set minus the excluded set. With neither option, bootstrap retains its
+full-table behavior.
+
+The same options are available on `discover` and `worker`. For `worker`, the
+scope applies both to new discovery and to queued-task consumption, so an
+isolated worker cannot accidentally execute an out-of-scope `ENQUEUED` task.
+This is useful for a noisy shared test environment; production normally omits
+the options and scans all jobs:
+
+```bash
+python -m wt_sdk.etl.cli.tasks \
+  --profile test \
+  worker --once \
+  --job-id 'etl-auto-it-20260915-a' \
+  --job-id 'etl-auto-it-20260915-b'
+```
+
 Start the long-running scheduler with:
 
 ```bash
