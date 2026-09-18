@@ -160,7 +160,7 @@ incremental 模式会使用 checkpoint。
 
 | Pipeline | 模式 | 当前 stage | 当前状态 |
 | --- | --- | --- | --- |
-| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable`、`freecot` | v4；完整 session 上计算 trainability，并在后续 stage 中补充可用的 Claude/GPT reasoning。 |
+| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable`、`freecot` | v5；完整 session 上计算 trainability，并在后续 stage 中补充可用的 Claude/GPT reasoning。 |
 | `landing_to_serving_pipeline` | landing → serving | `build_chosen_trace`、`derive_job_tags`、`build_search_text` | v3；可用于现有 OpenCode 轨迹，仅处理 `is_trainable is True` 的行。 |
 
 `build_chosen_trace` 将 `messages + response` 写入 `chosen_trace`；`derive_job_tags` 从

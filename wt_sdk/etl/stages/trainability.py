@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,6 +17,15 @@ MIN_SIDE_CHAIN_LENGTH = 20
 
 _STREAM_FLAG_KEYS = ("stream", "streaming")
 _FINISH_REASON_KEYS = ("finish_reason", "finishReason")
+_HARNESS_CURRENT_DATE_PATTERN = re.compile(
+    r"(?P<prefix><system-reminder>\s*"
+    r"As you answer the user[’']s questions, you can use the following context:\s*"
+    r"#\s*currentDate\s*Today[’']s date is\s*)"
+    r"\d{4}-\d{2}-\d{2}"
+    r"(?P<suffix>\s*\.)",
+    flags=re.IGNORECASE,
+)
+_NORMALIZED_CURRENT_DATE = "<normalized-current-date>"
 
 
 class UpdateIsTrainableStage(ETLStage):
@@ -27,7 +37,9 @@ class UpdateIsTrainableStage(ETLStage):
     ``step_id`` is trainable. Otherwise, the remaining rows are grouped into
     append-only chains with canonical message-prefix matching: equivalent user
     text represented as either a string or one text content block is normalized
-    before matching. Each chain tail contains the complete messages of one
+    before matching, and the date in Claude Code's harness-managed
+    ``currentDate`` reminder is replaced by a stable placeholder. Each chain
+    tail contains the complete messages of one
     structurally separated trajectory. A later strict prefix of an active chain
     tail is treated as a retry reset, so the abandoned longer row is not a
     trainable tail. Identical message snapshots are separate occurrences rather
@@ -35,12 +47,13 @@ class UpdateIsTrainableStage(ETLStage):
     ``MIN_SIDE_CHAIN_LENGTH`` records are treated as short side branches or
     subagents and are not trainable; a single-chain session is never a side
     chain. Filtering error rows does not prevent the remaining rows from being
-    processed. This stage copies the completion record's non-null ``reward`` to
-    every selected row and assigns no semantic meaning to message contents.
+    processed. Apart from masking the harness-managed date, this stage assigns
+    no semantic meaning to message contents and copies the completion record's
+    non-null ``reward`` to every selected row.
     """
 
     name = "update_is_trainable"
-    version = "7"
+    version = "8"
     required_fields = (
         "id",
         "step_id",
@@ -506,16 +519,46 @@ def _fingerprint_messages(messages: Sequence[Any]) -> list[str]:
 
 
 def _normalize_message(message: Any) -> Any:
-    """Canonicalize equivalent user text shapes without mutating the input."""
+    """Canonicalize matching-only message shapes and volatile harness dates."""
 
-    if not isinstance(message, Mapping) or message.get("role") != "user":
+    if not isinstance(message, Mapping) or message.get("role") not in ("user", "system"):
         return message
-    content = message.get("content")
-    if not isinstance(content, str):
-        return message
+
     normalized = dict(message)
-    normalized["content"] = [{"type": "text", "text": content}]
+    content = normalized.get("content")
+    if isinstance(content, str):
+        if message.get("role") == "user":
+            normalized["content"] = [
+                {"type": "text", "text": _normalize_current_date(content)}
+            ]
+        else:
+            normalized["content"] = _normalize_current_date(content)
+    elif isinstance(content, list):
+        normalized["content"] = [_normalize_content_item(item) for item in content]
     return normalized
+
+
+def _normalize_content_item(item: Any) -> Any:
+    if not isinstance(item, Mapping) or item.get("type") != "text":
+        return item
+    text = item.get("text")
+    if not isinstance(text, str):
+        return item
+    normalized_item = dict(item)
+    normalized_item["text"] = _normalize_current_date(text)
+    return normalized_item
+
+
+def _normalize_current_date(text: str) -> str:
+    """Mask the only volatile value in Claude Code's currentDate reminder."""
+
+    return _HARNESS_CURRENT_DATE_PATTERN.sub(
+        lambda match: (
+            f"{match.group('prefix')}{_NORMALIZED_CURRENT_DATE}"
+            f"{match.group('suffix')}"
+        ),
+        text,
+    )
 
 
 def _record_id(record: Record) -> str:

@@ -41,6 +41,19 @@ REASONS = {
     "not_max_eligible_step": "降级模式未选中此记录。",
 }
 
+_SUMMARY_SOURCE_COLUMNS = (
+    "id",
+    "job_id",
+    "session_id",
+    "step_id",
+    "messages",
+    "is_session_completed",
+    "is_trainable",
+    "meta_json",
+    "reward",
+    "response",
+)
+
 
 def process_session(
     rows: list[dict[str, Any]],
@@ -48,6 +61,7 @@ def process_session(
     session_id: str,
     *,
     trainability_policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL,
+    include_rows: bool = True,
 ) -> dict[str, Any]:
     """Apply the real stage and attach explanations without modifying input rows."""
     stage = UpdateIsTrainableStage()
@@ -114,9 +128,22 @@ def process_session(
         "row_count": len(session),
         "eligible_row_count": len(eligible),
         "trainable_step_ids": [row["step_id"] for row in exported_rows if row["is_trainable"]],
-        "is_trainable_true_count": sum(row["is_trainable"] for row in exported_rows if row["is_trainable"] is True),
+        "stored_trainable_step_ids": [
+            row["step_id"] for row in session if row.get("is_trainable") is True
+        ],
+        "is_trainable_true_count": sum(
+            row["is_trainable"]
+            for row in exported_rows
+            if row["is_trainable"] is True
+        ),
         "warnings": [asdict(warning) for warning in context.emitted_warnings],
-        "rows": exported_rows,
+        "reason_counts": dict(
+            Counter(
+                row["trainability_diagnostics"]["reason_code"]
+                for row in exported_rows
+            )
+        ),
+        **({"rows": exported_rows} if include_rows else {}),
     }
 
 
@@ -128,12 +155,16 @@ def sample_job(
     table: str,
     seed: int = 0,
     trainability_policy: TrainabilityPolicy = TrainabilityPolicy.NORMAL,
+    session_offset: int | None = None,
+    include_rows: bool = True,
 ) -> dict[str, Any]:
     """Sample completed IDs, then query every row of each selected session."""
     if not job_id.strip() or not table.strip():
         raise ValueError("job_id and table must not be empty")
     if session_count <= 0:
         raise ValueError("session_count must be positive")
+    if session_offset is not None and session_offset < 0:
+        raise ValueError("session_offset must not be negative")
     effective_trainability_policy = normalize_trainability_policy(
         trainability_policy
     )
@@ -154,11 +185,22 @@ def sample_job(
         row["session_id"] for row in completed_rows
         if isinstance(row.get("session_id"), str) and row["session_id"].strip()
     })
-    if len(candidates) < session_count:
+    if session_offset is None and len(candidates) < session_count:
         raise ValueError(
             f"requested {session_count} completed sessions, found only {len(candidates)}"
         )
-    selected = random.Random(seed).sample(candidates, session_count)
+    if session_offset is None:
+        selected = random.Random(seed).sample(candidates, session_count)
+        selection_method = "seeded_random_without_replacement_from_sorted_completed_ids"
+    else:
+        selection_end = session_offset + session_count
+        if selection_end > len(candidates):
+            raise ValueError(
+                f"requested completed sessions [{session_offset}, {selection_end}), "
+                f"found only {len(candidates)} candidates"
+            )
+        selected = candidates[session_offset:selection_end]
+        selection_method = "sorted_completed_ids_offset_slice"
     sessions = []
     for index, session_id in enumerate(selected, start=1):
         rows: list[dict[str, Any]] = []
@@ -166,6 +208,9 @@ def sample_job(
             session_filter = "session_id = '" + session_id.replace("'", "''") + "'"
             rows = client.query_data(
                 filter_query=job_filter + " AND " + session_filter,
+                # Full-row mode preserves the existing diagnostic export. Summary
+                # mode reads only selection fields and compact summary fields.
+                columns=None if include_rows else list(_SUMMARY_SOURCE_COLUMNS),
                 **query_options,
             )
             result = process_session(
@@ -173,6 +218,7 @@ def sample_job(
                 job_id,
                 session_id,
                 trainability_policy=effective_trainability_policy,
+                include_rows=include_rows,
             )
         except Exception as exc:
             result = {
@@ -182,11 +228,16 @@ def sample_job(
                 "error": str(exc),
                 "record_id": getattr(exc, "record_id", None),
                 "row_count": len(rows),
-                "rows": rows,
+                **({"rows": rows} if include_rows else {}),
             }
+        if not include_rows:
+            # Release the current session before the next query starts. This
+            # keeps summary-mode peak memory close to one session rather than
+            # retaining the previous session while its successor is loaded.
+            rows = []
         if result["status"] == "failed":
             print(
-                f"DEBUG session={session_id} rows={len(rows)} "
+                f"DEBUG session={session_id} rows={result['row_count']} "
                 f"error_type={result['error_type']} error={result['error']!r} "
                 f"record_id={result['record_id']}",
                 flush=True,
@@ -202,10 +253,9 @@ def sample_job(
         print(f"[{index}/{session_count}] {session_id}: {result['status']}", flush=True)
 
     processed = [session for session in sessions if session["status"] == "processed"]
-    reason_counts = Counter(
-        row["trainability_diagnostics"]["reason_code"]
-        for session in processed for row in session["rows"]
-    )
+    reason_counts: Counter[str] = Counter()
+    for session in processed:
+        reason_counts.update(session.get("reason_counts", {}))
     return {
         "job_id": job_id,
         "source_table": table,
@@ -215,8 +265,9 @@ def sample_job(
             effective_trainability_policy is TrainabilityPolicy.DOWNGRADE
         ),
         "sampling": {
-            "method": "seeded_random_without_replacement_from_sorted_completed_ids",
+            "method": selection_method,
             "seed": seed,
+            "session_offset": session_offset,
             "available_sessions": len(candidates),
             "requested_sessions": session_count,
             "session_ids": selected,
@@ -229,11 +280,12 @@ def sample_job(
             len(session["trainable_step_ids"]) > 1 for session in processed
         ),
         "reason_counts": dict(reason_counts),
+        "include_rows": include_rows,
         "diagnostic_scope": (
             "仅根据状态码、规范化消息相等性、严格前缀关系和链位置解释。"
             "relation=strict_prefix_reset 表示前缀回退；不证明发生了业务重试。"
-            "system_messages_equal=false 仅表示内容变化，不证明跨日、记忆压缩或 subagent。"
-            "failed session 的 rows 是原始数据，未应用 stage 标注。"
+            "system_messages_equal=false 仅表示规范化 currentDate 后内容仍变化，不证明跨日、记忆压缩或 subagent。"
+            "include_rows=true 时 failed session 的 rows 是原始数据，未应用 stage 标注。"
         ),
         "sessions": sessions,
     }
@@ -252,6 +304,16 @@ def main() -> int:
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--session-count", type=int, required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--session-offset",
+        type=int,
+        help="read a deterministic sorted-candidates slice instead of a random sample",
+    )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="omit per-row payloads from the in-memory and exported report",
+    )
     parser.add_argument("--table", help="defaults to the SDK configured landing table")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -272,6 +334,8 @@ def main() -> int:
             seed=args.seed,
             table=args.table or client.config.tables.landing_table,
             trainability_policy=trainability_policy,
+            session_offset=args.session_offset,
+            include_rows=not args.summary_only,
         )
     write_report(report, args.output)
     print(f"Exported {report['sessions_processed']} sessions to {args.output.resolve()}; "
