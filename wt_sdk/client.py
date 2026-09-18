@@ -1636,7 +1636,11 @@ class WTGatewayClient:
             logger.info(f"No {table_role} index partitions to maintain")
             return summary
 
-        for partition in target_partitions:
+        for position, partition in enumerate(target_partitions, start=1):
+            logger.info(
+                f"Maintaining {table_role} partition {partition} "
+                f"({position}/{len(target_partitions)})"
+            )
             try:
                 existing_indexes = {
                     index["name"] if isinstance(index, dict) else index.name
