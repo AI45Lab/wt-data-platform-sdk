@@ -99,6 +99,28 @@ def main() -> int:
         action="store_true",
         help="Only create missing indexes; do not optimize buckets.",
     )
+    parser.add_argument(
+        "--dldb-model",
+        choices=["metrics", "debug"],
+        default=None,
+        help=(
+            "dldb instrumentation model for this run. 'debug' emits dldb_debug "
+            "started/heartbeat/completed progress logs for list_indices / "
+            "create_scalar_index / compact_files / optimize (requires dldb>=1.1.4). "
+            "Default: WT_SDK_DLDB_MODEL env var if set, otherwise none."
+        ),
+    )
+    parser.add_argument(
+        "--dldb-heartbeat-interval-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "dldb debug heartbeat interval in seconds. 0 disables heartbeats "
+            "(started/completed logs are still emitted). Only used with "
+            "--dldb-model debug; default is dldb's 15s."
+        ),
+    )
 
     args = parser.parse_args()
     if args.all_partitions and args.partition:
@@ -114,7 +136,12 @@ def main() -> int:
     config = GatewayConfig(
         s3=default_config.s3,
         tables=tables,
-        dldb_model=default_config.dldb_model,
+        dldb_model=args.dldb_model or default_config.dldb_model,
+        dldb_heartbeat_interval_s=(
+            args.dldb_heartbeat_interval_s
+            if args.dldb_heartbeat_interval_s is not None
+            else default_config.dldb_heartbeat_interval_s
+        ),
         enable_dldb_timing_logs=default_config.enable_dldb_timing_logs,
         log_dldb_metrics_summary_on_close=default_config.log_dldb_metrics_summary_on_close,
         dldb_metrics_log_path=default_config.dldb_metrics_log_path,

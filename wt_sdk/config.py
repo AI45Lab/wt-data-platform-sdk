@@ -121,6 +121,7 @@ class GatewayConfig:
     use_memory_queue: bool = False
     flush_every: int = 1000
     dldb_model: Optional[str] = None
+    dldb_heartbeat_interval_s: Optional[float] = None
     enable_dldb_timing_logs: bool = False
     log_dldb_metrics_summary_on_close: bool = True
     dldb_metrics_log_path: Optional[str] = None
@@ -141,12 +142,17 @@ class GatewayConfig:
         return resolve_dldb_metrics_log_path(self.dldb_metrics_log_path)
 
     def to_dldb_config(self) -> Dict[str, Any]:
-        return {
+        config = {
             "use_memory_queue": self.use_memory_queue,
             "flush_every": self.flush_every,
             "model": self.resolved_dldb_model(),
             "storage_options": self.s3.to_storage_options(),
         }
+        # Only forwarded when explicitly set; dldb<1.1.4 rejects this kwarg and
+        # dldb>=1.1.4 treats "unset" as the model-specific default (15s for debug).
+        if self.dldb_heartbeat_interval_s is not None:
+            config["heartbeat_interval_s"] = self.dldb_heartbeat_interval_s
+        return config
 
 
 # Compatibility snapshot for existing imports. New WTGatewayClient instances create
