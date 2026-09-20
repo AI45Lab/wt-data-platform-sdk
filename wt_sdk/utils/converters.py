@@ -207,6 +207,50 @@ def serving_batch_to_dataframe(batch: ServingRecordBatch) -> pd.DataFrame:
     return df
 
 
+def _frame_record_dicts(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Extract one dict per row using columnar extraction.
+
+    ``DataFrame.iterrows`` materializes a Series per row; converting each
+    column once and transposing avoids that per-row overhead on read paths.
+    """
+    columns = {name: df[name].tolist() for name in df.columns}
+    names = list(columns)
+    return [
+        dict(zip(names, row_values))
+        for row_values in zip(*(columns[name] for name in names))
+    ]
+
+
+def _normalize_record_dict(row_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize one extracted row dict, dropping nulls and boxing scalars."""
+    normalized = {}
+    for col, val in row_dict.items():
+        # Check if value is null/NaN
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            # None or NaN scalar - skip
+            continue
+        elif hasattr(val, 'as_py'):
+            # PyArrow scalar - convert
+            try:
+                converted = val.as_py()
+                if converted is not None:
+                    normalized[col] = converted
+            except (ValueError, AttributeError):
+                pass
+        elif isinstance(val, (list, tuple)):
+            # List/array value - include as-is
+            normalized[col] = val
+        elif hasattr(val, 'tolist'):
+            # PyArrow/NumPy array - convert to Python list
+            converted = val.tolist()
+            if converted is not None:
+                normalized[col] = converted
+        else:
+            # Regular scalar value
+            normalized[col] = val
+    return normalized
+
+
 def dataframe_to_landing_records(df: pd.DataFrame) -> List[LandingRecord]:
     """
     Convert a DataFrame to a list of LandingRecords.
@@ -214,39 +258,12 @@ def dataframe_to_landing_records(df: pd.DataFrame) -> List[LandingRecord]:
     Uses model_construct to bypass validation for Arrow-returned data.
     JSON extension columns remain JSON strings and are not parsed or validated.
     """
-    records = []
-    for _, row in df.iterrows():
-        # Convert row to dict, handling NaN/null values
-        row_dict = {}
-        for col, val in row.items():
-            # Check if value is null/NaN
-            if val is None or (isinstance(val, float) and pd.isna(val)):
-                # None or NaN scalar - skip
-                continue
-            elif hasattr(val, 'as_py'):
-                # PyArrow scalar - convert
-                try:
-                    converted = val.as_py()
-                    if converted is not None:
-                        row_dict[col] = converted
-                except (ValueError, AttributeError):
-                    pass
-            elif isinstance(val, (list, tuple)):
-                # List/array value - include as-is
-                row_dict[col] = val
-            elif hasattr(val, 'tolist'):
-                # PyArrow/NumPy array - convert to Python list
-                converted = val.tolist()
-                if converted is not None:
-                    row_dict[col] = converted
-            else:
-                # Regular scalar value
-                row_dict[col] = val
-
-        # Use model_construct to bypass validation
-        # Arrow data is already validated by schema, so we don't need Pydantic validation
-        records.append(LandingRecord.model_construct(**row_dict))
-    return records
+    # Use model_construct to bypass validation
+    # Arrow data is already validated by schema, so we don't need Pydantic validation
+    return [
+        LandingRecord.model_construct(**_normalize_record_dict(row_dict))
+        for row_dict in _frame_record_dicts(df)
+    ]
 
 
 def dataframe_to_serving_records(df: pd.DataFrame) -> List[ServingRecord]:
@@ -256,39 +273,12 @@ def dataframe_to_serving_records(df: pd.DataFrame) -> List[ServingRecord]:
     Uses model_construct to bypass validation for Arrow-returned data.
     JSON extension columns remain JSON strings and are not parsed or validated.
     """
-    records = []
-    for _, row in df.iterrows():
-        # Convert row to dict, handling NaN/null values
-        row_dict = {}
-        for col, val in row.items():
-            # Check if value is null/NaN
-            if val is None or (isinstance(val, float) and pd.isna(val)):
-                # None or NaN scalar - skip
-                continue
-            elif hasattr(val, 'as_py'):
-                # PyArrow scalar - convert
-                try:
-                    converted = val.as_py()
-                    if converted is not None:
-                        row_dict[col] = converted
-                except (ValueError, AttributeError):
-                    pass
-            elif isinstance(val, (list, tuple)):
-                # List/array value - include as-is
-                row_dict[col] = val
-            elif hasattr(val, 'tolist'):
-                # PyArrow/NumPy array - convert to Python list
-                converted = val.tolist()
-                if converted is not None:
-                    row_dict[col] = converted
-            else:
-                # Regular scalar value
-                row_dict[col] = val
-
-        # Use model_construct to bypass validation
-        # Arrow data is already validated by schema, so we don't need Pydantic validation
-        records.append(ServingRecord.model_construct(**row_dict))
-    return records
+    # Use model_construct to bypass validation
+    # Arrow data is already validated by schema, so we don't need Pydantic validation
+    return [
+        ServingRecord.model_construct(**_normalize_record_dict(row_dict))
+        for row_dict in _frame_record_dicts(df)
+    ]
 
 
 def dict_to_pyarrow_schema(
