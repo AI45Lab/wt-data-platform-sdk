@@ -101,13 +101,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--dldb-model",
-        choices=["metrics", "debug"],
-        default=None,
+        choices=["none", "metrics", "debug"],
+        default="debug",
         help=(
             "dldb instrumentation model for this run. 'debug' emits dldb_debug "
             "started/heartbeat/completed progress logs for list_indices / "
             "create_scalar_index / compact_files / optimize (requires dldb>=1.1.4). "
-            "Default: WT_SDK_DLDB_MODEL env var if set, otherwise none."
+            "Defaults to 'debug' so manual runs always show per-step progress; "
+            "use 'none' to silence. WT_SDK_DLDB_MODEL env var still overrides."
         ),
     )
     parser.add_argument(
@@ -136,7 +137,7 @@ def main() -> int:
     config = GatewayConfig(
         s3=default_config.s3,
         tables=tables,
-        dldb_model=args.dldb_model or default_config.dldb_model,
+        dldb_model=None if args.dldb_model == "none" else args.dldb_model,
         dldb_heartbeat_interval_s=(
             args.dldb_heartbeat_interval_s
             if args.dldb_heartbeat_interval_s is not None
