@@ -162,13 +162,21 @@ class FakeSession:
                     record.update(values)
         self._set_last_call("update", len(values))
 
-    def upsert(self, table_name: str, columns: List[str], datas: pd.DataFrame, partition=None):
+    def upsert(
+        self,
+        table_name: str,
+        columns: List[str],
+        datas: pd.DataFrame,
+        partition=None,
+        insert_missing=None,
+    ):
         records = datas.to_dict("records")
         self.last_upsert_kwargs = {
             "table_name": table_name,
             "columns": columns,
             "datas": datas,
             "partition": partition,
+            "insert_missing": insert_missing,
         }
         existing = self.rows.setdefault(table_name, [])
         for incoming in records:
@@ -181,7 +189,15 @@ class FakeSession:
                 None,
             )
             if match is None:
+                if insert_missing is False:
+                    # Partial mode: unmatched rows are ignored, not inserted.
+                    continue
                 existing.append(incoming)
+            elif insert_missing is False:
+                # Partial mode: update only the submitted non-match columns.
+                match.update(
+                    {c: incoming.get(c) for c in datas.columns if c not in columns}
+                )
             else:
                 match.clear()
                 match.update(incoming)
@@ -1260,6 +1276,119 @@ def test_landing_upsert_passes_through_custom_match_columns(monkeypatch):
     client.upsert_landing(record, match_columns=("job_id", "session_id", "id"))
 
     assert fake_session.last_upsert_kwargs["columns"] == ["job_id", "session_id", "id"]
+
+
+def test_landing_partial_upsert_submits_only_provided_columns(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    fake_session.rows["landing_test"] = [
+        {
+            "job_id": "job-123",
+            "id": "landing-1",
+            "dataset_type": "RL",
+            "dt": "1970-01-01",
+            "created_at": 100,
+            "source_updated_at": 1_700_000_000_000,
+            "messages": '{"content":"wide"}',
+            "is_terminal": False,
+            "step_reward": 0.1,
+        }
+    ]
+    record = LandingRecord(
+        dataset_type="RL",
+        id="landing-1",
+        created_at=100,
+        job_id="job-123",
+        is_terminal=True,
+        step_reward=0.5,
+    )
+    other_key_record = LandingRecord(
+        dataset_type="RL",
+        id="landing-missing",
+        created_at=100,
+        job_id="job-123",
+        is_terminal=True,
+        step_reward=0.5,
+    )
+
+    client.upsert_landing_batch([record, other_key_record], insert_missing=False)
+
+    kwargs = fake_session.last_upsert_kwargs
+    assert kwargs["insert_missing"] is False
+    # Only explicitly provided columns plus match keys / source_updated_at are
+    # submitted; created_at, dt, serving_updated_at and wide payload columns
+    # (messages) are absent.
+    assert set(kwargs["datas"].columns) == {
+        "dataset_type",
+        "id",
+        "job_id",
+        "is_terminal",
+        "step_reward",
+        "source_updated_at",
+    }
+    # FakeSession models partial semantics: matched row keeps its wide column,
+    # unmatched key is not inserted.
+    stored = fake_session.rows["landing_test"]
+    assert len(stored) == 1
+    assert stored[0]["messages"] == '{"content":"wide"}'
+    assert stored[0]["is_terminal"] is True
+    assert stored[0]["step_reward"] == 0.5
+    assert stored[0]["created_at"] == 100
+    assert stored[0]["source_updated_at"] == record.source_updated_at
+
+
+def test_landing_partial_upsert_rejects_heterogeneous_field_sets(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    records = [
+        LandingRecord(dataset_type="RL", id="landing-1", created_at=100, job_id="job-1",
+                      is_terminal=True),
+        LandingRecord(dataset_type="RL", id="landing-2", created_at=100, job_id="job-1",
+                      step_reward=0.5),
+    ]
+
+    with pytest.raises(ValueError, match="same set of fields"):
+        client.upsert_landing_batch(records, insert_missing=False)
+
+
+def test_serving_upsert_rejects_partial_mode(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+    record = ServingRecord(
+        dataset_type="RL",
+        id="serving-1",
+        created_at=100,
+        job_id="job-123",
+        response='{"content":"first"}',
+    )
+
+    with pytest.raises(ValueError, match="only supported for landing"):
+        client._upsert_batch("serving", [record], match_columns=None, insert_missing=False)
+
+
+def test_landing_full_upsert_default_keeps_legacy_contract(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    record = LandingRecord(
+        dataset_type="RL",
+        id="landing-1",
+        created_at=100,
+        source_updated_at=1_800_000_000_000,
+        job_id="job-123",
+    )
+
+    client.upsert_landing(record)
+
+    kwargs = fake_session.last_upsert_kwargs
+    # insert_missing kwarg not passed through on the default path.
+    assert kwargs["insert_missing"] is None
+    # Full-schema frame: unset optional columns are submitted as nulls.
+    assert "messages" in kwargs["datas"].columns
+    assert "created_at" in kwargs["datas"].columns
 
 
 def test_serving_upsert_uses_composite_match_key_and_refreshes_publish_time(monkeypatch):

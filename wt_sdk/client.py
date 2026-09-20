@@ -6,6 +6,7 @@ from typing import List, Optional, Union, Dict, Any, Iterator, Sequence
 from loguru import logger
 import dldb
 import pandas as pd
+import pyarrow as pa
 import wt_sdk._time as sdk_time
 from wt_sdk.config import (
     DEFAULT_LANDING_TABLE,
@@ -588,16 +589,75 @@ class WTGatewayClient:
 
         return list(source_records)
 
+    # Columns never written by a partial landing upsert: these are immutable or
+    # SDK-owned fields.  ``dt`` is derived from ``created_at`` by the model and
+    # may appear in ``model_fields_set`` even when the caller omitted it.
+    PARTIAL_LANDING_UPDATE_EXCLUDED_COLUMNS = (
+        "created_at",
+        "dt",
+        "serving_updated_at",
+    )
+
+    @staticmethod
+    def _partial_landing_update_columns(
+        records: List[Any],
+        match_columns: Sequence[str],
+        schema: Any,
+    ) -> List[str]:
+        """Resolve the update-column set for a partial landing upsert.
+
+        Used with dldb's ``insert_missing=False`` mode, where exactly the
+        columns present in the submitted frame are updated on matched rows.
+        Only columns the caller explicitly provided (``model_fields_set``)
+        may be updated, so wide payload columns are neither read nor written
+        when not supplied.  ``source_updated_at`` is always included (the
+        model initializes it to construction time) so incremental ETL
+        discovery still sees material changes made through partial upserts.
+        """
+        first = set(records[0].model_fields_set)
+        for record in records[1:]:
+            if set(record.model_fields_set) != first:
+                raise ValueError(
+                    "partial landing upsert (insert_missing=False) requires "
+                    "every record in the batch to provide the same set of "
+                    "fields; split the batch by field set"
+                )
+        schema_columns = {field.name for field in schema}
+        columns = (
+            first
+            - set(WTGatewayClient.PARTIAL_LANDING_UPDATE_EXCLUDED_COLUMNS)
+        ) & schema_columns
+        columns.update(match_columns)
+        columns.add("source_updated_at")
+        return [field.name for field in schema if field.name in columns]
+
     def _upsert_batch(
         self,
         table: str,
         records: Union[List[Any], Any],
         *,
         match_columns: Optional[Sequence[str]],
+        insert_missing: bool = True,
     ) -> None:
-        """Upsert complete rows through dldb using caller-selected match keys."""
+        """Upsert rows through dldb using caller-selected match keys.
+
+        ``insert_missing=True`` (the default) is the legacy full-row upsert:
+        matched rows are replaced entirely and unmatched rows are inserted.
+        ``insert_missing=False`` (dldb >= 1.1.5, landing only) turns the call
+        into a partial update: matched rows are updated only in the columns
+        the records explicitly provided, unmatched rows are ignored, and no
+        new HASH buckets are created.
+        """
         from wt_sdk.core.schemas import LANDING_SCHEMA, SERVING_SCHEMA
         from wt_sdk.utils import landing_batch_to_arrow, serving_batch_to_arrow
+
+        if type(insert_missing) is not bool:
+            raise TypeError("insert_missing must be a bool")
+        if not insert_missing and table != "landing":
+            raise ValueError(
+                "insert_missing=False (partial upsert) is only supported for "
+                "landing upserts; serving publication requires full rows"
+            )
 
         schema = LANDING_SCHEMA if table == "landing" else SERVING_SCHEMA
         default_match_columns = ["job_id", "id"]
@@ -618,7 +678,22 @@ class WTGatewayClient:
         if table == "landing":
             normalized_records = self._without_serving_publish_time(source_records)
             batch = LandingRecordBatch(records=normalized_records)
-            arrow_table = landing_batch_to_arrow(batch, schema)
+            if not insert_missing:
+                partial_columns = self._partial_landing_update_columns(
+                    normalized_records,
+                    columns,
+                    schema,
+                )
+                # Build the Arrow table from the reduced schema directly.  A
+                # full-schema conversion followed by ``select`` would still
+                # allocate arrays for every wide JSON/list column before
+                # handing the short frame to dldb.
+                partial_schema = pa.schema(
+                    [field for field in schema if field.name in partial_columns]
+                )
+                arrow_table = landing_batch_to_arrow(batch, partial_schema)
+            else:
+                arrow_table = landing_batch_to_arrow(batch, schema)
         else:
             normalized_records = self._with_serving_publish_time(source_records)
             batch = ServingRecordBatch(records=normalized_records)
@@ -626,10 +701,14 @@ class WTGatewayClient:
 
         dataframe = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
         info = self._get_table_info(table)
+        # Only pass the flag when opting into partial mode so the default
+        # path stays compatible with dldb versions that lack the parameter.
+        upsert_kwargs = {} if insert_missing else {"insert_missing": False}
         self.session.upsert(
             info["table_name"],
             columns=columns,
             datas=dataframe,
+            **upsert_kwargs,
         )
         self._log_dldb_timing(
             "upsert",
@@ -639,11 +718,13 @@ class WTGatewayClient:
                 "input_rows": len(arrow_table),
                 "api": f"upsert_{table}_batch",
                 "match_columns": columns,
+                "insert_missing": insert_missing,
             },
         )
         logger.info(
             f"Successfully upserted {len(arrow_table)} records to {table} table "
             f"via DLDB wrapper using match columns {columns}"
+            + ("" if insert_missing else " (partial, insert_missing=False)")
         )
 
     def _upsert_serving_batch(
@@ -826,22 +907,47 @@ class WTGatewayClient:
         record: LandingRecord,
         *,
         match_columns: Optional[Sequence[str]] = None,
+        insert_missing: bool = True,
     ) -> None:
         """Upsert one complete landing row through dldb.
 
         By default dldb matches on ``job_id`` and ``id``.  Callers may pass a
         different schema-column sequence when their key contract requires it.
+
+        With ``insert_missing=False`` (dldb >= 1.1.5) the call becomes a
+        partial update: matched rows are updated only in the columns the
+        record explicitly provided (e.g. short status/reward fields, without
+        reading or rewriting wide payload columns such as ``messages``),
+        unmatched rows are ignored instead of inserted, and no new HASH
+        buckets are created.  ``created_at``, ``dt`` and ``serving_updated_at``
+        are never written; ``source_updated_at`` is always refreshed.  All
+        records in one batch must provide the same set of fields.
         """
-        self._upsert_batch("landing", [record], match_columns=match_columns)
+        self._upsert_batch(
+            "landing",
+            [record],
+            match_columns=match_columns,
+            insert_missing=insert_missing,
+        )
 
     def upsert_landing_batch(
         self,
         records: Union[List[LandingRecord], LandingRecordBatch],
         *,
         match_columns: Optional[Sequence[str]] = None,
+        insert_missing: bool = True,
     ) -> None:
-        """Upsert complete landing rows using caller-selected match columns."""
-        self._upsert_batch("landing", records, match_columns=match_columns)
+        """Upsert complete landing rows using caller-selected match columns.
+
+        With ``insert_missing=False`` (dldb >= 1.1.5) the call becomes a
+        partial update; see :meth:`upsert_landing` for the exact semantics.
+        """
+        self._upsert_batch(
+            "landing",
+            records,
+            match_columns=match_columns,
+            insert_missing=insert_missing,
+        )
 
     def query_data(
         self,
