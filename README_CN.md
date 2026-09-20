@@ -10,7 +10,7 @@
 
 dldb 当前通过 `pyproject.toml` 中声明的公开仓库
 [DeepLink-org/Persisting](https://github.com/DeepLink-org/Persisting) 的
-`dldb-v1.1.2` tag 安装；该版本用于精确解析逻辑表，并能正确重新打开未分区的
+`dldb-v1.1.7` tag 安装；该版本用于精确解析逻辑表，并能正确重新打开未分区的
 SimpleTable。
 当前支持 Python 3.10 至 3.12。
 
@@ -328,6 +328,13 @@ ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_upda
 全局唯一，且已有 ID 不能迁移到另一个 `job_id`。保留 append/add 语义的
 `ingest_serving(_batch)` 仍可使用，也会刷新 `serving_updated_at`。
 
+对于只更新 reward、状态等窄字段、无需重写 `messages` 等宽 payload 的 landing
+记录，可以在 `upsert_landing()` 或 `upsert_landing_batch()` 中传入
+`insert_missing=False`。SDK 只会提交 `LandingRecord` 中由调用方提供的字段，另加匹配键
+和刷新的 `source_updated_at`；已存在的行只更新这些字段，不存在的 ID 会被忽略，也不会
+新建 HASH bucket。同一个 batch 中的记录必须提供相同字段集合。该模式只用于 landing；
+ETL serving 继续使用默认的完整行 upsert。
+
 仓库现已包含 ETL v1 引擎、按 HASH bucket 持久化的 checkpoint、手动 backfill 模式，
 以及内置的 chosen-trace/tags stage。贡献者必须遵守
 [`wt_sdk/etl/README_STAGE_DEVELOPMENT.md`](wt_sdk/etl/README_STAGE_DEVELOPMENT.md) 中的
@@ -403,7 +410,7 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 `deserialize_json=True` 返回 Python 值且保留 JSON 内部 null。无法解析的 JSON
 会保持为字符串，不会因展示选项让整行读取失败。
 
-在一个 `WTGatewayClient` 生命周期内，dldb 1.1.2 会根据精确的
+在一个 `WTGatewayClient` 生命周期内，dldb 1.1.7 会根据精确的
 information-schema 记录解析逻辑表，并复用逻辑表 wrapper 及已打开的物理
 bucket；SDK 不再自行构造或 pin dldb wrapper。这不会缓存查询结果，也不会改变
 `checkout_latest`。如果代码通过 `client.session` 创建、删除或替换逻辑表，应在
@@ -454,7 +461,7 @@ with WTGatewayClient() as client:
 | 方法 | 用途 |
 | --- | --- |
 | `ingest_serving(record)` / `ingest_serving_batch(records)` | append 写入 serving，并刷新 `serving_updated_at`。 |
-| `upsert_landing(record, *, match_columns=None)` / `upsert_landing_batch(records, *, match_columns=None)` | 通过 dldb upsert 完整 landing 行，默认按 `job_id` + `id` 匹配，并透传上游指定的匹配键。 |
+| `upsert_landing(record, *, match_columns=None, insert_missing=True)` / `upsert_landing_batch(records, *, match_columns=None, insert_missing=True)` | 默认通过 dldb upsert 完整 landing 行；传 `insert_missing=False` 时只 patch 已提供字段，忽略不存在的 ID；默认按 `job_id` + `id` 匹配。 |
 | `upsert_serving(record, *, match_columns=None)` / `upsert_serving_batch(records, *, match_columns=None)` | ETL 通过 dldb 匹配键发布完整记录，默认按 `job_id` + `id` 匹配；保留 `source_updated_at` 并刷新 `serving_updated_at`。 |
 | `query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |

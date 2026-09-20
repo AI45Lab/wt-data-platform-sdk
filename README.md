@@ -10,7 +10,7 @@ Python SDK for writing, querying, and managing agent trajectory data on the Wind
 
 dldb is installed from the public
 [DeepLink-org/Persisting](https://github.com/DeepLink-org/Persisting) repository
-at the `dldb-v1.1.2` tag declared in `pyproject.toml`. This version is required
+at the `dldb-v1.1.7` tag declared in `pyproject.toml`. This version is required
 for exact logical-table resolution and unpartitioned SimpleTable reopening.
 The supported Python versions are 3.10 through 3.12.
 
@@ -345,6 +345,27 @@ keep IDs globally unique and must never move an existing ID to another `job_id`.
 The append/add `ingest_serving(_batch)` methods remain available and
 also stamp `serving_updated_at`.
 
+For landing reward or status patches that do not need to rewrite wide payload
+columns, pass `insert_missing=False` to `upsert_landing()` or
+`upsert_landing_batch()`. The SDK sends only the fields supplied by the
+`LandingRecord` (plus the match columns and refreshed `source_updated_at`) to
+dldb. Existing matching rows are patched in place; missing IDs are ignored and
+new HASH buckets are not created. All records in one batch must contain the
+same set of supplied fields. This mode is landing-only. Serving ETL continues
+to use the default complete-row upsert:
+
+```python
+with WTGatewayClient() as client:
+    client.upsert_landing_batch(
+        reward_patches,
+        match_columns=("job_id", "id"),
+        insert_missing=False,
+    )
+```
+
+The default remains `insert_missing=True` for backward compatibility: an
+unmatched row is inserted and a matched row is replaced by the complete row.
+
 The repository now includes the ETL v1 engine, durable per-bucket checkpoints,
 manual backfill modes, and the built-in chosen-trace/tag stages. Contributors
 must follow the stage contract and integration guide in
@@ -428,7 +449,7 @@ strings by default; `deserialize_json=True` returns Python values while
 preserving JSON-internal nulls. Malformed JSON remains unchanged as a string so
 a presentation option cannot make an otherwise readable row fail.
 
-Within one `WTGatewayClient` lifetime, dldb 1.1.2 resolves the exact
+Within one `WTGatewayClient` lifetime, dldb 1.1.7 resolves the exact
 information-schema record and reuses its logical-table wrapper and opened
 physical bucket objects. The SDK does not reconstruct or pin dldb wrappers.
 This applies to reads, writes, index maintenance, and scripts built on the
@@ -444,7 +465,7 @@ mutates the logical catalog through `client.session` must call
 | --- | --- |
 | ingest_landing(record) | Write one LandingRecord. |
 | ingest_landing_batch(records) | Write a list of records or LandingRecordBatch. |
-| upsert_landing(record, *, match_columns=None) / upsert_landing_batch(records, *, match_columns=None) | Upsert complete landing rows through dldb; defaults to `job_id` + `id` matching and passes selected keys through to dldb. |
+| upsert_landing(record, *, match_columns=None, insert_missing=True) / upsert_landing_batch(records, *, match_columns=None, insert_missing=True) | Complete landing upsert by default; with `insert_missing=False`, patch only supplied fields on existing rows and ignore missing IDs. Defaults to `job_id` + `id` matching. |
 | query_data(filter_query, ..., table=None, exclude_none=True, deserialize_json=False) | Query landing by default, or a named table; always return `List[dict]`. |
 | update_landing(filter_query, updates, ..., touch_source_updated_at=True) | Patch matching rows and refresh `source_updated_at` by default. SDK timestamps, `id`, `created_at`, and `job_id` are protected. |
 | count_landing(partition=None) | Count rows, optionally in one raw job_id or hash bucket. |
