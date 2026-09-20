@@ -877,6 +877,13 @@ class WTGatewayClient:
 
         if count_before > 0:
             if partitions:
+                # Prune to physically existing buckets.  HASH buckets are
+                # created lazily on first write, so a filter covering a
+                # job_id whose bucket was never materialized would otherwise
+                # make dldb raise when opening that bucket.
+                existing = set(self._list_existing_partitions_for_table(info["table_name"]))
+                partitions = [p for p in partitions if p in existing]
+            if partitions:
                 for partition in partitions:
                     self.session.delete(info["table_name"], filter_query, partition=partition)
             else:

@@ -37,6 +37,36 @@ class FakeSession:
         self.optimized_partitions: List[Dict[str, Any]] = []
         self.indexes: Dict[tuple, set] = {}
         self.rows: Dict[str, List[Dict[str, Any]]] = {}
+        # Bucket ids whose physical tables exist (models lazy HASH bucket
+        # creation in dldb: buckets materialize on first write only).
+        self.existing_partitions: List[int] = []
+
+    def _get_table(self, table_name: str):
+        return self
+
+    def list_partitions(self) -> List[int]:
+        return sorted(self.existing_partitions)
+
+    @staticmethod
+    def _filter_conditions(df: pd.DataFrame, query: str) -> pd.DataFrame:
+        for condition in query.split(" AND "):
+            condition = condition.strip().strip("()")
+            if " IN (" in condition:
+                key, raw_values = condition.split(" IN ", 1)
+                values = re.findall(r"'((?:''|[^'])*)'", raw_values)
+                values = [value.replace("''", "'") for value in values]
+                df = df[df[key.strip()].astype(str).isin(values)]
+            elif " = '" in condition:
+                key, raw_value = condition.split(" = ", 1)
+                value = raw_value.strip().strip("'")
+                df = df[df[key.strip()] == value]
+            elif " > " in condition:
+                key, raw_value = condition.split(" > ", 1)
+                df = df[df[key.strip()].astype(int) > int(raw_value.strip())]
+            elif " IS NOT NULL" in condition:
+                key = condition.replace(" IS NOT NULL", "").strip()
+                df = df[df[key].notna()]
+        return df
 
     def _set_last_call(self, api: str, rows: Optional[int] = None) -> Dict[str, Any]:
         timing = {
@@ -89,23 +119,12 @@ class FakeSession:
         if not df.empty and partitions and "__partition" in df.columns:
             df = df[df["__partition"].isin(partitions)]
         if not df.empty and query:
-            for condition in query.split(" AND "):
-                condition = condition.strip().strip("()")
-                if " IN (" in condition:
-                    key, raw_values = condition.split(" IN ", 1)
-                    values = re.findall(r"'((?:''|[^'])*)'", raw_values)
-                    values = [value.replace("''", "'") for value in values]
-                    df = df[df[key.strip()].astype(str).isin(values)]
-                elif " = '" in condition:
-                    key, raw_value = condition.split(" = ", 1)
-                    value = raw_value.strip().strip("'")
-                    df = df[df[key.strip()] == value]
-                elif " > " in condition:
-                    key, raw_value = condition.split(" > ", 1)
-                    df = df[df[key.strip()].astype(int) > int(raw_value.strip())]
-                elif " IS NOT NULL" in condition:
-                    key = condition.replace(" IS NOT NULL", "").strip()
-                    df = df[df[key].notna()]
+            if " OR " in query:
+                branches = [self._filter_conditions(df, branch) for branch in query.split(" OR ")]
+                non_empty = [branch for branch in branches if not branch.empty]
+                df = pd.concat(non_empty).drop_duplicates() if non_empty else df.iloc[0:0]
+            else:
+                df = self._filter_conditions(df, query)
 
         if order_by and not df.empty:
             df = df.sort_values(order_by, ascending=ascending)
@@ -132,6 +151,10 @@ class FakeSession:
         return count
 
     def delete(self, table_name: str, where: str, partition=None):
+        if partition is not None and partition not in self.existing_partitions:
+            # Mirrors dldb open_table(): opening a never-materialized HASH
+            # bucket raises instead of being a no-op.
+            raise ValueError(f"Table {table_name} partition {partition} does not exist")
         self.last_delete_kwargs = {
             "table_name": table_name,
             "where": where,
@@ -1054,6 +1077,7 @@ def test_delete_landing_prunes_job_id_hash_partition(monkeypatch):
             "id": "rec-1",
         }
     ]
+    fake_session.existing_partitions = [stable_hash("job-123") % 128]
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
@@ -1062,6 +1086,31 @@ def test_delete_landing_prunes_job_id_hash_partition(monkeypatch):
 
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
     assert fake_session.last_delete_kwargs["partition"] == stable_hash("job-123") % 128
+
+
+def test_delete_landing_skips_never_materialized_buckets(monkeypatch):
+    """A filter covering a job_id whose bucket was never written must not raise."""
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.rows["landing_test"] = [
+        {
+            "dataset_type": "RL",
+            "job_id": "job-a",
+            "created_at": 100,
+            "id": "rec-1",
+        }
+    ]
+    fake_session.existing_partitions = [stable_hash("job-a") % 128]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+
+    # job-b's bucket was never materialized (e.g. only ever touched by a
+    # partial upsert, which does not create buckets).
+    client.delete_landing("job_id = 'job-a' OR job_id = 'job-b'")
+
+    assert fake_session.last_delete_kwargs["partition"] == stable_hash("job-a") % 128
+    assert fake_session.last_delete_kwargs["partition"] != stable_hash("job-b") % 128
 
 
 def test_update_landing_converts_job_id_partition_string_to_hash_bucket(monkeypatch):
