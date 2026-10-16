@@ -57,6 +57,7 @@ for table in "$@"; do
         --table "$table" \
         "${partition_args[@]}" \
         --dldb-model debug \
+        --cleanup-older-than-hours 24 \
         >>"$log_file" 2>&1 &
     maintain_pid=$!
 

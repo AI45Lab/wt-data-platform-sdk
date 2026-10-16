@@ -63,6 +63,7 @@ class S3Config:
     aws_access_key_id: Optional[str] = None
     aws_secret_access_key: Optional[str] = None
     aws_endpoint: Optional[str] = None
+    request_timeout: Optional[str] = None
 
     def __post_init__(self):
         self.allow_http = self.allow_http or _env("WT_SDK_S3_ALLOW_HTTP") or "true"
@@ -73,6 +74,7 @@ class S3Config:
             "AWS_ENDPOINT_URL_S3",
             "AWS_ENDPOINT_URL",
         )
+        self.request_timeout = self.request_timeout or _env("WT_SDK_S3_REQUEST_TIMEOUT")
 
     def to_storage_options(self) -> Dict[str, Any]:
         options = {
@@ -81,6 +83,12 @@ class S3Config:
             "aws_secret_access_key": self.aws_secret_access_key,
             "aws_endpoint": self.aws_endpoint,
         }
+        if self.request_timeout:
+            # lance expects a Duration with unit (e.g. "120s"); append "s" for bare numbers.
+            timeout = self.request_timeout
+            if timeout.isdigit():
+                timeout = f"{timeout}s"
+            options["timeout"] = timeout
         return {key: value for key, value in options.items() if value is not None}
 
 
