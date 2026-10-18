@@ -100,6 +100,7 @@ def maintain_env_config_indexes(
         return summary
 
     if create_missing:
+        print(f"Creating {len(missing)} missing indexes: {[f'{c}_idx' for c, _ in missing]}", flush=True)
         for column, index_type in missing:
             try:
                 session.create_scalar_index(
@@ -125,6 +126,7 @@ def maintain_env_config_indexes(
 
     if optimize:
         try:
+            print("Optimizing table (compact_files + optimize_indices + cleanup_old_versions)...", flush=True)
             if not callable(getattr(session, "optimize", None)):
                 raise RuntimeError(
                     "Installed dldb does not expose session.optimize(...)"
@@ -194,6 +196,28 @@ def main() -> int:
         action="store_true",
         help="Create missing indexes without full table optimize.",
     )
+    parser.add_argument(
+        "--dldb-model",
+        choices=["none", "metrics", "debug"],
+        default="debug",
+        help=(
+            "dldb instrumentation model for this run. 'debug' emits dldb_debug "
+            "started/heartbeat/completed progress logs for create_scalar_index / "
+            "optimize (requires dldb>=1.1.4). Defaults to 'debug' so manual runs "
+            "always show per-step progress; use 'none' to silence."
+        ),
+    )
+    parser.add_argument(
+        "--dldb-heartbeat-interval-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "dldb debug heartbeat interval in seconds. 0 disables heartbeats "
+            "(started/completed logs are still emitted). Only used with "
+            "--dldb-model debug; default is dldb's 15s."
+        ),
+    )
     args = parser.parse_args()
 
     if args.no_create_missing and args.no_optimize:
@@ -205,10 +229,14 @@ def main() -> int:
     print(f"Table: {table_name}")
     print(f"Table URI: {db_uri}/{table_name}.lance")
 
-    session = dldb.connect(
-        db_uri,
-        storage_options=S3Config().to_storage_options(),
-    )
+    connect_kwargs: dict[str, Any] = {
+        "storage_options": S3Config().to_storage_options(),
+    }
+    if args.dldb_model != "none":
+        connect_kwargs["model"] = args.dldb_model
+        if args.dldb_heartbeat_interval_s is not None:
+            connect_kwargs["heartbeat_interval_s"] = args.dldb_heartbeat_interval_s
+    session = dldb.connect(db_uri, **connect_kwargs)
     try:
         summary = maintain_env_config_indexes(
             session,
