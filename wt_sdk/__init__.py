@@ -64,7 +64,7 @@ from wt_sdk.models import (
 from wt_sdk.utils import S3Uploader
 
 
-__version__ = "0.6.4"
+__version__ = "0.7.0"
 
 __all__ = [
     # Version
