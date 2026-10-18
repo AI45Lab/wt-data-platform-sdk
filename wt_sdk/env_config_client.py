@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Dict, Any, List, Union, Optional
+from typing import Dict, Any, List, Tuple, Union, Optional
 from loguru import logger
 import dldb
 import pandas as pd
@@ -15,6 +15,11 @@ from wt_sdk.dldb_timing import (
     resolve_dldb_model,
     resolve_enable_dldb_timing_logs,
 )
+
+
+def _sql_literal(value: str) -> str:
+    """Escape a string into a single-quoted SQL literal."""
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 class EnvConfigManager:
@@ -105,7 +110,10 @@ class EnvConfigManager:
         *,
         query: str,
         limit: Optional[int] = None,
+        offset: Optional[int] = None,
         columns: Optional[List[str]] = None,
+        order_by: Optional[str] = None,
+        ascending: bool = True,
         checkout_latest: bool = True,
         extra: Optional[Dict[str, Any]] = None,
     ) -> pd.DataFrame:
@@ -114,12 +122,17 @@ class EnvConfigManager:
             self.table_name,
             query=effective_query,
             limit=limit,
+            offset=offset,
             columns=columns,
+            order_by=order_by,
+            ascending=ascending,
             checkout_latest=checkout_latest,
         )
         timing = self._extract_dldb_timing_from_df(df) or self._extract_dldb_last_call()
         log_extra = {
             "limit": limit,
+            "offset": offset,
+            "order_by": order_by,
             "checkout_latest": checkout_latest,
             "columns_count": len(columns) if columns else None,
         }
@@ -161,16 +174,36 @@ class EnvConfigManager:
         Get the next auto-increment ID. Returns the maximum existing ID + 1, or 1 if table is empty.
         """
         try:
-            # Query to get max ID
+            # Query to get max ID (id column projection only)
             df = self._filter_table(
                 query="",  # No filter
                 limit=None,
+                columns=["id"],
             )
             if len(df) > 0:
                 return int(df["id"].max() + 1)
             return 1
         except Exception:
             return 1
+
+    @staticmethod
+    def _normalize_config_record(cfg: Dict[str, Any], record_id: int) -> Dict[str, Any]:
+        """Validate one user-supplied config dict and fill defaults."""
+        if not isinstance(cfg, dict):
+            raise ValueError(f"Config must be a dict, got {type(cfg)}")
+        if "env_name" not in cfg:
+            raise ValueError(f"Config must contain 'env_name' field: {cfg}")
+        return {
+            "id": int(record_id),
+            "env_id": cfg.get("env_id") or f"auto-{record_id}-{int(time.time()*1000)}",
+            "job_id": cfg.get("job_id", ""),
+            "group_id": cfg.get("group_id"),
+            "finished": cfg.get("finished", False),
+            "env_name": cfg["env_name"],
+            "env_params": json.dumps(cfg.get("env_params", {})),
+            "image": cfg.get("image"),
+            "created_at": cfg.get("created_at", int(time.time())),
+        }
 
     def save_config(
         self,
@@ -207,27 +240,10 @@ class EnvConfigManager:
         next_id = self._get_next_id()
 
         # Validate all configs first before writing
-        records = []
-        for idx, cfg in enumerate(configs):
-            if not isinstance(cfg, dict):
-                raise ValueError(f"Config must be a dict, got {type(cfg)}")
-
-            if "env_name" not in cfg:
-                raise ValueError(f"Config must contain 'env_name' field: {cfg}")
-
-            # Build record with all fields
-            record = {
-                "id": next_id + idx,
-                "env_id": cfg.get("env_id", f"auto-{next_id + idx}-{int(time.time()*1000)}"),
-                "job_id": cfg.get("job_id", ""),
-                "group_id": cfg.get("group_id"),
-                "finished": cfg.get("finished", False),
-                "env_name": cfg["env_name"],
-                "env_params": json.dumps(cfg.get("env_params", {})),
-                "image": cfg.get("image"),
-                "created_at": cfg.get("created_at", int(time.time())),
-            }
-            records.append(record)
+        records = [
+            self._normalize_config_record(cfg, next_id + idx)
+            for idx, cfg in enumerate(configs)
+        ]
 
         # Batch write all records at once
         try:
@@ -240,6 +256,79 @@ class EnvConfigManager:
 
         except Exception as e:
             logger.error(f"Failed to save env_configs: {e}")
+            raise
+
+    def upsert_config(
+        self,
+        config: Union[Dict[str, Any], List[Dict[str, Any]]]
+    ) -> List[int]:
+        """Insert new configs or update existing ones, matched on env_id.
+
+        One transaction for the whole batch (dldb merge_insert), unlike
+        save_config which always appends. For existing env_ids: id and
+        created_at are preserved unless explicitly provided. For new env_ids:
+        id / env_id / created_at defaults follow save_config semantics.
+
+        Example:
+            >>> manager = EnvConfigManager()
+            >>> # Insert-or-update in one transaction
+            >>> ids = manager.upsert_config([
+            ...     {"env_id": "env-001", "env_name": "CartPole-v1", "env_params": {"gravity": 9.8}},
+            ...     {"env_id": "env-002", "env_name": "LunarLander", "job_id": "job-9"},
+            ... ])
+        """
+        if isinstance(config, dict):
+            configs = [config]
+        else:
+            configs = list(config)
+        if not configs:
+            raise ValueError("Config cannot be empty")
+
+        try:
+            # One projection read: existing env_id -> (id, created_at)
+            existing_df = self._filter_table(
+                query="",
+                limit=None,
+                columns=["env_id", "id", "created_at"],
+            )
+            existing: Dict[str, Tuple[int, Optional[int]]] = {}
+            if len(existing_df) > 0:
+                existing = {
+                    str(row["env_id"]): (
+                        int(row["id"]),
+                        int(row["created_at"]) if row["created_at"] is not None else None,
+                    )
+                    for _, row in existing_df.iterrows()
+                }
+            next_id = max((entry[0] for entry in existing.values()), default=0) + 1
+
+            records = []
+            new_count = 0
+            for cfg in configs:
+                env_id = str(cfg.get("env_id")) if isinstance(cfg, dict) and cfg.get("env_id") else None
+                if env_id is not None and env_id in existing:
+                    record = self._normalize_config_record(cfg, existing[env_id][0])
+                    if "created_at" not in cfg and existing[env_id][1] is not None:
+                        record["created_at"] = existing[env_id][1]
+                else:
+                    record = self._normalize_config_record(cfg, next_id + new_count)
+                    new_count += 1
+                records.append(record)
+
+            logger.info(f"Upserting {len(records)} env_configs ({new_count} new, {len(records) - new_count} update)")
+            df = pd.DataFrame(records)
+            self.session.upsert(self.table_name, ["env_id"], df)
+            self._log_dldb_timing(
+                "upsert",
+                self._extract_dldb_last_call(),
+                table_name=self.table_name,
+                extra={"input_rows": len(df), "match_columns": ["env_id"]},
+            )
+            logger.info(f"Successfully upserted {len(records)} env_configs")
+            return [r["id"] for r in records]
+
+        except Exception as e:
+            logger.error(f"Failed to upsert env_configs: {e}")
             raise
 
     def get_env_configs(
@@ -259,6 +348,9 @@ class EnvConfigManager:
             WHERE {filter_query}
             ORDER BY id ASC
             LIMIT ? OFFSET ?
+
+        The ordering and pagination window are executed in the query engine
+        (only the requested page is fetched, not the whole table).
 
         Args:
             limit: Maximum number of configs to return
@@ -287,22 +379,20 @@ class EnvConfigManager:
                 f"checkout_latest={checkout_latest}"
             )
 
-            # Query LanceDB
+            # Pagination is pushed down: order_by id + limit + offset run in
+            # the query engine, so only the requested page is materialized.
             df = self._filter_table(
                 query=filter_query,
-                limit=None,  # Get all, then paginate in memory
+                limit=limit,
+                offset=offset,
+                order_by="id",
+                ascending=True,
                 checkout_latest=checkout_latest,
             )
 
-            # Sort by id
-            df = df.sort_values("id")
-
-            # Apply pagination
-            paginated_df = df.iloc[offset:offset + limit]
-
             # Convert to list of dicts
             configs = []
-            for _, row in paginated_df.iterrows():
+            for _, row in df.iterrows():
                 config = {
                     "id": int(row["id"]),
                     "env_id": row["env_id"],
@@ -498,12 +588,43 @@ class EnvConfigManager:
         """
         try:
             # Delete by env_id filter
-            self._delete_where(f"env_id = '{env_id}'")
+            self._delete_where(f"env_id = {_sql_literal(env_id)}")
             logger.info(f"Deleted env_config: {env_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to delete env_config {env_id}: {e}")
             return False
+
+    def delete_configs_batch(
+        self,
+        env_ids: List[str],
+        *,
+        batch_size: int = 100,
+    ) -> int:
+        """Delete many configs by env_id with chunked single transactions.
+
+        One DELETE transaction per --batch-size env_ids instead of one per
+        env_id, so bulk cleanup does not explode table versions.
+
+        Example:
+            >>> manager = EnvConfigManager()
+            >>> deleted = manager.delete_configs_batch(["env-001", "env-002", "env-003"])
+        """
+        unique = list(dict.fromkeys(str(env_id) for env_id in env_ids))
+        if not unique:
+            return 0
+        try:
+            deleted = 0
+            for start in range(0, len(unique), batch_size):
+                batch = unique[start : start + batch_size]
+                where = "env_id IN (" + ", ".join(_sql_literal(e) for e in batch) + ")"
+                self._delete_where(where)
+                deleted += len(batch)
+                logger.info(f"delete_configs_batch: deleted {deleted}/{len(unique)} env_ids")
+            return deleted
+        except Exception as e:
+            logger.error(f"Failed to batch delete env_configs: {e}")
+            raise
 
     def update_config(self, env_id: str, updates: Dict[str, Any]) -> bool:
         """
@@ -519,12 +640,71 @@ class EnvConfigManager:
                 updates["env_params"] = json.dumps(updates["env_params"])
 
             # Update by env_id (positional args)
-            self._update_where(f"env_id = '{env_id}'", updates)
+            self._update_where(f"env_id = {_sql_literal(env_id)}", updates)
             logger.info(f"Updated env_config: {env_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to update env_config {env_id}: {e}")
             return False
+
+    def update_configs_batch(
+        self,
+        updates_by_env_id: Dict[str, Dict[str, Any]],
+        *,
+        batch_size: int = 100,
+    ) -> Dict[str, int]:
+        """Apply per-env_id updates with merged, chunked transactions.
+
+        env_ids that share an identical update payload are combined into one
+        UPDATE ... WHERE env_id IN (...) transaction (chunked to batch_size),
+        instead of one transaction per env_id. Typical use: marking a whole
+        run's envs finished=True in a couple of transactions.
+
+        Example:
+            >>> manager = EnvConfigManager()
+            >>> summary = manager.update_configs_batch({
+            ...     "env-001": {"finished": True},
+            ...     "env-002": {"finished": True},
+            ...     "env-003": {"image": "cartpole:v2"},
+            ... })
+            >>> summary
+            {'env_ids': 3, 'transactions': 2}
+
+        Returns:
+            {"env_ids": <updated env_id count>, "transactions": <txn count>}
+        """
+        if not updates_by_env_id:
+            return {"env_ids": 0, "transactions": 0}
+
+        # Group env_ids by identical normalized payload.
+        groups: Dict[str, Tuple[Dict[str, Any], List[str]]] = {}
+        for env_id, updates in updates_by_env_id.items():
+            if not updates:
+                raise ValueError(f"Updates for env_id {env_id!r} cannot be empty")
+            values = dict(updates)
+            if "env_params" in values and isinstance(values["env_params"], dict):
+                values["env_params"] = json.dumps(values["env_params"])
+            key = json.dumps(values, sort_keys=True, ensure_ascii=False, default=str)
+            groups.setdefault(key, (values, []))[1].append(str(env_id))
+
+        try:
+            transactions = 0
+            env_total = 0
+            for values, env_ids in groups.values():
+                for start in range(0, len(env_ids), batch_size):
+                    batch = env_ids[start : start + batch_size]
+                    where = "env_id IN (" + ", ".join(_sql_literal(e) for e in batch) + ")"
+                    self._update_where(where, values)
+                    transactions += 1
+                    env_total += len(batch)
+                    logger.info(
+                        f"update_configs_batch: transaction {transactions} "
+                        f"updated {env_total}/{sum(len(ids) for _, ids in groups.values())} env_ids"
+                    )
+            return {"env_ids": env_total, "transactions": transactions}
+        except Exception as e:
+            logger.error(f"Failed to batch update env_configs: {e}")
+            raise
 
     def count(
         self,
