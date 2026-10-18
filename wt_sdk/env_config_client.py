@@ -22,6 +22,12 @@ def _sql_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+# Fields update_configs_where may modify. Identity fields (id, env_id,
+# created_at) are excluded so a query-driven update can never move or
+# re-identify a row.
+UPDATABLE_FIELDS = ("env_name", "job_id", "group_id", "finished", "env_params", "image")
+
+
 class EnvConfigManager:
 
     def __init__(
@@ -704,6 +710,95 @@ class EnvConfigManager:
             return {"env_ids": env_total, "transactions": transactions}
         except Exception as e:
             logger.error(f"Failed to batch update env_configs: {e}")
+            raise
+
+    def update_configs_where(
+        self,
+        filter_query: str,
+        updates: Dict[str, Any],
+        *,
+        count_only_read: bool = True,
+    ) -> int:
+        """Apply one uniform update to every row matching an arbitrary WHERE.
+
+        Query-driven counterpart of update_config / update_configs_batch:
+        callers do not need to know env_ids up front. All matched rows are
+        updated in ONE transaction (dldb session.update), replacing the
+        "read all matching rows, then one UPDATE per env_id" pattern that
+        explodes table versions on bulk operations (e.g. marking a whole
+        job's envs finished).
+
+        Args:
+            filter_query: SQL WHERE clause selecting the rows to update,
+                e.g. "job_id = 'job-9' AND finished = false". Must be
+                non-empty; an empty filter would update the whole table.
+            updates: field -> new value applied to every matched row.
+                Allowed fields are UPDATABLE_FIELDS (env_name, job_id,
+                group_id, finished, env_params, image); identity fields
+                (id, env_id, created_at) are rejected. dict env_params
+                values are JSON-encoded automatically.
+            count_only_read: When True (default), run a cheap id-projection
+                read first so the return value is the exact matched-row
+                count (dldb update does not report affected rows), and
+                skip the write entirely when nothing matches. When False,
+                skip the pre-read (single round trip) and return -1 since
+                the count is unknown.
+
+        Returns:
+            Matched-row count when count_only_read=True (0 means nothing
+            matched and no write happened), otherwise -1. The count is a
+            snapshot taken right before the write; with concurrent writers
+            the update still applies to whatever matches at commit time
+            (Lance MVCC optimistic concurrency).
+
+        Example:
+            >>> manager = EnvConfigManager()
+            >>> n = manager.update_configs_where(
+            ...     "job_id = 'job-9' AND finished = false",
+            ...     {"finished": True},
+            ... )
+            >>> n
+            1000
+        """
+        if not filter_query or not filter_query.strip():
+            raise ValueError(
+                "filter_query must be a non-empty WHERE clause; refusing to "
+                "update without a filter"
+            )
+        if not updates:
+            raise ValueError("updates cannot be empty")
+
+        values = dict(updates)
+        unknown = sorted(set(values) - set(UPDATABLE_FIELDS))
+        if unknown:
+            raise ValueError(
+                f"Non-updatable fields in updates: {unknown}; updatable "
+                f"fields are {list(UPDATABLE_FIELDS)}"
+            )
+        if "env_params" in values and isinstance(values["env_params"], dict):
+            values["env_params"] = json.dumps(values["env_params"])
+
+        matched = -1
+        if count_only_read:
+            df = self._filter_table(
+                query=filter_query,
+                limit=None,
+                columns=["id"],
+            )
+            matched = len(df)
+            if matched == 0:
+                logger.info("update_configs_where: 0 rows match filter, skipping write")
+                return 0
+
+        try:
+            self._update_where(filter_query, values)
+            logger.info(
+                f"update_configs_where: applied updates {sorted(values)} "
+                f"to rows matching {filter_query!r}"
+            )
+            return matched
+        except Exception as e:
+            logger.error(f"Failed to update env_configs where {filter_query!r}: {e}")
             raise
 
     def count(
