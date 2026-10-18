@@ -15,6 +15,7 @@ Examples:
 import argparse
 import json
 import sys
+from datetime import timedelta
 from typing import Any
 
 import dldb
@@ -61,6 +62,7 @@ def maintain_env_config_indexes(
     create_missing: bool = True,
     optimize: bool = True,
     dry_run: bool = False,
+    cleanup_older_than: timedelta | None = None,
 ) -> dict[str, Any]:
     """Create missing indexes, compact fragments, and refresh index tails."""
     actual_schema = session.get_schema(table_name)
@@ -131,7 +133,7 @@ def maintain_env_config_indexes(
                 raise RuntimeError(
                     "Installed dldb does not expose session.optimize(...)"
                 )
-            session.optimize(table_name)
+            session.optimize(table_name, cleanup_older_than=cleanup_older_than)
             summary["optimized"] = True
         except Exception as exc:
             summary["errors"].append(
@@ -197,6 +199,18 @@ def main() -> int:
         help="Create missing indexes without full table optimize.",
     )
     parser.add_argument(
+        "--cleanup-older-than-hours",
+        type=float,
+        default=24.0,
+        metavar="HOURS",
+        help=(
+            "Lance old-version retention window passed to optimize() "
+            "cleanup_old_versions. 0 deletes every superseded version "
+            "immediately. dldb's own 168h/7d fallback is never used "
+            "through this CLI."
+        ),
+    )
+    parser.add_argument(
         "--dldb-model",
         choices=["none", "metrics", "debug"],
         default="debug",
@@ -244,6 +258,7 @@ def main() -> int:
             create_missing=not args.no_create_missing,
             optimize=not args.no_optimize,
             dry_run=args.dry_run,
+            cleanup_older_than=timedelta(hours=args.cleanup_older_than_hours),
         )
         print(
             json.dumps(
