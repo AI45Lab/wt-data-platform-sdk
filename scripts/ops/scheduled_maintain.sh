@@ -87,3 +87,17 @@ for table in "$@"; do
         echo "=== $(date -Is) maintain for $table exited with $status, log: $log_file ===" | tee -a "$log_file"
     fi
 done
+
+# Env-config table maintenance (unpartitioned SimpleTable; runs serially after
+# the landing loop). Override the profile with ENV_CONFIG_PROFILE=test.
+ENV_CONFIG_MAINTAIN="$REPO_DIR/scripts/ops/maintain_env_config_indexes.py"
+ENV_CONFIG_PROFILE="${ENV_CONFIG_PROFILE:-production}"
+ts=$(date +%Y%m%d_%H%M%S)
+env_log_file="$LOG_DIR/maintain_env_config_${ENV_CONFIG_PROFILE}_${ts}.log"
+echo "=== $(date -Is) env-config maintain profile=$ENV_CONFIG_PROFILE ===" | tee -a "$env_log_file"
+"$PYTHON_BIN" "$ENV_CONFIG_MAINTAIN" \
+    --profile "$ENV_CONFIG_PROFILE" \
+    --cleanup-older-than-hours 24 \
+    >>"$env_log_file" 2>&1
+env_status=$?
+echo "=== $(date -Is) env-config maintain exited with $env_status, log: $env_log_file ===" | tee -a "$env_log_file"
