@@ -29,6 +29,11 @@ if [ -f "$REPO_DIR/.env" ]; then
     set +a
 fi
 
+# Nightly maintenance tolerates slow S3: huge version-dir LISTs on XSKY can
+# exceed lance's per-request default (observed 120s failures on 2026-10-25).
+# Only this job gets the raised timeout; interactive writers keep defaults.
+export WT_SDK_S3_REQUEST_TIMEOUT="${WT_SDK_S3_REQUEST_TIMEOUT:-300}"
+
 for table in "$@"; do
     ts=$(date +%Y%m%d_%H%M%S)
     log_file="$LOG_DIR/maintain_${table}_${ts}.log"
