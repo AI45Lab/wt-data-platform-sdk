@@ -40,16 +40,10 @@ from wt_sdk.config import (
     TableConfig,
     default_config,
 )
-from wt_sdk.core.schemas import LANDING_SCHEMA
+from wt_sdk.core.schemas import JSON_STRING_COLUMNS, LANDING_SCHEMA
 
 
-JSON_COLUMNS = {
-    "messages",
-    "response",
-    "chosen_trace",
-    "rejected_trace",
-    "meta_json",
-}
+JSON_COLUMNS = set(JSON_STRING_COLUMNS)
 PROTECTED_COLUMNS = {
     "id",
     "job_id",

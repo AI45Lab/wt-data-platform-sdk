@@ -42,8 +42,8 @@ class LandingRecord(BaseModel):
     reward: Optional[float] = None
 
     # Content Payload
-    # Arrow JSON logical types. The SDK stores the supplied JSON strings as-is
-    # and intentionally does not validate their provider/message structure.
+    # Opaque JSON strings (large_string in Arrow). The SDK stores the supplied
+    # JSON strings as-is and intentionally does not validate their structure.
     messages: Optional[str] = None
     response: Optional[str] = None
     chosen_trace: Optional[str] = None
@@ -59,7 +59,7 @@ class LandingRecord(BaseModel):
     env_name: Optional[str] = None
     is_session_completed: Optional[bool] = None
     is_trainable: Optional[bool] = None
-    meta_json: Optional[str] = None  # Arrow JSON logical type; Python API remains a JSON string
+    meta_json: Optional[str] = None  # Opaque JSON string; Python API remains a JSON string
     tags: Optional[List[str]] = None
 
     # Additional Fields (2025-03)
@@ -75,6 +75,22 @@ class LandingRecord(BaseModel):
 
     # Asset Management
     blob_manifest: List[str] = Field(default_factory=list)
+
+    # 2026.10 schema evolution v2 (all optional; JSON fields are opaque strings)
+    gateway_metrics: Optional[str] = Field(None, description="Gateway metrics JSON (latency, token usage, etc.)")
+    job_name: Optional[str] = Field(
+        None,
+        description="Display name for dashboards; writer-filled, usually equals job_id (job_id is the partition key and immutable)",
+    )
+    eval: Optional[str] = Field(None, description="Evaluation info JSON")
+    dataset: Optional[str] = Field(None, description="Dataset info JSON")
+    role: Optional[str] = Field(None, description="Role tag (e.g. agent / env / user)")
+    harness: Optional[str] = Field(None, description="Execution harness identifier")
+    training_results: Optional[str] = Field(None, description="Training outcome JSON (serving table only)")
+    analysis: Optional[str] = Field(None, description="Trajectory analysis result JSON (serving table only)")
+    weight_version: Optional[int] = Field(None, description="Weight version")
+    group_id: Optional[str] = Field(None, description="Rollout group id (e.g. group-RL / best-of-n)")
+    tokens_info: Optional[str] = Field(None, description="Token usage statistics JSON")
 
     @model_validator(mode='after')
     def auto_derive_fields(self):

@@ -84,13 +84,9 @@ from wt_sdk.config import (
 )
 
 
-JSON_COLUMNS = {
-    "messages",
-    "response",
-    "chosen_trace",
-    "rejected_trace",
-    "meta_json",
-}
+from wt_sdk.core.schemas import JSON_STRING_COLUMNS
+
+JSON_COLUMNS = set(JSON_STRING_COLUMNS)
 
 ENV_CONFIG_TABLE_NAMES = {DEFAULT_ENV_CONFIG_TABLE, TEST_ENV_CONFIG_TABLE}
 TRAJECTORY_TABLE_NAMES = {

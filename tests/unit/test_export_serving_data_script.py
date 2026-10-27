@@ -36,16 +36,21 @@ def test_default_columns_are_explicit_and_exclude_internal_columns():
     columns = export_script.parse_columns(None)
 
     assert columns == list(export_script.DEFAULT_DELIVERY_COLUMNS)
-    # search_text is frontend-only and sub_job_id is the internal write-shard
-    # id; neither belongs in the external delivery contract.
+    # search_text is frontend-only, sub_job_id is the internal write-shard id,
+    # and gateway_metrics is internal telemetry; none belong in the external
+    # delivery contract.
     assert set(columns) == set(export_script.SERVING_SCHEMA.names) - {
         "search_text",
         "sub_job_id",
+        "gateway_metrics",
     }
     assert "id" in columns
     assert "serving_updated_at" in columns
+    assert "job_name" in columns
+    assert "tokens_info" in columns
     assert "search_text" not in columns
     assert "sub_job_id" not in columns
+    assert "gateway_metrics" not in columns
 
 
 def test_explicit_columns_may_include_search_text_and_are_validated():

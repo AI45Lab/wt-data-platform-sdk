@@ -20,7 +20,7 @@ from wt_sdk import (
     TableConfig,
     WTGatewayClient,
 )
-from wt_sdk.core.schemas import JSON_TYPE
+from wt_sdk.core.schemas import JSON_STRING_TYPE as JSON_TYPE
 
 class FakeSession:
     def __init__(self, *, attach_df_timing: bool, shutdown_result: Optional[Dict[str, Any]] = None):

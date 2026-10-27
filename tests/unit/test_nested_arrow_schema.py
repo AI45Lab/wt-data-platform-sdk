@@ -6,7 +6,8 @@ import pyarrow as pa
 import wt_sdk._time as sdk_time
 from wt_sdk import LandingRecord, ServingRecord
 from wt_sdk.core.schemas import (
-    JSON_TYPE,
+    JSON_STRING_COLUMNS,
+    JSON_STRING_TYPE,
     LANDING_PARTITION_COLUMN,
     LANDING_PARTITION_TYPE,
     LANDING_PARTITIONS,
@@ -90,11 +91,17 @@ def test_trajectory_payloads_round_trip_as_opaque_json_strings():
         chosen_trace=chosen_trace,
         rejected_trace=rejected_trace,
         meta_json=json.dumps({"provider": "anthropic", "raw_response": {"thinking": "..."}}),
+        gateway_metrics=json.dumps({"latency_ms": 12, "prompt_tokens": 7}),
+        job_name="job-json",
+        tokens_info=json.dumps({"prompt_tokens": 7, "completion_tokens": 11}),
+        weight_version=3,
     )
 
     table = landing_batch_to_arrow(LandingRecordBatch(records=[record]), LANDING_SCHEMA)
     table.validate(full=True)
 
+    for field_name in JSON_STRING_COLUMNS:
+        assert table.schema.field(field_name).type == JSON_STRING_TYPE
     for field_name in (
         "messages",
         "response",
@@ -102,7 +109,6 @@ def test_trajectory_payloads_round_trip_as_opaque_json_strings():
         "rejected_trace",
         "meta_json",
     ):
-        assert table.schema.field(field_name).type == JSON_TYPE
         assert table.column(field_name)[0].as_py() == getattr(record, field_name)
 
     dataframe = table.to_pandas(types_mapper=pd.ArrowDtype)
@@ -112,8 +118,12 @@ def test_trajectory_payloads_round_trip_as_opaque_json_strings():
     assert restored.response == response
     assert restored.chosen_trace == chosen_trace
     assert restored.rejected_trace == rejected_trace
+    assert restored.gateway_metrics == record.gateway_metrics
+    assert restored.job_name == "job-json"
+    assert restored.weight_version == 3
     assert decoded["messages"] == json.loads(messages)
     assert decoded["response"] == json.loads(response)
+    assert decoded["tokens_info"] == json.loads(record.tokens_info)
 
 
 def test_sdk_initializes_source_time_and_preserves_explicit_time(monkeypatch):
@@ -245,14 +255,18 @@ def test_landing_and_serving_use_the_same_schema_and_hash_partition():
     assert LANDING_PARTITIONS == SERVING_PARTITIONS == 128
     assert LandingRecord.model_fields.keys() == ServingRecord.model_fields.keys()
 
-    for field_name in (
-        "messages",
-        "response",
-        "chosen_trace",
-        "rejected_trace",
-        "meta_json",
-    ):
-        assert LANDING_SCHEMA.field(field_name).type == pa.json_(pa.string())
+    # All JSON payload columns are opaque large_string columns (64-bit offsets).
+    for field_name in JSON_STRING_COLUMNS:
+        assert LANDING_SCHEMA.field(field_name).type == pa.large_string()
+
+    # 2026.10 schema evolution v2 fields.
+    assert LANDING_SCHEMA.field("job_name").type == pa.string()
+    assert LANDING_SCHEMA.field("role").type == pa.string()
+    assert LANDING_SCHEMA.field("harness").type == pa.string()
+    assert LANDING_SCHEMA.field("weight_version").type == pa.int64()
+    assert LANDING_SCHEMA.field("group_id").type == pa.string()
+    for field_name in ("job_name", "role", "harness", "weight_version", "group_id"):
+        assert LANDING_SCHEMA.field(field_name).nullable is True
 
     assert LANDING_SCHEMA.field("tags").type == pa.list_(pa.string())
     assert LANDING_SCHEMA.field("source_updated_at").type == pa.int64()
@@ -277,6 +291,7 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("is_terminal", "BITMAP"),
         ("is_trainable", "BITMAP"),
         ("is_session_completed", "BITMAP"),
+        ("group_id", "BTREE"),
     ]
     assert SERVING_SCALAR_INDEXES == [
         ("id", "BTREE"),
@@ -294,4 +309,5 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("agent_model", "BTREE"),
         ("env_name", "BTREE"),
         ("tags", "LABEL_LIST"),
+        ("group_id", "BTREE"),
     ]

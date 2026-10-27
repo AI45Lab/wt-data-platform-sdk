@@ -64,6 +64,17 @@ DEFAULT_DELIVERY_COLUMNS = (
     "meta_json",
     "tags",
     "blob_manifest",
+    # 2026.10 schema evolution v2 (gateway_metrics stays internal-only)
+    "job_name",
+    "eval",
+    "dataset",
+    "role",
+    "harness",
+    "training_results",
+    "analysis",
+    "weight_version",
+    "group_id",
+    "tokens_info",
 )
 
 

@@ -3,20 +3,12 @@ import json
 import pandas as pd
 import pyarrow as pa
 from typing import List, Any, Dict
+from wt_sdk.core.schemas import JSON_STRING_COLUMNS
 from wt_sdk.models import (
     LandingRecord,
     ServingRecord,
     LandingRecordBatch,
     ServingRecordBatch,
-)
-
-
-JSON_COLUMN_NAMES = (
-    "messages",
-    "response",
-    "chosen_trace",
-    "rejected_trace",
-    "meta_json",
 )
 
 
@@ -33,7 +25,7 @@ def _deserialize_json_value(value: Any) -> Any:
 def deserialize_json_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
     """Return a frame whose present JSON columns contain Python values."""
     result = dataframe.copy()
-    for column in JSON_COLUMN_NAMES:
+    for column in JSON_STRING_COLUMNS:
         if column in result.columns:
             values = [_deserialize_json_value(value) for value in result[column].tolist()]
             result[column] = pd.Series(values, index=result.index, dtype=object)
@@ -91,7 +83,7 @@ def dataframe_to_dict_records(
     for raw_record in dataframe.to_dict(orient="records"):
         record = _query_value_to_python(raw_record, exclude_none=exclude_none)
         if deserialize_json:
-            for column in JSON_COLUMN_NAMES:
+            for column in JSON_STRING_COLUMNS:
                 if column in record:
                     record[column] = _deserialize_json_value(record[column])
         records.append(record)
@@ -159,9 +151,8 @@ def landing_record_to_dataframe(record: LandingRecord) -> pd.DataFrame:
     data = pydantic_to_dict(record)
     df = pd.DataFrame([data])
 
-    # JSON extension columns use Python strings at the DataFrame boundary.
-    json_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace', 'meta_json']
-    for col in json_columns:
+    # JSON string columns use Python strings at the DataFrame boundary.
+    for col in JSON_STRING_COLUMNS:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
@@ -173,8 +164,7 @@ def landing_batch_to_dataframe(batch: LandingRecordBatch) -> pd.DataFrame:
     records_data = [pydantic_to_dict(record) for record in batch.records]
     df = pd.DataFrame(records_data)
 
-    json_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace', 'meta_json']
-    for col in json_columns:
+    for col in JSON_STRING_COLUMNS:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
@@ -186,8 +176,7 @@ def serving_record_to_dataframe(record: ServingRecord) -> pd.DataFrame:
     data = pydantic_to_dict(record)
     df = pd.DataFrame([data])
 
-    json_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace', 'meta_json']
-    for col in json_columns:
+    for col in JSON_STRING_COLUMNS:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
@@ -199,8 +188,7 @@ def serving_batch_to_dataframe(batch: ServingRecordBatch) -> pd.DataFrame:
     records_data = [pydantic_to_dict(record) for record in batch.records]
     df = pd.DataFrame(records_data)
 
-    json_columns = ['messages', 'response', 'chosen_trace', 'rejected_trace', 'meta_json']
-    for col in json_columns:
+    for col in JSON_STRING_COLUMNS:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
