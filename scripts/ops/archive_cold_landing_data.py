@@ -11,6 +11,12 @@ is test; production must be selected explicitly.
 The active landing table remains available throughout the operation. This is
 an online, job-at-a-time workflow; it is separate from the full-table quiesced
 archive/rebuild scripts.
+
+Landing is HASH-partitioned on ``sub_job_id``, so one job's rows may live in
+several buckets (job splitting). Eligibility reads, archive copies, and source
+deletions therefore span all materialized buckets; dldb routes archive writes
+back to the per-row shard buckets automatically. The serving table stays
+HASH(job_id), so serving verification uses that single bucket.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ from wt_sdk.core.schemas import (
     LANDING_PARTITION_TYPE,
     LANDING_PARTITIONS,
     LANDING_SCHEMA,
+    SERVING_PARTITIONS,
 )
 
 
@@ -61,7 +68,10 @@ SERVING_VERIFICATION_COLUMNS = ["id", "source_updated_at"]
 @dataclass(frozen=True)
 class ColdJob:
     job_id: str
-    bucket: int
+    # Landing buckets holding this job's rows (HASH(sub_job_id) shards); a
+    # non-split job maps to exactly one. Informational for reporting only:
+    # every read/delete below spans all materialized buckets.
+    buckets: tuple[int, ...]
     row_count: int
     max_source_updated_at: int
     source_updated_at_by_id: Mapping[str, int]
@@ -198,6 +208,28 @@ def query_partition(
     return frame
 
 
+def query_all_partitions(
+    session,
+    *,
+    table_name: str,
+    query: str,
+    columns: Sequence[str],
+) -> pd.DataFrame:
+    """Query every materialized bucket; exact for split (multi-bucket) jobs."""
+
+    frame = session.filter(
+        table_name,
+        query=query,
+        limit=None,
+        columns=list(columns),
+        partitions=None,
+        checkout_latest=True,
+    )
+    if frame is None:
+        return pd.DataFrame(columns=list(columns))
+    return frame
+
+
 def _required_string(value: Any, *, field: str) -> str:
     if value is None or pd.isna(value):
         raise ValueError(f"{field} must be non-null")
@@ -221,7 +253,7 @@ def evaluate_cold_job(
     frame: pd.DataFrame,
     *,
     job_id: str,
-    bucket: int,
+    buckets: Sequence[int],
     cutoff_exclusive_ms: int,
 ) -> tuple[ColdJob | None, str | None]:
     """Classify one complete latest-snapshot job frame."""
@@ -275,7 +307,7 @@ def evaluate_cold_job(
     return (
         ColdJob(
             job_id=job_id,
-            bucket=bucket,
+            buckets=tuple(sorted(set(buckets))),
             row_count=len(source_updated_at_by_id),
             max_source_updated_at=max_updated_at,
             source_updated_at_by_id=source_updated_at_by_id,
@@ -294,10 +326,13 @@ def verify_serving_publication(
 ) -> tuple[bool, str | None]:
     if not job.trainable_ids:
         return True, None
+    # Serving remains HASH(job_id): one exact bucket per job, regardless of
+    # how many landing shard buckets the job spans.
+    serving_bucket = stable_hash(job.job_id) % SERVING_PARTITIONS
     frame = query_partition(
         session,
         table_name=serving_table,
-        partition=job.bucket,
+        partition=serving_bucket,
         query=exact_job_filter(job.job_id),
         columns=SERVING_VERIFICATION_COLUMNS,
         existing_partitions=serving_partitions,
@@ -339,14 +374,35 @@ def discover_cold_jobs(
 ) -> tuple[List[ColdJob], Dict[str, int]]:
     source_partitions = list_partitions(session, source_table)
     serving_partitions = set(list_partitions(session, serving_table))
+
+    # Landing is HASH(sub_job_id): a job's rows may span several buckets, so
+    # candidate discovery doubles as bucket attribution (used only for
+    # reporting/maintenance hints). The cutoff filter keeps attribution
+    # complete for eligible jobs, because an eligible job has no rows at or
+    # after the cutoff.
+    attribution: Dict[str, set[int]] = {}
     if only_job_ids:
         candidate_job_ids = {str(value) for value in only_job_ids if str(value)}
+        if candidate_job_ids:
+            scope = "job_id IN (" + ", ".join(
+                quote_sql_string(job_id) for job_id in sorted(candidate_job_ids)
+            ) + ")"
+            for bucket in source_partitions:
+                frame = query_partition(
+                    session,
+                    table_name=source_table,
+                    partition=bucket,
+                    query=scope,
+                    columns=DISCOVERY_COLUMNS,
+                )
+                for value in frame.get("job_id", pd.Series(dtype="object")).tolist():
+                    if value is not None and not pd.isna(value) and str(value):
+                        attribution.setdefault(str(value), set()).add(bucket)
     else:
         candidate_job_ids = set()
         cutoff_query = (
             f"source_updated_at < {cutoff_exclusive_ms} AND job_id IS NOT NULL"
         )
-
         for bucket in source_partitions:
             frame = query_partition(
                 session,
@@ -358,22 +414,21 @@ def discover_cold_jobs(
             for value in frame.get("job_id", pd.Series(dtype="object")).tolist():
                 if value is not None and not pd.isna(value) and str(value):
                     candidate_job_ids.add(str(value))
+                    attribution.setdefault(str(value), set()).add(bucket)
 
     reasons: Dict[str, int] = {}
     eligible: List[ColdJob] = []
     for job_id in sorted(candidate_job_ids):
-        bucket = stable_hash(job_id) % LANDING_PARTITIONS
-        frame = query_partition(
+        frame = query_all_partitions(
             session,
             table_name=source_table,
-            partition=bucket,
             query=exact_job_filter(job_id),
             columns=ELIGIBILITY_COLUMNS,
         )
         job, reason = evaluate_cold_job(
             frame,
             job_id=job_id,
-            bucket=bucket,
+            buckets=attribution.get(job_id, ()),
             cutoff_exclusive_ms=cutoff_exclusive_ms,
         )
         if job is None:
@@ -462,15 +517,12 @@ def query_job_id_timestamps(
     *,
     table_name: str,
     job: ColdJob,
-    existing_partitions: set[int] | None = None,
 ) -> Dict[str, int]:
-    frame = query_partition(
+    frame = query_all_partitions(
         session,
         table_name=table_name,
-        partition=job.bucket,
         query=exact_job_filter(job.job_id),
         columns=["id", "source_updated_at"],
-        existing_partitions=existing_partitions,
     )
     return _id_timestamp_map(frame, label=table_name)
 
@@ -483,12 +535,10 @@ def copy_job_to_archive(
     archive_table: str,
     batch_size: int,
 ) -> int:
-    archive_partitions = set(list_partitions(session, archive_table))
     archived = query_job_id_timestamps(
         session,
         table_name=archive_table,
         job=job,
-        existing_partitions=archive_partitions,
     )
     unexpected = sorted(set(archived) - set(job.source_updated_at_by_id))
     if unexpected:
@@ -509,10 +559,9 @@ def copy_job_to_archive(
     copied = 0
     for record_ids in batched(missing_ids, batch_size):
         query = f"({exact_job_filter(job.job_id)}) AND {ids_filter(record_ids)}"
-        frame = query_partition(
+        frame = query_all_partitions(
             session,
             table_name=source_table,
-            partition=job.bucket,
             query=query,
             columns=LANDING_SCHEMA.names,
         )
@@ -531,10 +580,12 @@ def copy_job_to_archive(
             raise RuntimeError(
                 f"Source changed while copying {job.job_id!r}: {changed[:5]}"
             )
+        # partition=None lets dldb hash-route each row back to its own
+        # sub_job_id shard bucket in the archive table.
         session.add(
             archive_table,
             to_dldb_write_frame(frame),
-            partition=job.bucket,
+            partition=None,
         )
         copied += len(frame)
         print(
@@ -560,17 +611,16 @@ def revalidate_job(
     *,
     source_table: str,
 ) -> None:
-    frame = query_partition(
+    frame = query_all_partitions(
         session,
         table_name=source_table,
-        partition=job.bucket,
         query=exact_job_filter(job.job_id),
         columns=ELIGIBILITY_COLUMNS,
     )
     latest, reason = evaluate_cold_job(
         frame,
         job_id=job.job_id,
-        bucket=job.bucket,
+        buckets=job.buckets,
         cutoff_exclusive_ms=cutoff_exclusive_ms,
     )
     if latest is None:
@@ -596,10 +646,12 @@ def delete_verified_job(
         f"({exact_job_filter(job.job_id)}) AND "
         f"source_updated_at < {cutoff_exclusive_ms}"
     )
+    # partition=None sweeps every materialized bucket so rows of any shard
+    # bucket (including ones attributed after discovery) are deleted.
     session.delete(
         source_table,
         delete_query,
-        partition=job.bucket,
+        partition=None,
     )
     remaining = query_job_id_timestamps(
         session,
@@ -629,12 +681,12 @@ def rollback_archive_job_if_source_intact(
     if set(source) != set(job.source_updated_at_by_id):
         return False
     archive_partitions = set(list_partitions(session, archive_table))
-    if job.bucket not in archive_partitions:
+    if not set(job.buckets) & archive_partitions:
         return True
     session.delete(
         archive_table,
         exact_job_filter(job.job_id),
-        partition=job.bucket,
+        partition=None,
     )
     remaining = query_job_id_timestamps(
         session,
@@ -715,7 +767,9 @@ def run_archive(
             "excluded_reasons": excluded_reasons,
             "requested_job_ids": sorted(set(job_ids or [])),
             "archived_jobs": [],
-            "affected_buckets": sorted({job.bucket for job in jobs}),
+            "affected_buckets": sorted(
+                {bucket for job in jobs for bucket in job.buckets}
+            ),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
         if not execute or not jobs:
@@ -727,7 +781,7 @@ def run_archive(
         for index, job in enumerate(jobs, start=1):
             print(
                 f"[{index}/{len(jobs)}] Archiving {job.job_id!r}: "
-                f"rows={job.row_count}, bucket={job.bucket}"
+                f"rows={job.row_count}, buckets={list(job.buckets)}"
             )
             try:
                 copied = copy_job_to_archive(
@@ -763,11 +817,11 @@ def run_archive(
                         file=sys.stderr,
                     )
                 raise
-            affected_buckets.add(job.bucket)
+            affected_buckets.update(job.buckets)
             completed.append(
                 {
                     "job_id": job.job_id,
-                    "bucket": job.bucket,
+                    "buckets": list(job.buckets),
                     "rows": job.row_count,
                     "new_rows_copied": copied,
                 }

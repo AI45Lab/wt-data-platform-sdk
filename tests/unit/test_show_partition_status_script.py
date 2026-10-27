@@ -106,3 +106,67 @@ def test_resolve_partitions_validates_and_deduplicates_buckets():
 def test_expected_indexes_reject_unknown_table():
     with pytest.raises(ValueError, match="Unsupported table"):
         expected_indexes_for_table("archive")
+
+
+def test_env_config_tables_use_their_own_btree_index_set():
+    test_env = expected_indexes_for_table("env_config_test")
+    prod_env = expected_indexes_for_table("evaluation_env_config")
+
+    assert test_env == prod_env == {
+        "env_name_idx": "BTREE",
+        "env_id_idx": "BTREE",
+        "job_id_idx": "BTREE",
+        "group_id_idx": "BTREE",
+        "finished_idx": "BTREE",
+    }
+    assert "sub_job_ids_idx" not in test_env
+
+
+def test_main_resolves_env_config_db_uri_for_env_tables(monkeypatch):
+    from scripts.inspect import show_partition_status as script
+
+    captured = {}
+
+    class FakeSession:
+        def __init__(self, db_uri):
+            captured["db_uri"] = db_uri
+
+        def partition_status(self, table_name, *, partition):
+            return SimpleNamespace(materialized=False, stats=None, coverage=[])
+
+        def shutdown(self):
+            return None
+
+    class FakeRecord:
+        partition_column = "job_id"
+        partition_type = "HASH"
+        partitions = 128
+
+    def fake_connect(db_uri, **kwargs):
+        return FakeSession(db_uri)
+
+    def fake_record(session, table_name):
+        captured["record_table"] = table_name
+        return FakeRecord()
+
+    monkeypatch.setattr(script.dldb, "connect", fake_connect)
+    monkeypatch.setattr(script, "_get_hash_table_record", fake_record)
+    monkeypatch.setattr(
+        script,
+        "resolve_env_config_db_uri",
+        lambda explicit: "s3://wind-tunnel-env-config",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "show_partition_status.py",
+            "--table",
+            "env_config_test",
+            "--partition",
+            "3",
+        ],
+    )
+
+    assert script.main() == 0
+    assert captured["db_uri"] == "s3://wind-tunnel-env-config"
+    assert captured["record_table"] == "env_config_test"

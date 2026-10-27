@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Show read-only fragment and scalar-index health for an env-config table.
 
-Environment-config tables are unpartitioned dldb SimpleTables, so the HASH-only
-``show_partition_status.py`` command cannot inspect them. This command reports
-their Lance fragment statistics plus dldb index definitions and index coverage.
+Legacy environment-config tables are unpartitioned dldb SimpleTables, so this
+command reports their Lance fragment statistics plus dldb index definitions
+and index coverage. Since the 2026.10 job-splitting change the env-config
+tables are HASH(job_id)-partitioned; this command rejects those and
+``show_partition_status.py`` inspects them bucket by bucket instead.
 
 Examples:
   python scripts/inspect/show_env_config_status.py

@@ -121,6 +121,17 @@ class ETLTaskWorker:
                     report_dir,
                 )
                 executions.append(execution)
+                if execution.succeeded:
+                    # Job splitting: accumulate per-shard completion markers
+                    # from the pipeline report after each successful run.
+                    completed_shards = (
+                        execution.report.get("successful_sub_job_ids") or []
+                    )
+                    if completed_shards:
+                        task = self.task_store.record_sub_job_completions(
+                            task,
+                            completed_shards,
+                        )
                 if not execution.succeeded:
                     message = execution.error or (
                         f"{pipeline_name} exited with code {execution.return_code}"
@@ -262,6 +273,9 @@ def build_task_summary(
             "warning_count": int(report.get("warning_count") or 0),
             "landing_rows_updated": int(report.get("landing_rows_updated") or 0),
             "serving_rows_upserted": int(report.get("serving_rows_upserted") or 0),
+            "sub_job_ids": report.get("sub_job_ids") or [],
+            "successful_sub_job_ids": report.get("successful_sub_job_ids") or [],
+            "failed_sub_job_ids": report.get("failed_sub_job_ids") or [],
             "serving_reward_positive_rows": report.get(
                 "serving_reward_positive_rows"
             ),
@@ -284,6 +298,7 @@ def build_task_summary(
         "attempt": task.attempt,
         "status": status,
         "report_dir": task.report_dir,
+        "completed_sub_job_ids": list(task.completed_sub_job_ids),
         "pipelines": pipelines,
         "serving_reward_positive_rows": serving_report.get(
             "serving_reward_positive_rows"

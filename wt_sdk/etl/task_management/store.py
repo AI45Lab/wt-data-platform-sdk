@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from typing import Iterable, Optional
 
@@ -149,6 +150,7 @@ class DldbTaskStore:
         row = asdict(task)
         row["id"] = task.id
         row["status"] = task.status.value
+        row["completed_sub_job_ids"] = task.completed_sub_job_ids_json
         table = pa.Table.from_pylist([row], schema=ETL_TASK_SCHEMA)
         frame = table.to_pandas(types_mapper=pd.ArrowDtype)
         self.session.upsert(self.table_name, columns=["id"], datas=frame)
@@ -216,6 +218,32 @@ class DldbTaskStore:
         self._require_status(task, TaskStatus.RUNNING)
         updated = task.with_updates(
             current_pipeline=_normalize_required("pipeline_name", pipeline_name),
+            updated_at_ms=now_ms if now_ms is not None else sdk_time.now_ms(),
+        )
+        self.save(updated)
+        return updated
+
+    def record_sub_job_completions(
+        self,
+        task: ETLTask,
+        sub_job_ids: Iterable[str],
+        *,
+        now_ms: Optional[int] = None,
+    ) -> ETLTask:
+        """Merge successfully processed shards into the completion markers.
+
+        Job-level completion means every shard of the job's env.sub_job_ids
+        appears in ``task.completed_sub_job_ids``; the merge is idempotent so
+        partial re-runs (``--sub-job-id``) accumulate markers safely.
+        """
+
+        self._require_status(task, TaskStatus.RUNNING)
+        merged = sorted(
+            set(task.completed_sub_job_ids)
+            | {shard.strip() for shard in sub_job_ids if shard and shard.strip()}
+        )
+        updated = task.with_updates(
+            completed_sub_job_ids=tuple(merged),
             updated_at_ms=now_ms if now_ms is not None else sdk_time.now_ms(),
         )
         self.save(updated)
@@ -326,6 +354,22 @@ def _task_from_row(row: dict) -> ETLTask:
         report_dir=_optional_string(row.get("report_dir")),
         last_error=_optional_string(row.get("last_error")),
         summary_json=_optional_string(row.get("summary_json")),
+        completed_sub_job_ids=_completed_sub_job_ids(row.get("completed_sub_job_ids")),
+    )
+
+
+def _completed_sub_job_ids(value) -> tuple[str, ...]:
+    raw = _optional_string(value)
+    if raw is None:
+        return ()
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(decoded, list):
+        return ()
+    return tuple(
+        shard for shard in (str(item).strip() for item in decoded) if shard
     )
 
 

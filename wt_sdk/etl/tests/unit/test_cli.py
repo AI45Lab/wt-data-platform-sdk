@@ -79,6 +79,151 @@ def test_parser_defaults_to_zero_settle_delay():
     assert args.settle_delay_seconds == 0
 
 
+def test_parser_accepts_sub_job_id():
+    args = run_module.build_parser().parse_args(
+        [
+            "--pipeline",
+            "landing_to_serving_pipeline",
+            "--job-id",
+            "job-1",
+            "--sub-job-id",
+            "job-1#s3",
+        ]
+    )
+
+    assert args.sub_job_id == "job-1#s3"
+
+
+@pytest.mark.parametrize(
+    ("extra_argv", "message"),
+    [
+        (["--sub-job-id", "job-1#s3"], "--sub-job-id requires --job-id"),
+        (
+            [
+                "--job-id",
+                "job-1",
+                "--job-id",
+                "job-2",
+                "--sub-job-id",
+                "job-1#s3",
+            ],
+            "--sub-job-id requires exactly one --job-id",
+        ),
+        (
+            [
+                "--job-id",
+                "job-1",
+                "--session-id",
+                "session-1",
+                "--sub-job-id",
+                "job-1#s3",
+            ],
+            "--sub-job-id cannot be combined with --session-id",
+        ),
+    ],
+)
+def test_sub_job_id_combination_rules(monkeypatch, extra_argv, message):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run.py", "--pipeline", "landing_to_serving_pipeline", *extra_argv],
+    )
+
+    with pytest.raises(SystemExit, match=message):
+        run_module.main()
+
+
+def test_cli_dispatches_sub_job_id_to_single_shard_run(
+    monkeypatch,
+    tmp_path,
+):
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def close(self):
+            return None
+
+    class FakeEngine:
+        def __init__(
+            self,
+            client,
+            checkpoint_store=None,
+            session_batch_size=25,
+            sink_batch_size=100,
+            trainability_policy=TrainabilityPolicy.NORMAL,
+        ):
+            del client, checkpoint_store, session_batch_size, sink_batch_size
+            del trainability_policy
+
+        def run_job(self, pipeline, job_id, sub_job_id=None, dry_run=False):
+            captured.update(
+                job_id=job_id,
+                sub_job_id=sub_job_id,
+                dry_run=dry_run,
+            )
+            return RunSummary(
+                pipeline_name=pipeline.name,
+                pipeline_version=pipeline.version,
+                mode=pipeline.mode,
+                sub_job_ids={sub_job_id},
+                successful_sub_job_ids={sub_job_id},
+            )
+
+    monkeypatch.setenv("WT_SDK_PROFILE", "test")
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
+    monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
+    monkeypatch.setattr(run_module, "ETLEngine", FakeEngine)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run.py",
+            "--pipeline",
+            "example_pipeline",
+            "--job-id",
+            "job-1",
+            "--sub-job-id",
+            "job-1#s3",
+            "--dry-run",
+            "--report-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert run_module.main() == 0
+    assert captured == {
+        "job_id": "job-1",
+        "sub_job_id": "job-1#s3",
+        "dry_run": True,
+    }
+
+
+def test_summary_payload_reports_sub_job_ids():
+    summary = RunSummary(
+        pipeline_name="landing_to_serving_pipeline",
+        pipeline_version="1",
+        mode=PipelineMode.SERVING,
+        sub_job_ids={"job-1", "job-1#s1", "job-1#s2"},
+        successful_sub_job_ids={"job-1", "job-1#s1"},
+        failed_sub_job_ids={"job-1#s2"},
+    )
+
+    payload = run_module._summary_payload(
+        summary,
+        pipeline_run_id="landing_to_serving_pipeline__v1__run",
+        started_at_ms=1_000,
+        ended_at_ms=1_100,
+    )
+
+    assert payload["sub_job_ids"] == ["job-1", "job-1#s1", "job-1#s2"]
+    assert payload["successful_sub_job_ids"] == ["job-1", "job-1#s1"]
+    assert payload["failed_sub_job_ids"] == ["job-1#s2"]
+
+
 def test_list_pipelines_uses_short_module_names(monkeypatch, capsys):
     monkeypatch.setattr(
         sys,

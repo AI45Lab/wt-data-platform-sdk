@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import Dict, Any, List, Tuple, Union, Optional
 from loguru import logger
@@ -22,9 +23,45 @@ def _sql_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+# Simple equality/IN predicates on job_id, used for HASH bucket pruning.
+_JOB_ID_EQ_PATTERN = re.compile(r"(?<![\w.])job_id\s*=\s*'([^']+)'", re.IGNORECASE)
+_JOB_ID_IN_PATTERN = re.compile(r"(?<![\w.])job_id\s+IN\s*\(([^)]*)\)", re.IGNORECASE)
+
+
+def _job_id_values_in_query(query: str) -> List[str]:
+    """Extract job_id equality/IN literals from SQL text (deduplicated)."""
+    if not query:
+        return []
+    values: List[str] = list(_JOB_ID_EQ_PATTERN.findall(query))
+    for raw_values in _JOB_ID_IN_PATTERN.findall(query):
+        values.extend(re.findall(r"'([^']+)'", raw_values))
+    seen = set()
+    return [value for value in values if not (value in seen or seen.add(value))]
+
+
+def _decode_sub_job_ids(raw: Any) -> Optional[List[str]]:
+    """Decode a stored sub_job_ids JSON string; None/absent stays None.
+
+    Raises on malformed payloads: a silently ignored shard list would route
+    landing reads to the wrong partitions.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"malformed sub_job_ids payload: {raw!r}") from exc
+    if not isinstance(decoded, list) or not all(
+        isinstance(item, str) and item.strip() for item in decoded
+    ):
+        raise ValueError(f"sub_job_ids must decode to a list of non-empty strings: {raw!r}")
+    return list(decoded)
+
+
 # Fields update_configs_where may modify. Identity fields (id, env_id,
 # created_at) are excluded so a query-driven update can never move or
-# re-identify a row.
+# re-identify a row. sub_job_ids is deliberately excluded too: it is written
+# once by the job creator at task creation and read-only afterwards.
 UPDATABLE_FIELDS = ("env_name", "job_id", "group_id", "finished", "env_params", "image")
 
 
@@ -111,6 +148,35 @@ class EnvConfigManager:
         if log_line:
             logger.info(log_line)
 
+    def _resolve_query_partitions(self, query: str) -> Optional[List[int]]:
+        """Prune a HASH(job_id)-partitioned table to the query's job buckets.
+
+        No-op (None) for unpartitioned tables or queries without job_id
+        predicates, so legacy env tables keep their exact scan behavior.
+        """
+        values = _job_id_values_in_query(query)
+        if not values:
+            return None
+        try:
+            schema_table = getattr(self.session, "schema_table", None)
+            record = schema_table.get(self.table_name) if schema_table is not None else None
+        except Exception:
+            record = None
+        if record is None:
+            return None
+        partition_column = getattr(record, "partition_column", None)
+        partition_type = str(getattr(record, "partition_type", None) or "").upper()
+        partitions = getattr(record, "partitions", None)
+        if partition_column != "job_id" or partition_type != "HASH":
+            return None
+        if not isinstance(partitions, int) or partitions <= 0:
+            return None
+        try:
+            from dldb.utils import stable_hash
+        except Exception:
+            return None
+        return sorted({stable_hash(value) % partitions for value in values})
+
     def _filter_table(
         self,
         *,
@@ -124,6 +190,7 @@ class EnvConfigManager:
         extra: Optional[Dict[str, Any]] = None,
     ) -> pd.DataFrame:
         effective_query = query if query and query.strip() else "id IS NOT NULL"
+        partitions = self._resolve_query_partitions(effective_query)
         df = self.session.filter(
             self.table_name,
             query=effective_query,
@@ -133,6 +200,7 @@ class EnvConfigManager:
             order_by=order_by,
             ascending=ascending,
             checkout_latest=checkout_latest,
+            partitions=partitions,
         )
         timing = self._extract_dldb_timing_from_df(df) or self._extract_dldb_last_call()
         log_extra = {
@@ -141,6 +209,7 @@ class EnvConfigManager:
             "order_by": order_by,
             "checkout_latest": checkout_latest,
             "columns_count": len(columns) if columns else None,
+            "partitions": partitions,
         }
         if extra:
             log_extra.update(extra)
@@ -199,6 +268,19 @@ class EnvConfigManager:
             raise ValueError(f"Config must be a dict, got {type(cfg)}")
         if "env_name" not in cfg:
             raise ValueError(f"Config must contain 'env_name' field: {cfg}")
+
+        # Job splitting: shard list for split jobs. Write-once field set by
+        # the job creator; validated here so malformed shard lists fail fast.
+        sub_job_ids = cfg.get("sub_job_ids")
+        if sub_job_ids is not None:
+            if not isinstance(sub_job_ids, (list, tuple)) or not all(
+                isinstance(item, str) and item.strip() for item in sub_job_ids
+            ):
+                raise ValueError(
+                    "sub_job_ids must be a list of non-empty strings, got: "
+                    f"{sub_job_ids!r}"
+                )
+
         return {
             "id": int(record_id),
             "env_id": cfg.get("env_id") or f"auto-{record_id}-{int(time.time()*1000)}",
@@ -209,6 +291,7 @@ class EnvConfigManager:
             "env_params": json.dumps(cfg.get("env_params", {})),
             "image": cfg.get("image"),
             "created_at": cfg.get("created_at", int(time.time())),
+            "sub_job_ids": json.dumps(list(sub_job_ids)) if sub_job_ids else None,
         }
 
     def save_config(
@@ -409,6 +492,7 @@ class EnvConfigManager:
                     "env_params": json.loads(row["env_params"]) if row.get("env_params") else {},
                     "image": row.get("image"),
                     "created_at": int(row["created_at"]),
+                    "sub_job_ids": _decode_sub_job_ids(row.get("sub_job_ids")),
                 }
                 configs.append(config)
 
@@ -456,6 +540,7 @@ class EnvConfigManager:
                     "env_params": json.loads(row["env_params"]) if row.get("env_params") else {},
                     "image": row.get("image"),
                     "created_at": int(row["created_at"]),
+                    "sub_job_ids": _decode_sub_job_ids(row.get("sub_job_ids")),
                 }
                 configs.append(config)
 
@@ -465,6 +550,50 @@ class EnvConfigManager:
         except Exception as e:
             logger.error(f"Failed to fetch all env_configs: {e}")
             raise
+
+    def get_sub_job_ids(
+        self,
+        job_id: str,
+        *,
+        checkout_latest: bool = True,
+    ) -> Optional[List[str]]:
+        """Return the write shards recorded for a job, or None if not split.
+
+        Reads only the env rows of one job; on HASH(job_id)-partitioned
+        tables the read prunes to the job's single bucket. Returns None when
+        the job has no env rows, no sub_job_ids column (legacy table), or no
+        row carrying a shard list — callers treat that as [job_id].
+
+        Raises on read failure or malformed/inconsistent shard payloads;
+        callers must not fall back silently on those.
+        """
+        if not job_id or not job_id.strip():
+            raise ValueError("job_id must be a non-empty string")
+
+        df = self._filter_table(
+            query=f"job_id = {_sql_literal(job_id)}",
+            limit=None,
+            checkout_latest=checkout_latest,
+            extra={"api": "get_sub_job_ids", "job_id": job_id},
+        )
+
+        candidates: List[Tuple[str, ...]] = []
+        if df is not None and len(df) > 0 and "sub_job_ids" in df.columns:
+            for raw in df["sub_job_ids"]:
+                decoded = _decode_sub_job_ids(raw)
+                if decoded:
+                    candidates.append(tuple(decoded))
+
+        if not candidates:
+            return None
+        unique = set(candidates)
+        if len(unique) > 1:
+            rendered = ", ".join(str(list(item)) for item in sorted(unique))
+            raise ValueError(
+                f"env config rows for job '{job_id}' carry inconsistent "
+                f"sub_job_ids: {rendered}"
+            )
+        return list(next(iter(unique)))
 
     def clean_all_configs(self) -> int:
         """

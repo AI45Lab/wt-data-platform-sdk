@@ -32,6 +32,12 @@ class FakeGatewayClient:
         self.serving_batches = []
         self.next_update_time = 8_000
         self.query_calls = []
+        self.sub_job_ids = {}
+        self.resolved_job_ids = []
+
+    def resolve_sub_jobs(self, job_id):
+        self.resolved_job_ids.append(job_id)
+        return list(self.sub_job_ids.get(job_id, [job_id]))
 
     def list_table_partitions(self, table=None):
         del table
@@ -60,11 +66,19 @@ class FakeGatewayClient:
         if isinstance(partition, int):
             rows = [row for row in rows if row["_bucket"] == partition]
 
-        for field in ("job_id", "session_id", "id"):
+        for field in ("job_id", "sub_job_id", "session_id", "id"):
             equal = re.search(rf"\b{field} = '((?:''|[^'])*)'", filter_query)
             if equal:
                 expected = equal.group(1).replace("''", "'")
-                rows = [row for row in rows if str(row.get(field)) == expected]
+
+                def shard_value(row, field=field):
+                    # Rows without an explicit shard behave like non-split
+                    # writes: sub_job_id defaults to job_id.
+                    if field == "sub_job_id" and row.get("sub_job_id") is None:
+                        return row.get("job_id")
+                    return row.get(field)
+
+                rows = [row for row in rows if str(shard_value(row)) == expected]
 
         session_in = re.search(r"\bsession_id IN \((.*?)\)", filter_query)
         if session_in:
@@ -871,6 +885,111 @@ def test_serving_sink_upserts_records_from_multiple_sessions_in_one_batch():
 
     assert summary.serving_rows_upserted == 3
     assert client.serving_batches == [("row-0", "row-1", "row-2")]
+
+
+def test_run_job_iterates_env_registered_shards_with_scoped_queries():
+    job_id = "dataset#harness#model#task#20260805"
+    rows = [
+        _row(
+            id="row-1",
+            job_id=job_id,
+            sub_job_id=job_id,
+            session_id="session-1",
+            _bucket=3,
+        ),
+        _row(
+            id="row-2",
+            job_id=job_id,
+            sub_job_id=f"{job_id}#s2",
+            session_id="session-2",
+            _bucket=5,
+        ),
+    ]
+    client = FakeGatewayClient(rows)
+    client.sub_job_ids[job_id] = [job_id, f"{job_id}#s2"]
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    summary = ETLEngine(client).run_job(pipeline, job_id)
+
+    assert client.resolved_job_ids == [job_id]
+    assert summary.sub_job_ids == {job_id, f"{job_id}#s2"}
+    assert summary.successful_sub_job_ids == {job_id, f"{job_id}#s2"}
+    assert summary.failed_sub_job_ids == set()
+    assert set(client.serving) == {"row-1", "row-2"}
+    discovery_queries = [
+        call["filter_query"]
+        for call in client.query_calls
+        if "session_id IN" not in call["filter_query"]
+    ]
+    assert [
+        f"sub_job_id = '{job_id}'" in query for query in discovery_queries
+    ].count(True) >= 1
+    assert any(
+        f"sub_job_id = '{job_id}#s2'" in call["filter_query"]
+        for call in client.query_calls
+    )
+    # Every landing read is pinned to one shard: job_id and sub_job_id
+    # predicates always appear together.
+    for call in client.query_calls:
+        if "job_id = " in call["filter_query"]:
+            assert "sub_job_id = " in call["filter_query"]
+
+
+def test_run_job_without_split_resolves_to_job_id_alone():
+    row = _row(id="row-1", session_id="session-1", _bucket=3)
+    client = FakeGatewayClient([row])
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    summary = ETLEngine(client).run_job(pipeline, row["job_id"])
+
+    assert client.resolved_job_ids == [row["job_id"]]
+    assert summary.sub_job_ids == {row["job_id"]}
+    assert summary.successful_sub_job_ids == {row["job_id"]}
+    assert set(client.serving) == {"row-1"}
+
+
+def test_run_job_sub_job_id_override_skips_env_and_scopes_to_one_shard():
+    job_id = "dataset#harness#model#task#20260805"
+    rows = [
+        _row(
+            id="row-1",
+            job_id=job_id,
+            sub_job_id=job_id,
+            session_id="session-1",
+            _bucket=3,
+        ),
+        _row(
+            id="row-2",
+            job_id=job_id,
+            sub_job_id=f"{job_id}#s2",
+            session_id="session-2",
+            _bucket=5,
+        ),
+    ]
+    client = FakeGatewayClient(rows)
+    client.sub_job_ids[job_id] = [job_id, f"{job_id}#s2"]
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    summary = ETLEngine(client).run_job(pipeline, job_id, sub_job_id=f"{job_id}#s2")
+
+    assert client.resolved_job_ids == []
+    assert summary.sub_job_ids == {f"{job_id}#s2"}
+    assert set(client.serving) == {"row-2"}
+
+
+@pytest.mark.parametrize(
+    "sub_job_id",
+    ["", "   ", "other-job#s1"],
+)
+def test_run_job_rejects_invalid_sub_job_id(sub_job_id):
+    client = FakeGatewayClient([])
+    pipeline = load_pipeline("landing_to_serving_pipeline")
+
+    with pytest.raises(ValueError, match="sub_job_id"):
+        ETLEngine(client).run_job(pipeline, "job-a", sub_job_id=sub_job_id)
+
+    assert client.resolved_job_ids == []
+    assert client.query_calls == []
 
 
 def test_serving_sink_batch_is_bounded_and_preserves_partial_progress():

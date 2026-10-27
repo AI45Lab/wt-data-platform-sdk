@@ -134,7 +134,9 @@ def message(role: str, text: str) -> dict:
     return {"role": role, "content": text}
 
 
-job_id = "evaluation-run-001"       # One evaluation run and HASH partition key
+job_id = "evaluation-run-001"       # One evaluation run; the user-visible task id.
+                                     # (Landing partitions on sub_job_id, which the
+                                     #  SDK auto-sets to job_id for non-split jobs.)
 session_id = str(uuid.uuid4())      # One agent trajectory
 created_at = int(time.time())
 
@@ -180,6 +182,8 @@ with WTGatewayClient() as client:
         deserialize_json=True,  # Return JSON columns as dict/list values.
     )
     first_step_id = trajectory[0]["step_id"]  # query_data() returns List[dict].
+    # Landing partitions on sub_job_id; non-split jobs self-reference job_id,
+    # so job_id doubles as the partition value here.
     job_row_count = client.count_landing(partition=job_id)
 
     # Prefer this pruned lookup when both job_id and id are known.
@@ -422,6 +426,10 @@ with WTGatewayClient() as client:
     )
 ```
 
+On landing the `partitions` values are sub_job_ids (hash buckets are derived
+from them); a non-split job's single sub_job_id equals its job_id, so the value
+above works as-is. For a split job pass each `"{job_id}#{suffix}"` shard id.
+
 This creates missing configured indexes and runs dldb optimize so appended rows
 enter existing indexes. Use `all_partitions=True` only for scheduled full-table
 maintenance. The context manager closes the dldb session and emits its final
@@ -442,6 +450,14 @@ metrics summary when enabled.
 accept `table=client.config.tables.serving_table`. `get_by_id()`, `search()`, and
 `export_data_batches()` default to serving. Include `job_id` in filters whenever
 possible for HASH bucket pruning.
+
+Job splitting: `job_id` always names the complete, user-visible task. Landing is
+partitioned on the internal write shard `sub_job_id` — the SDK fills it with
+`job_id` when a record omits it (non-split jobs self-reference their job_id);
+split jobs write `"{job_id}#{suffix}"` shards registered in the env table's
+`sub_job_ids`. The SDK rewrites job_id-only landing filters into
+`sub_job_id IN (shards)` and prunes to those buckets; `job_id` remains the
+partition key of serving. `resolve_sub_jobs(job_id)` exposes the shard list.
 
 `query_data()` and `get_by_id()` omit null table columns by default. Pass
 `exclude_none=False` to retain them. All row-returning read APIs keep JSON as
@@ -468,10 +484,11 @@ mutates the logical catalog through `client.session` must call
 | upsert_landing(record, *, match_columns=None, insert_missing=True) / upsert_landing_batch(records, *, match_columns=None, insert_missing=True) | Complete landing upsert by default; with `insert_missing=False`, patch only supplied fields on existing rows and ignore missing IDs. Defaults to `job_id` + `id` matching. |
 | query_data(filter_query, ..., table=None, exclude_none=True, deserialize_json=False) | Query landing by default, or a named table; always return `List[dict]`. |
 | update_landing(filter_query, updates, ..., touch_source_updated_at=True) | Patch matching rows and refresh `source_updated_at` by default. SDK timestamps, `id`, `created_at`, and `job_id` are protected. |
-| count_landing(partition=None) | Count rows, optionally in one raw job_id or hash bucket. |
+| count_landing(partition=None) | Count rows, optionally in one raw sub_job_id value or hash bucket. |
 | delete_landing(filter_query) | Delete matching landing records. |
+| resolve_sub_jobs(job_id) | List a job's write shards (sub_job_ids); non-split jobs return [job_id]. |
 
-query_data() and update_landing() accept a raw partition="job-id" for compatibility. On HASH tables the SDK converts it to the bucket and adds a job_id predicate. Prefer putting job_id in filter_query explicitly.
+query_data() and update_landing() accept a raw partition value for compatibility; on landing it is a sub_job_id (job_id works for non-split jobs) and the SDK converts it to the bucket and adds a sub_job_id predicate. Prefer putting job_id in filter_query explicitly: the SDK expands it to the job's env-registered sub_job_ids and still prunes to exactly those buckets.
 
 For an ordered or limited landing query, include job_id in filter_query. Cross-bucket order_by + limit is not a global merge sort in the current dldb partition model.
 
@@ -609,7 +626,8 @@ The timing test writes a readable JSONL example to the ignored
 Integration tests write a few uniquely scoped rows to the existing `v2_landing_test`
 and `serving_test` tables, then clean and verify them in `finally`. They target
 these explicit test tables independently of `WT_SDK_PROFILE`; `WT_SDK_DB_URI`
-chooses the database. Both tables must use the current `HASH(job_id)` schema.
+chooses the database. Both tables must use the current schema: landing is
+`HASH(sub_job_id)` and serving is `HASH(job_id)`.
 
 ```bash
 set -a && source .env && set +a

@@ -32,14 +32,20 @@ def _read_jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_default_columns_are_explicit_and_exclude_search_text():
+def test_default_columns_are_explicit_and_exclude_internal_columns():
     columns = export_script.parse_columns(None)
 
     assert columns == list(export_script.DEFAULT_DELIVERY_COLUMNS)
-    assert set(columns) == set(export_script.SERVING_SCHEMA.names) - {"search_text"}
+    # search_text is frontend-only and sub_job_id is the internal write-shard
+    # id; neither belongs in the external delivery contract.
+    assert set(columns) == set(export_script.SERVING_SCHEMA.names) - {
+        "search_text",
+        "sub_job_id",
+    }
     assert "id" in columns
     assert "serving_updated_at" in columns
     assert "search_text" not in columns
+    assert "sub_job_id" not in columns
 
 
 def test_explicit_columns_may_include_search_text_and_are_validated():

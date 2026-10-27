@@ -165,7 +165,8 @@ def _read_landing_rows(
 ) -> list[dict[str, object]]:
     return client.query_data(
         filter_query=f"job_id = '{_escape_sql(job_id)}'",
-        partition=job_id,
+        # No explicit partition: the SDK rewrites the job_id predicate into
+        # sub_job_id predicates (env-resolved shards) and prunes buckets.
         columns=["session_id", "is_session_completed"],
         table=client.config.tables.landing_table,
         checkout_latest=True,

@@ -233,10 +233,12 @@ def update_and_verify(
             id_predicate = ids_filter(batch, job_id)
             update_predicate = f"({source_query}) AND ({id_predicate})"
             if table_role == "landing":
+                # No explicit partition: landing is HASH(sub_job_id) since job
+                # splitting, so the SDK rewrites the job_id predicate into
+                # sub_job_id predicates and resolves the shard buckets itself.
                 client.update_landing(
                     filter_query=update_predicate,
                     updates=dict(updates),
-                    partition=job_id,
                 )
             else:
                 resolved_partition = (
@@ -260,7 +262,9 @@ def update_and_verify(
                 table_name,
                 id_predicate,
                 ["id", *updates.keys()],
-                partition=job_id,
+                # Serving stays HASH(job_id); landing resolves via the
+                # rewritten job_id filter, so no explicit partition there.
+                partition=job_id if table_role != "landing" else None,
             )
             verified += sum(
                 all(values_equal(row.get(column), value) for column, value in updates.items())

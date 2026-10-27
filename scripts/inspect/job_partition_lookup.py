@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""Map job_id values to their dldb HASH bucket for a HASH(job_id) table.
+"""Map partition-column values to their dldb HASH bucket.
 
 Pure offline computation using dldb.utils.stable_hash, the same function the
 SDK uses for partition pruning (wt_sdk/client.py). No S3 connection is made.
-Landing/serving tables use HASH(job_id) with 128 buckets; use --partitions to
-override for other tables.
+
+The value hashed is the table's partition-column value, which differs by
+table since job splitting landed: landing is HASH(sub_job_id) (for non-split
+jobs pass the job_id itself — it self-references as its sub_job_id; for split
+jobs pass each "{job_id}#{suffix}" shard id), while serving and the env table
+remain HASH(job_id). Both use 128 buckets; override with --partitions.
 
 Examples:
+  # serving / env bucket for job ids
   python scripts/inspect/job_partition_lookup.py job_abc123 job_def456
+
+  # landing buckets for one non-split job and two shards of a split job
+  python scripts/inspect/job_partition_lookup.py job_abc123 'job_split#a1' 'job_split#b2'
+
   cat job_ids.txt | python scripts/inspect/job_partition_lookup.py -
   python scripts/inspect/job_partition_lookup.py job_abc123 --partitions 64
 """

@@ -26,6 +26,35 @@ from wt_sdk.etl.task_management.worker import (
 )
 
 
+class FakeEnvManager:
+    """Mirror EnvConfigManager._filter_table for discovery-path tests."""
+
+    def __init__(self, rows, table_name="env_config_test"):
+        self.session = FakeEnvSession(rows)
+        self.table_name = table_name
+
+    def _filter_table(
+        self,
+        *,
+        query,
+        limit=None,
+        columns=None,
+        order_by=None,
+        ascending=True,
+        checkout_latest=True,
+        extra=None,
+    ):
+        return self.session.filter(
+            self.table_name,
+            query=query,
+            limit=limit,
+            columns=columns,
+            order_by=order_by,
+            ascending=ascending,
+            checkout_latest=checkout_latest,
+        )
+
+
 class FakeEnvSession:
     def __init__(self, rows):
         self.rows = rows
@@ -78,8 +107,7 @@ def test_discovery_uses_bounded_keyset_batches_and_aggregates_jobs():
         {"id": 3, "job_id": "job-b", "env_id": "b1", "finished": False},
         {"id": 4, "job_id": "job-b", "env_id": "b2", "finished": True},
     ]
-    session = FakeEnvSession(rows)
-    manager = SimpleNamespace(session=session, table_name="env_config_test")
+    manager = FakeEnvManager(rows)
 
     result = discover_env_jobs(manager, batch_size=2)
 
@@ -87,7 +115,11 @@ def test_discovery_uses_bounded_keyset_batches_and_aggregates_jobs():
     assert result.rows_scanned == 4
     assert [job.job_id for job in result.ready_jobs] == ["job-a"]
     assert [job.total_envs for job in result.jobs] == [2, 2]
-    assert any(call["limit"] == 2 for call in session.calls)
+    # Batching is arithmetic id windows, not per-call limits.
+    assert any(
+        "id > -1" in call["query"] and "id <= 1" in call["query"]
+        for call in manager.session.calls
+    )
 
 
 def test_discovery_supports_include_and_exclude_job_scopes():
@@ -96,10 +128,7 @@ def test_discovery_supports_include_and_exclude_job_scopes():
         {"id": 2, "job_id": "job-b", "env_id": "b1", "finished": True},
         {"id": 3, "job_id": "job-c", "env_id": "c1", "finished": True},
     ]
-    manager = SimpleNamespace(
-        session=FakeEnvSession(rows),
-        table_name="env_config_test",
-    )
+    manager = FakeEnvManager(rows)
 
     result = discover_env_jobs(
         manager,
@@ -129,10 +158,7 @@ def test_bootstrap_scope_filters_env_and_serving_reads():
             self.filter_query = filter_query
             return [{"job_id": "job-a"}, {"job_id": "job-b"}]
 
-    manager = SimpleNamespace(
-        session=FakeEnvSession(rows),
-        table_name="env_config_test",
-    )
+    manager = FakeEnvManager(rows)
     gateway = FakeGateway()
 
     plan = build_bootstrap_plan(
@@ -214,6 +240,43 @@ def test_task_store_is_idempotent_and_supports_retry(monkeypatch):
 
     with pytest.raises(TaskStateError):
         store.requeue("job-a", allowed_statuses=(TaskStatus.SUCCEEDED,))
+    store.close()
+    assert session.shutdown_called is True
+
+
+def test_record_sub_job_completions_merges_idempotently_and_round_trips(monkeypatch):
+    session = FakeTaskSession()
+    monkeypatch.setattr(
+        "wt_sdk.etl.task_management.store.dldb.connect", lambda *a, **k: session
+    )
+    store = DldbTaskStore("s3://state", table_name="etl_tasks_test")
+    store.initialize()
+    store.submit_if_missing("job-a", now_ms=10)
+    claimed = store.claim("job-a", run_id="run-1", report_dir="reports", now_ms=20)
+    assert claimed.completed_sub_job_ids == ()
+
+    first = store.record_sub_job_completions(
+        claimed,
+        ["job-a", "  ", "job-a#s2"],
+        now_ms=30,
+    )
+    assert first.completed_sub_job_ids == ("job-a", "job-a#s2")
+
+    # Partial re-runs (for example --sub-job-id) accumulate markers safely.
+    second = store.record_sub_job_completions(
+        first,
+        ["job-a#s1", "job-a#s2"],
+        now_ms=40,
+    )
+    assert second.completed_sub_job_ids == ("job-a", "job-a#s1", "job-a#s2")
+
+    reloaded = store.get("job-a")
+    assert reloaded.completed_sub_job_ids == ("job-a", "job-a#s1", "job-a#s2")
+    assert json.loads(reloaded.completed_sub_job_ids_json) == [
+        "job-a",
+        "job-a#s1",
+        "job-a#s2",
+    ]
     store.close()
     assert session.shutdown_called is True
 
@@ -394,6 +457,78 @@ def test_worker_drains_all_queued_jobs_serially(tmp_path):
         ("job-b", "landing_enrichment_pipeline"),
         ("job-b", "landing_to_serving_pipeline"),
     ]
+
+
+def test_worker_accumulates_sub_job_completion_markers(tmp_path):
+    class FakeStore:
+        def __init__(self):
+            self.task = ETLTask("job-a", status=TaskStatus.ENQUEUED, created_at_ms=1)
+            self.saved = []
+
+        def list(self, *, status=None):
+            return [self.task] if self.task.status is status else []
+
+        def claim(self, job_id, *, run_id, report_dir):
+            self.task = self.task.with_updates(
+                status=TaskStatus.RUNNING,
+                attempt=self.task.attempt + 1,
+                last_run_id=run_id,
+                report_dir=report_dir,
+            )
+            return self.task
+
+        def set_current_pipeline(self, task, pipeline_name):
+            self.task = task.with_updates(current_pipeline=pipeline_name)
+            return self.task
+
+        def record_sub_job_completions(self, task, sub_job_ids):
+            merged = tuple(sorted(set(task.completed_sub_job_ids) | set(sub_job_ids)))
+            self.task = task.with_updates(completed_sub_job_ids=merged)
+            return self.task
+
+        def mark_succeeded(self, task, *, summary_json):
+            self.task = task.with_updates(
+                status=TaskStatus.SUCCEEDED, summary_json=summary_json
+            )
+            self.saved.append(self.task)
+            return self.task
+
+        def mark_failed(self, *args, **kwargs):
+            raise AssertionError("unexpected failure")
+
+    def runner(pipeline, job_id, profile, report_dir):
+        successful = (
+            ["job-a#s1"]
+            if pipeline == "landing_enrichment_pipeline"
+            else ["job-a#s1", "job-a#s2"]
+        )
+        return PipelineExecution(
+            pipeline,
+            0,
+            {
+                "pipeline_name": pipeline,
+                "status": "SUCCEEDED",
+                "successful_sub_job_ids": successful,
+            },
+            str(report_dir / f"{pipeline}.log"),
+        )
+
+    store = FakeStore()
+    worker = ETLTaskWorker(
+        store,
+        profile="test",
+        report_root=str(tmp_path),
+        process_runner=runner,
+    )
+    completed = worker.drain()
+
+    assert completed[0].status is TaskStatus.SUCCEEDED
+    assert store.task.completed_sub_job_ids == ("job-a#s1", "job-a#s2")
+    summary = json.loads(store.saved[0].summary_json)
+    assert summary["completed_sub_job_ids"] == ["job-a#s1", "job-a#s2"]
+    assert summary["pipelines"]["landing_to_serving_pipeline"][
+        "successful_sub_job_ids"
+    ] == ["job-a#s1", "job-a#s2"]
 
 
 def test_scoped_worker_does_not_consume_out_of_scope_queue(tmp_path):

@@ -3,6 +3,9 @@
 
 This command is read-only. It reports aggregate Lance fragment statistics,
 actual index coverage returned by dldb, and the indexes expected by the SDK.
+Since the 2026.10 job-splitting change it also covers the HASH(job_id)
+environment-config tables, which resolve WT_SDK_ENV_CONFIG_DB_URI
+automatically.
 
 Examples:
   python scripts/inspect/show_partition_status.py \
@@ -13,6 +16,9 @@ Examples:
 
   python scripts/inspect/show_partition_status.py \
     --table wind_tunnel_serving --partition 15 --show-all-indexes
+
+  python scripts/inspect/show_partition_status.py \
+    --table env_config_test --all-partitions
 """
 
 import argparse
@@ -23,20 +29,32 @@ from typing import Any, Mapping, Optional, Sequence
 import dldb
 
 from wt_sdk.config import (
+    DEFAULT_ENV_CONFIG_TABLE,
     DEFAULT_LANDING_TABLE,
     DEFAULT_SERVING_TABLE,
+    TEST_ENV_CONFIG_TABLE,
     TEST_LANDING_TABLE,
     TEST_SERVING_TABLE,
     default_config,
+    resolve_env_config_db_uri,
+)
+from wt_sdk.core.evaluation_env_schema import (
+    SCALAR_INDEX_COLUMNS as ENV_SCALAR_INDEXES,
 )
 from wt_sdk.core.schemas import LANDING_SCALAR_INDEXES, SERVING_SCALAR_INDEXES
 
+
+ENV_CONFIG_TABLES = frozenset({DEFAULT_ENV_CONFIG_TABLE, TEST_ENV_CONFIG_TABLE})
 
 TABLE_INDEXES = {
     DEFAULT_LANDING_TABLE: LANDING_SCALAR_INDEXES,
     TEST_LANDING_TABLE: LANDING_SCALAR_INDEXES,
     DEFAULT_SERVING_TABLE: SERVING_SCALAR_INDEXES,
     TEST_SERVING_TABLE: SERVING_SCALAR_INDEXES,
+    # Since the 2026.10 job-splitting change the env-config tables are
+    # HASH(job_id)-partitioned like the landing/serving tables.
+    DEFAULT_ENV_CONFIG_TABLE: [(column, "BTREE") for column in ENV_SCALAR_INDEXES],
+    TEST_ENV_CONFIG_TABLE: [(column, "BTREE") for column in ENV_SCALAR_INDEXES],
 }
 
 
@@ -397,12 +415,18 @@ def main() -> int:
         "--table",
         required=True,
         choices=sorted(TABLE_INDEXES),
-        help="Supported landing or serving table.",
+        help=(
+            "Supported landing, serving, or environment-config table. "
+            "Env-config tables resolve WT_SDK_ENV_CONFIG_DB_URI automatically."
+        ),
     )
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI (default: configured WT_SDK_DB_URI).",
+        help=(
+            "Database URI (default: configured WT_SDK_DB_URI for landing/"
+            "serving tables, WT_SDK_ENV_CONFIG_DB_URI for env-config tables)."
+        ),
     )
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument(
@@ -425,9 +449,15 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        if args.db_uri is not None:
+            db_uri = args.db_uri
+        elif args.table in ENV_CONFIG_TABLES:
+            db_uri = resolve_env_config_db_uri(None)
+        else:
+            db_uri = default_config.tables.db_uri
         return inspect_table(
             args.table,
-            args.db_uri or default_config.tables.db_uri,
+            db_uri,
             args.partition,
             all_partitions=args.all_partitions,
             show_all_indexes=args.show_all_indexes,

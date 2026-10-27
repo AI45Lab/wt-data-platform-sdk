@@ -14,6 +14,9 @@ Schema matches the original SQLite schema from evaluation platform:
 - env_params: User-defined parameters (JSON)
 - image: Docker image for the environment
 - created_at: Creation timestamp
+- sub_job_ids: Write shard ids for split jobs (JSON string array).
+  Written once at task creation by the job creator, read-only afterwards.
+  Empty/None for non-split jobs.
 """
 import pyarrow as pa
 
@@ -45,7 +48,20 @@ EVALUATION_ENV_SCHEMA = pa.schema([
 
     # Creation timestamp (Unix timestamp)
     pa.field('created_at', pa.int64(), nullable=False),
+
+    # 2026.10 job splitting: list of write shard ids, stored as a JSON
+    # string array (same storage pattern as env_params). Only rows of split
+    # jobs carry a value; written once at task creation, never updated.
+    pa.field('sub_job_ids', pa.string(), nullable=True),
 ])
+
+
+# 2026.10 job splitting: partition the env table by job_id (HASH).
+# Every env read path filters by job_id first, so this enables partition
+# pruning for the SDK's job_id -> sub_job_ids resolution lookups.
+EVALUATION_ENV_PARTITION_COLUMN = "job_id"
+EVALUATION_ENV_PARTITION_TYPE = "HASH"
+EVALUATION_ENV_PARTITIONS = 128
 
 
 # Index configuration for the table

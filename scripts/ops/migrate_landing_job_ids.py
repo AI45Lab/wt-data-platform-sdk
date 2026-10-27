@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Migrate landing rows from incorrect job_id values to corrected job_id values.
 
-This script does not update job_id in place. job_id is the HASH partition key,
-so a safe fix is copy-to-new-job-id and verify. It intentionally never deletes
-old rows; run a separate cleanup after reviewing the migration result.
+This script does not update job_id in place. Landing is HASH-partitioned on
+``sub_job_id`` (job splitting; non-split rows self-reference their job_id), so
+an in-place job_id edit would break shard routing. The safe fix remains
+copy-to-new-job-id and verify; copies are written with
+``sub_job_id = new_job_id`` (non-split semantics). It intentionally never
+deletes old rows; run a separate cleanup after reviewing the migration result.
 
 Fill JOB_ID_MAPPING before production use, or pass --mapping-json/--mapping-file
 for one-off validation.
@@ -197,7 +200,14 @@ def migrate_batch(
             )
         if record.id in already_present_ids:
             continue
-        migrated.append(record.model_copy(update={"job_id": new_job_id}))
+        # model_copy bypasses validators, so sub_job_id must be set
+        # explicitly: copying keeps the old shard id, which both breaks
+        # HASH(sub_job_id) routing and fails SDK upsert validation.
+        migrated.append(
+            record.model_copy(
+                update={"job_id": new_job_id, "sub_job_id": new_job_id}
+            )
+        )
     return migrated
 
 

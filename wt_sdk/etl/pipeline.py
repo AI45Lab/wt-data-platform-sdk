@@ -36,6 +36,7 @@ from .stage import (
 IMMUTABLE_ETL_FIELDS = {
     "id",
     "job_id",
+    "sub_job_id",
     "session_id",
     "created_at",
     "source_updated_at",

@@ -14,7 +14,13 @@ from wt_sdk.config import (
     resolve_env_config_db_uri,
     resolve_env_config_table_name,
 )
-from wt_sdk.core.evaluation_env_schema import EVALUATION_ENV_SCHEMA, SCALAR_INDEX_COLUMNS
+from wt_sdk.core.evaluation_env_schema import (
+    EVALUATION_ENV_PARTITIONS,
+    EVALUATION_ENV_PARTITION_COLUMN,
+    EVALUATION_ENV_PARTITION_TYPE,
+    EVALUATION_ENV_SCHEMA,
+    SCALAR_INDEX_COLUMNS,
+)
 
 
 def init_evaluation_env_table(
@@ -54,12 +60,16 @@ def init_evaluation_env_table(
     except Exception:
         print(f"Table '{table_name}' does not exist or could not be dropped (this is OK)")
 
-    # 1. Create table (no partition needed for this table)
+    # 1. Create table, HASH-partitioned on job_id (2026.10 job splitting:
+    #    every read path filters by job_id first, so buckets prune per job).
     print(f"Creating table '{table_name}'...")
     try:
         session.create_table(
             table_name,
             EVALUATION_ENV_SCHEMA,
+            partition_column=EVALUATION_ENV_PARTITION_COLUMN,
+            partition_type=EVALUATION_ENV_PARTITION_TYPE,
+            partitions=EVALUATION_ENV_PARTITIONS,
         )
         print(f"Table '{table_name}' created successfully")
     except Exception as e:
@@ -72,23 +82,24 @@ def init_evaluation_env_table(
             raise
         raise
 
-    # 2. Create scalar indexes for query performance
-    print("\nCreating scalar indexes for better query performance...")
-    for column in SCALAR_INDEX_COLUMNS:
-        print(f"  Creating index on '{column}'...")
-        session.create_scalar_index(table_name, column)
-        print(f"  ✓ Index created on '{column}'")
-
+    # 2. Scalar indexes are NOT created here: on a HASH-partitioned table
+    #    indexes live per bucket and are created after data is ingested.
     print("\n" + "=" * 80)
     print("Evaluation environment config table initialization complete!")
     print("=" * 80)
     print(f"  Table: {table_name}")
     print(f"  Location: {db_uri}/{table_name}.lance")
     print(f"  Schema: {len(EVALUATION_ENV_SCHEMA)} fields")
-    print(f"  Indexes: {len(SCALAR_INDEX_COLUMNS)} scalar indexes")
-    print(f"\n  Indexes created on:")
+    print(
+        f"  Partitioning: {EVALUATION_ENV_PARTITION_TYPE}({EVALUATION_ENV_PARTITION_COLUMN})"
+        f" x {EVALUATION_ENV_PARTITIONS}"
+    )
+    print(f"\n  Scalar indexes configured ({len(SCALAR_INDEX_COLUMNS)}):")
     for col in SCALAR_INDEX_COLUMNS:
         print(f"    - {col}")
+    print("\n  NOTE: For HASH partitioned tables, indexes are created per bucket.")
+    print("  After ingesting data, run:")
+    print(f"    python scripts/ops/maintain_env_config_indexes.py --profile {'production' if profile in {'prod', 'production'} else 'test'}")
     return 0
 
 

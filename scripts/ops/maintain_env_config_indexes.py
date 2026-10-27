@@ -2,8 +2,11 @@
 """Create missing indexes and fully optimize a profile-selected env-config table.
 
 The target is ``env_config_test`` for the test profile and
-``evaluation_env_config`` for production. Both are unpartitioned tables in the
-database selected by ``WT_SDK_ENV_CONFIG_DB_URI``.
+``evaluation_env_config`` for production, in the database selected by
+``WT_SDK_ENV_CONFIG_DB_URI``. Since the 2026.10 job-splitting change these
+tables are HASH(job_id)-partitioned, so indexes are created and optimized
+per materialized bucket; legacy unpartitioned tables keep the single-table
+code path.
 
 Examples:
   python scripts/ops/maintain_env_config_indexes.py --dry-run
@@ -16,7 +19,7 @@ import argparse
 import json
 import sys
 from datetime import timedelta
-from typing import Any
+from typing import Any, List, Optional, Tuple
 
 import dldb
 
@@ -55,6 +58,25 @@ def _coverage_row(item: Any) -> dict[str, Any]:
     }
 
 
+def _maintenance_targets(session, table_name: str) -> Tuple[Optional[str], List[Optional[int]]]:
+    """Return (partition_type, targets) for index maintenance.
+
+    targets is [None] for unpartitioned tables (whole-table operations) or
+    the list of materialized HASH bucket ids for partitioned tables.
+    """
+    try:
+        record = session.schema_table.get(table_name)
+    except Exception:
+        record = None
+    partition_type = str(getattr(record, "partition_type", None) or "").upper()
+    if record is None or partition_type != "HASH":
+        return (partition_type or None), [None]
+    table = session._get_table(table_name, None)
+    if not hasattr(table, "list_partitions"):
+        return partition_type, [None]
+    return partition_type, sorted(table.list_partitions())
+
+
 def maintain_env_config_indexes(
     session,
     *,
@@ -75,24 +97,40 @@ def maintain_env_config_indexes(
             + ", ".join(missing_schema_fields)
         )
 
+    partition_type, targets = _maintenance_targets(session, table_name)
     configured = [(column, INDEX_TYPE) for column in SCALAR_INDEX_COLUMNS]
+
+    per_target_existing = {}
+    for target in targets:
+        per_target_existing[target] = {
+            _index_name(index)
+            for index in session.list_indices(table_name, partition=target)
+        }
     existing_before = sorted(
-        {_index_name(index) for index in session.list_indices(table_name)}
+        {name for existing in per_target_existing.values() for name in existing}
     )
-    missing = [
-        (column, index_type)
-        for column, index_type in configured
-        if f"{column}_idx" not in existing_before
-    ]
+    per_target_missing = {
+        target: [
+            (column, index_type)
+            for column, index_type in configured
+            if f"{column}_idx" not in existing
+        ]
+        for target, existing in per_target_existing.items()
+    }
 
     summary: dict[str, Any] = {
         "table_name": table_name,
+        "partition_type": partition_type,
+        "targets": [str(target) for target in targets],
         "expected_indexes": [f"{column}_idx" for column, _ in configured],
         "existing_indexes_before": existing_before,
-        "missing_indexes_before": [f"{column}_idx" for column, _ in missing],
+        "missing_indexes_before": {
+            str(target): [f"{column}_idx" for column, _ in missing]
+            for target, missing in per_target_missing.items()
+        },
         "indexes_created": [],
         "optimize_requested": optimize,
-        "optimized": False,
+        "optimized": [],
         "coverage": [],
         "dry_run": dry_run,
         "errors": [],
@@ -101,60 +139,85 @@ def maintain_env_config_indexes(
     if dry_run:
         return summary
 
-    if create_missing:
-        print(f"Creating {len(missing)} missing indexes: {[f'{c}_idx' for c, _ in missing]}", flush=True)
-        for column, index_type in missing:
+    for target in targets:
+        label = "whole table" if target is None else f"bucket {target}"
+        missing = per_target_missing[target]
+
+        if create_missing and missing:
+            print(
+                f"Creating {len(missing)} missing indexes on {label}: "
+                f"{[f'{c}_idx' for c, _ in missing]}",
+                flush=True,
+            )
+            for column, index_type in missing:
+                try:
+                    session.create_scalar_index(
+                        table_name,
+                        column,
+                        partition=target,
+                        index_type=index_type,
+                    )
+                    summary["indexes_created"].append(
+                        {
+                            "partition": target,
+                            "column": column,
+                            "index_name": f"{column}_idx",
+                            "index_type": index_type,
+                        }
+                    )
+                except Exception as exc:
+                    summary["errors"].append(
+                        {
+                            "action": "create_scalar_index",
+                            "partition": target,
+                            "column": column,
+                            "error": str(exc),
+                        }
+                    )
+
+        if optimize:
             try:
-                session.create_scalar_index(
+                print(
+                    f"Optimizing {label} (compact_files + optimize_indices + cleanup_old_versions)...",
+                    flush=True,
+                )
+                if not callable(getattr(session, "optimize", None)):
+                    raise RuntimeError(
+                        "Installed dldb does not expose session.optimize(...)"
+                    )
+                session.optimize(
                     table_name,
-                    column,
-                    index_type=index_type,
+                    partition=target,
+                    cleanup_older_than=cleanup_older_than,
                 )
-                summary["indexes_created"].append(
-                    {
-                        "column": column,
-                        "index_name": f"{column}_idx",
-                        "index_type": index_type,
-                    }
-                )
+                summary["optimized"].append(target)
             except Exception as exc:
                 summary["errors"].append(
                     {
-                        "action": "create_scalar_index",
-                        "column": column,
+                        "action": "optimize",
+                        "partition": target,
                         "error": str(exc),
                     }
                 )
 
-    if optimize:
         try:
-            print("Optimizing table (compact_files + optimize_indices + cleanup_old_versions)...", flush=True)
-            if not callable(getattr(session, "optimize", None)):
-                raise RuntimeError(
-                    "Installed dldb does not expose session.optimize(...)"
+            summary["coverage"].extend(
+                {
+                    "partition": target,
+                    **_coverage_row(item),
+                }
+                for item in session.list_index_coverage(
+                    table_name, partition=target
                 )
-            session.optimize(table_name, cleanup_older_than=cleanup_older_than)
-            summary["optimized"] = True
+            )
         except Exception as exc:
             summary["errors"].append(
                 {
-                    "action": "optimize",
+                    "action": "list_index_coverage",
+                    "partition": target,
                     "error": str(exc),
                 }
             )
-
-    try:
-        summary["coverage"] = [
-            _coverage_row(item)
-            for item in session.list_index_coverage(table_name)
-        ]
-    except Exception as exc:
-        summary["errors"].append(
-            {
-                "action": "list_index_coverage",
-                "error": str(exc),
-            }
-        )
 
     return summary
 

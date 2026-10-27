@@ -128,7 +128,9 @@ def message(role: str, text: str) -> dict:
     return {"role": role, "content": text}
 
 
-job_id = "evaluation-run-001"       # 一次评测运行，也是 HASH 分区键
+job_id = "evaluation-run-001"       # 一次评测运行；用户可见的完整任务 id。
+                                     # （landing 分区列为 sub_job_id，非拆分任务
+                                     #   由 SDK 自动回填为 job_id。）
 session_id = str(uuid.uuid4())      # 一条 agent 轨迹
 created_at = int(time.time())
 
@@ -174,6 +176,8 @@ with WTGatewayClient() as client:
         deserialize_json=True,  # 将 JSON 列返回为 dict/list。
     )
     first_step_id = trajectory[0]["step_id"]  # query_data() 返回 List[dict]。
+    # landing 分区列为 sub_job_id；非拆分任务的 sub_job_id 即 job_id，
+    # 因此这里直接用 job_id 作为分区值。
     job_row_count = client.count_landing(partition=job_id)
 
     # 同时知道 job_id 和 id 时，优先使用这种可剪枝查询。
@@ -385,6 +389,10 @@ with WTGatewayClient() as client:
     )
 ```
 
+landing 上 `partitions` 传入的是 sub_job_id（hash bucket 由它推导）；非拆分任务
+唯一的 sub_job_id 就是 job_id，上面的值可以直接使用。拆分任务请逐个传入
+`"{job_id}#{suffix}"` 分片 id。
+
 该方法会创建缺失的预设索引并执行 dldb optimize，使新增数据进入已有索引。
 `all_partitions=True` 只用于定期全表维护，不应在每次写入后调用。context
 manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇总。
@@ -404,6 +412,13 @@ manager 会负责关闭 dldb session，并在启用 metrics 时输出最终汇�
 `table=client.config.tables.serving_table`。`get_by_id()`、`search()` 和
 `export_data_batches()` 默认查询 serving。查询条件中应尽量包含 `job_id`，以便
 执行 HASH bucket 剪枝。
+
+任务拆分（job splitting）：`job_id` 始终表示完整、用户可见的任务。landing 的
+分区键是内部写入分片 `sub_job_id` —— 记录未提供时 SDK 自动回填为 `job_id`
+（非拆分任务自引用 job_id）；拆分任务写入 `"{job_id}#{suffix}"` 分片，并注册在
+env 表的 `sub_job_ids` 中。SDK 会把仅含 job_id 的 landing 过滤条件改写为
+`sub_job_id IN (分片)` 并只裁剪到这些 bucket；serving 的分区键仍为 `job_id`。
+`resolve_sub_jobs(job_id)` 可直接获取分片列表。
 
 `query_data()` 和 `get_by_id()` 默认省略 null 表列；传入 `exclude_none=False`
 可以保留。所有返回完整记录的读取接口默认保留 JSON 字符串；
@@ -426,10 +441,11 @@ bucket；SDK 不再自行构造或 pin dldb wrapper。这不会缓存查询结�
 | `ingest_landing_batch(records)` | 写入记录列表或 `LandingRecordBatch`。 |
 | `query_data(filter_query, ..., table=None, exclude_none=True, deserialize_json=False)` | 默认查询 landing，也可查询指定表；始终返回 `List[dict]`。 |
 | `update_landing(filter_query, updates, ..., touch_source_updated_at=True)` | patch 匹配记录并默认刷新 `source_updated_at`；SDK 时间字段以及 `id`、`created_at`、`job_id` 均受保护。 |
-| `count_landing(partition=None)` | 统计行数，可选指定原始 `job_id` 或 hash bucket。 |
+| `count_landing(partition=None)` | 统计行数，可选指定原始 `sub_job_id` 值或 hash bucket。 |
 | `delete_landing(filter_query)` | 删除匹配的 landing 记录。 |
+| `resolve_sub_jobs(job_id)` | 返回一个 job 的写入分片列表（sub_job_ids）；非拆分任务返回 `[job_id]`。 |
 
-为兼容已有调用方式，`query_data()` 和 `update_landing()` 接受原始的 `partition="job-id"`。在 HASH 表上，SDK 会将其转换为 bucket 并补充 `job_id` 条件。仍建议在 `filter_query` 中显式包含 `job_id`。
+为兼容已有调用方式，`query_data()` 和 `update_landing()` 接受原始 partition 值；在 landing 上它是 `sub_job_id`（非拆分任务直接用 `job_id` 即可），SDK 会将其转换为 bucket 并补充 `sub_job_id` 条件。仍建议在 `filter_query` 中显式包含 `job_id`：SDK 会把它展开为该 job 在 env 表注册的 sub_job_ids，并只裁剪到这些 bucket。
 
 执行带排序或 limit 的 landing 查询时，应在 `filter_query` 中包含 `job_id`。在当前 dldb 分区模型中，跨 bucket 的 `order_by + limit` 不是全局归并排序。
 
@@ -544,8 +560,8 @@ pytest -q
 
 集成测试会向现有 `v2_landing_test` 和 `serving_test` 写入少量使用唯一范围的数据，
 并在 `finally` 中清理和验证。测试显式使用这两张测试表，不受
-`WT_SDK_PROFILE` 影响；数据库由 `WT_SDK_DB_URI` 选择。两张表都必须使用当前的
-`HASH(job_id)` schema。
+`WT_SDK_PROFILE` 影响；数据库由 `WT_SDK_DB_URI` 选择。两张表都必须使用当前
+schema：landing 为 `HASH(sub_job_id)`，serving 为 `HASH(job_id)`。
 
 ```bash
 set -a && source .env && set +a

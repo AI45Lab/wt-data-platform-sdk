@@ -73,14 +73,14 @@ def test_evaluate_cold_job_requires_complete_enriched_whole_job():
     job, reason = archive.evaluate_cold_job(
         _job_frame(),
         job_id=job_id,
-        bucket=7,
+        buckets=(3, 7),
         cutoff_exclusive_ms=1_000,
     )
 
     assert reason is None
     assert job is not None
     assert job.job_id == job_id
-    assert job.bucket == 7
+    assert job.buckets == (3, 7)
     assert job.row_count == 2
     assert job.max_source_updated_at == 200
     assert job.trainable_ids == frozenset({"row-2"})
@@ -98,7 +98,7 @@ def test_evaluate_cold_job_rejects_unsafe_jobs(frame, reason_fragment):
     job, reason = archive.evaluate_cold_job(
         frame,
         job_id="dataset#harness#model#task#20260801",
-        bucket=7,
+        buckets=(7,),
         cutoff_exclusive_ms=1_000,
     )
 
@@ -110,7 +110,7 @@ def test_verify_serving_publication_requires_matching_source_version(monkeypatch
     job, _ = archive.evaluate_cold_job(
         _job_frame(),
         job_id="dataset#harness#model#task#20260801",
-        bucket=7,
+        buckets=(7,),
         cutoff_exclusive_ms=1_000,
     )
     assert job is not None
@@ -160,7 +160,7 @@ def test_dry_run_discovers_without_creating_archive(monkeypatch):
     job, _ = archive.evaluate_cold_job(
         _job_frame(),
         job_id="dataset#harness#model#task#20260801",
-        bucket=7,
+        buckets=(7,),
         cutoff_exclusive_ms=1_000,
     )
     assert job is not None
@@ -224,7 +224,7 @@ def test_rollback_removes_staged_archive_only_when_source_is_intact(monkeypatch)
     job, _ = archive.evaluate_cold_job(
         _job_frame(),
         job_id="dataset#harness#model#task#20260801",
-        bucket=7,
+        buckets=(7,),
         cutoff_exclusive_ms=1_000,
     )
     assert job is not None
@@ -256,10 +256,41 @@ def test_rollback_removes_staged_archive_only_when_source_is_intact(monkeypatch)
         source_table="v2_landing_test",
         archive_table="archived_20260825_wind_tunnel_landing",
     ) is True
+    # Deletes sweep every materialized shard bucket (partition=None).
     assert session.deleted == [
         (
             "archived_20260825_wind_tunnel_landing",
             "job_id = 'dataset#harness#model#task#20260801'",
-            7,
+            None,
         )
     ]
+
+
+def test_verify_serving_publication_uses_job_id_serving_bucket(monkeypatch):
+    """Serving stays HASH(job_id): its bucket differs from landing shard buckets."""
+    job, _ = archive.evaluate_cold_job(
+        _job_frame(),
+        job_id="dataset#harness#model#task#20260801",
+        buckets=(3, 7),
+        cutoff_exclusive_ms=1_000,
+    )
+    assert job is not None
+
+    captured = {}
+
+    def fake_query_partition(session, *, table_name, partition, query, columns, **kwargs):
+        captured["partition"] = partition
+        return pd.DataFrame([{"id": "row-2", "source_updated_at": 200}])
+
+    monkeypatch.setattr(archive, "query_partition", fake_query_partition)
+    valid, _ = archive.verify_serving_publication(
+        object(),
+        job=job,
+        serving_table="serving_test",
+        serving_partitions=set(),
+    )
+    assert valid is True
+    assert captured["partition"] == (
+        archive.stable_hash(job.job_id) % archive.SERVING_PARTITIONS
+    )
+    assert captured["partition"] not in job.buckets

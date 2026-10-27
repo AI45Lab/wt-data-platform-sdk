@@ -5,39 +5,61 @@ import pyarrow as pa
 from scripts.ops import maintain_env_config_indexes as script
 
 
+class FakePartitionedTable:
+    def __init__(self, partitions):
+        self._partitions = list(partitions)
+
+    def list_partitions(self):
+        return list(self._partitions)
+
+
 class FakeSession:
-    def __init__(self, existing_indexes, table_name=script.TEST_ENV_CONFIG_TABLE):
+    def __init__(
+        self,
+        existing_indexes,
+        table_name=script.TEST_ENV_CONFIG_TABLE,
+        partition_type="HASH",
+        partition_column="job_id",
+        partitions=(3, 7),
+    ):
         self.table_name = table_name
         self.existing_indexes = list(existing_indexes)
         self.created = []
         self.optimize_calls = []
         self.tables = {}
+        self._partition_type = partition_type
+        self._partition_column = partition_column
+        self._partitions = list(partitions)
         self.schema_table = SimpleNamespace(
             get=lambda table_name: SimpleNamespace(
-                partition_column="",
-                partition_type="",
+                partition_column=self._partition_column,
+                partition_type=self._partition_type,
             )
         )
         self.db_conn = object()
+
+    def _get_table(self, table_name, partition):
+        assert table_name == self.table_name
+        return FakePartitionedTable(self._partitions)
 
     def get_schema(self, table_name):
         assert table_name == self.table_name
         return script.EVALUATION_ENV_SCHEMA
 
-    def list_indices(self, table_name):
+    def list_indices(self, table_name, partition=None):
         assert table_name == self.table_name
         return [SimpleNamespace(name=name) for name in self.existing_indexes]
 
-    def create_scalar_index(self, table_name, column, *, index_type):
+    def create_scalar_index(self, table_name, column, *, partition=None, index_type):
         assert table_name == self.table_name
-        self.created.append((column, index_type))
+        self.created.append((column, index_type, partition))
         self.existing_indexes.append(f"{column}_idx")
 
-    def optimize(self, table_name, cleanup_older_than=None):
-        self.optimize_calls.append(table_name)
+    def optimize(self, table_name, partition=None, cleanup_older_than=None):
+        self.optimize_calls.append((table_name, partition))
         self.cleanup_older_than = cleanup_older_than
 
-    def list_index_coverage(self, table_name):
+    def list_index_coverage(self, table_name, partition=None):
         assert table_name == self.table_name
         return [
             SimpleNamespace(
@@ -50,35 +72,66 @@ class FakeSession:
         ]
 
 
-def test_maintain_creates_missing_job_index_and_fully_optimizes():
+def test_maintain_creates_missing_job_index_per_hash_bucket():
     session = FakeSession(
         ["env_name_idx", "env_id_idx", "group_id_idx", "finished_idx"]
     )
     summary = script.maintain_env_config_indexes(session)
 
-    assert session.created == [("job_id", "BTREE")]
-    assert session.optimize_calls == [script.TEST_ENV_CONFIG_TABLE]
+    assert session.created == [("job_id", "BTREE", 3), ("job_id", "BTREE", 7)]
+    assert session.optimize_calls == [
+        (script.TEST_ENV_CONFIG_TABLE, 3),
+        (script.TEST_ENV_CONFIG_TABLE, 7),
+    ]
     assert summary["table_name"] == script.TEST_ENV_CONFIG_TABLE
+    assert summary["partition_type"] == "HASH"
+    assert summary["targets"] == ["3", "7"]
     assert summary["indexes_created"] == [
         {
+            "partition": 3,
             "column": "job_id",
             "index_name": "job_id_idx",
             "index_type": "BTREE",
-        }
+        },
+        {
+            "partition": 7,
+            "column": "job_id",
+            "index_name": "job_id_idx",
+            "index_type": "BTREE",
+        },
     ]
-    assert summary["optimized"] is True
+    assert summary["optimized"] == [3, 7]
+    assert {row["partition"] for row in summary["coverage"]} == {3, 7}
     assert summary["errors"] == []
 
 
-def test_dry_run_reports_missing_without_writes():
+def test_dry_run_reports_missing_per_bucket_without_writes():
     session = FakeSession([])
 
     summary = script.maintain_env_config_indexes(session, dry_run=True)
 
     assert session.created == []
     assert session.optimize_calls == []
-    assert summary["missing_indexes_before"] == summary["expected_indexes"]
+    assert summary["missing_indexes_before"] == {
+        "3": summary["expected_indexes"],
+        "7": summary["expected_indexes"],
+    }
     assert summary["coverage"] == []
+
+
+def test_legacy_unpartitioned_table_keeps_whole_table_path():
+    session = FakeSession(
+        ["env_name_idx", "env_id_idx", "group_id_idx", "finished_idx"],
+        partition_type="",
+        partition_column="",
+    )
+    summary = script.maintain_env_config_indexes(session)
+
+    assert session.created == [("job_id", "BTREE", None)]
+    assert session.optimize_calls == [(script.TEST_ENV_CONFIG_TABLE, None)]
+    assert summary["partition_type"] is None
+    assert summary["targets"] == ["None"]
+    assert summary["optimized"] == [None]
 
 
 def test_production_table_can_be_selected_explicitly():

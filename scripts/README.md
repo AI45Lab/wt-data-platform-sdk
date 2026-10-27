@@ -23,10 +23,11 @@ python scripts/ops/maintain_table_indexes.py \
   --table wind_tunnel_serving --all-partitions
 ```
 
-The separate, unpartitioned environment-config tables have their own maintenance
-command and automatically resolve `WT_SDK_ENV_CONFIG_DB_URI` (default
-`s3://wind-tunnel-env-config`). The command defaults to `env_config_test`;
-production must be selected explicitly:
+The separate environment-config tables have their own maintenance command and
+automatically resolve `WT_SDK_ENV_CONFIG_DB_URI` (default
+`s3://wind-tunnel-env-config`). They are now HASH(job_id)-partitioned with
+per-bucket indexes, so the command iterates materialized buckets. The command
+defaults to `env_config_test`; production must be selected explicitly:
 
 ```bash
 python scripts/ops/maintain_env_config_indexes.py --dry-run
@@ -63,13 +64,17 @@ python scripts/inspect/query_data.py --table v2_landing_test --count
 
 Inspect dldb's aggregate fragment statistics and per-index row coverage for
 selected HASH buckets, or scan all logical buckets. The command is read-only;
-expected index names and types come from `wt_sdk/core/schemas.py`:
+expected index names and types come from `wt_sdk/core/schemas.py` (env-config
+tables use `wt_sdk/core/evaluation_env_schema.py` and resolve
+`WT_SDK_ENV_CONFIG_DB_URI` automatically):
 
 ```bash
 python scripts/inspect/show_partition_status.py \
   --table v2_landing_test --partition 34 --partition 94
 python scripts/inspect/show_partition_status.py \
   --table wind_tunnel_landing --all-partitions
+python scripts/inspect/show_partition_status.py \
+  --table env_config_test --all-partitions
 ```
 
 Add `--show-all-indexes` to print the coverage of every existing index. Without
@@ -81,7 +86,7 @@ The summary columns are:
 
 | Column | Meaning |
 | --- | --- |
-| `BUCKET` | HASH bucket number, calculated as `stable_hash(job_id) % partitions`. |
+| `BUCKET` | HASH bucket number, calculated as `stable_hash(<partition-column value>) % partitions`; the partition column is `sub_job_id` for landing and `job_id` for serving. |
 | `STATE` | Combined bucket health classification described below. |
 | `ROWS` | Number of live rows in the latest physical-table version. |
 | `VER` | Current Lance version number for the physical bucket table. |

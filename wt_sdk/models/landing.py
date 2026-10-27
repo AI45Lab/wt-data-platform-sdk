@@ -64,7 +64,13 @@ class LandingRecord(BaseModel):
 
     # Additional Fields (2025-03)
     env_id: Optional[str] = Field(None, description="Environment ID")
-    job_id: Optional[str] = Field(None, description="Job ID")
+    job_id: Optional[str] = Field(None, description="Full task ID (user-visible, never a shard id)")
+    # 2026.10 job splitting: internal write shard id. Landing partition key.
+    # Non-split tasks self-reference job_id; split tasks use "{job_id}#{suffix}".
+    sub_job_id: Optional[str] = Field(
+        None,
+        description="Write shard ID; auto-derived to job_id when not provided",
+    )
     is_truncated: Optional[bool] = Field(None, description="Whether the response was truncated")
 
     # Asset Management
@@ -87,6 +93,14 @@ class LandingRecord(BaseModel):
 
         if self.source_updated_at is None:
             self.source_updated_at = sdk_time.now_ms()
+
+        # Job splitting: every landing/serving row must carry a non-empty
+        # sub_job_id (it is the landing partition key). Callers that don't
+        # split jobs never set it — backfill with job_id so old call sites
+        # need zero changes. Sub_job_id is immutable for the record's
+        # lifetime, so this derivation only fills the initial write.
+        if not self.sub_job_id and self.job_id:
+            self.sub_job_id = self.job_id
 
         # Auto-extract blob_manifest if empty and content exists
         if not self.blob_manifest:

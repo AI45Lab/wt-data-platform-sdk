@@ -82,43 +82,44 @@ def discover_env_jobs(
         raise ValueError("batch_size must be positive")
     selection_query = build_job_scope_query(job_ids, exclude_job_ids)
     max_query = _combine_queries("id IS NOT NULL", selection_query)
-    latest = manager.session.filter(
-        manager.table_name,
+    # Read the id projection and aggregate in-process: dldb applies
+    # order_by/limit per HASH bucket, so an order-by-id-desc limit=1 lookup
+    # can miss the true global maximum on the partitioned env table.
+    id_frame = manager._filter_table(
         query=max_query,
-        limit=1,
+        limit=None,
         columns=["id"],
-        order_by="id",
-        ascending=False,
         checkout_latest=True,
+        extra={"api": "env_discovery_max_id"},
     )
-    if latest is None or latest.empty:
+    if id_frame is None or id_frame.empty:
         return EnvDiscoveryReport(None, 0, 0, ())
 
-    snapshot_max_id = int(latest.iloc[0]["id"])
+    snapshot_max_id = int(id_frame["id"].max())
     last_id = -1
     rows_scanned = 0
     invalid_job_id_rows = 0
     aggregates: dict[str, _MutableJobSummary] = {}
 
     while last_id < snapshot_max_id:
-        window = f"id > {last_id} AND id <= {snapshot_max_id}"
+        # Arithmetic id windows with no limit/order_by: dldb's per-bucket
+        # limit semantics cannot drop or duplicate rows this way, so the
+        # scan stays exact on HASH(job_id)-partitioned env tables.
+        window_upper = min(last_id + batch_size, snapshot_max_id)
+        window = f"id > {last_id} AND id <= {window_upper}"
         query = _combine_queries(window, selection_query)
-        frame = manager.session.filter(
-            manager.table_name,
+        frame = manager._filter_table(
             query=query,
-            limit=batch_size,
+            limit=None,
             columns=ENV_DISCOVERY_COLUMNS,
-            order_by="id",
-            ascending=True,
             checkout_latest=True,
+            extra={"api": "env_discovery_scan"},
         )
+        last_id = window_upper
         if frame is None or frame.empty:
-            break
+            continue
 
-        batch_max_id = last_id
         for row in frame.to_dict(orient="records"):
-            row_id = int(row["id"])
-            batch_max_id = max(batch_max_id, row_id)
             rows_scanned += 1
             job_id = _nonempty_string(row.get("job_id"))
             if not job_id:
@@ -135,10 +136,6 @@ def discover_env_jobs(
                 aggregate.duplicate_env_ids.add(env_id)
             else:
                 aggregate.env_ids.add(env_id)
-
-        if batch_max_id <= last_id:
-            raise RuntimeError("env discovery did not advance its id cursor")
-        last_id = batch_max_id
 
     jobs = tuple(
         EnvJobSummary(

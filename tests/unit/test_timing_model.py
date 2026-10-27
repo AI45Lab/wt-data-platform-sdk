@@ -273,17 +273,31 @@ class _FakeSchemaRecord:
 
 
 class _FakeSchemaTable:
-    def __init__(self, partition_column: str, partition_type: str = "VALUE", partitions: int = -1):
+    def __init__(
+        self,
+        partition_column: str,
+        partition_type: str = "VALUE",
+        partitions: int = -1,
+        landing_partition_column: Optional[str] = None,
+    ):
         self._record = _FakeSchemaRecord(partition_column, partition_type, partitions)
+        # Job splitting: landing tables partition on sub_job_id while serving
+        # keeps the constructor column (job_id). When set, landing-table
+        # lookups (any table name containing "landing") report that column.
+        self._landing_partition_column = landing_partition_column
 
     def get(self, table_name: str):
-        _ = table_name
-        return self._record
+        column = self._record.partition_column
+        if self._landing_partition_column and "landing" in table_name:
+            column = self._landing_partition_column
+        return _FakeSchemaRecord(
+            column, self._record.partition_type, self._record.partitions
+        )
 
 
 def test_table_cache_invalidation_removes_dldb_wrapper(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.db_conn = object()
     fake_session.tables = {}
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
@@ -304,6 +318,33 @@ def _capture_logger(monkeypatch, module):
     monkeypatch.setattr(module.logger, "warning", lambda message: None)
     monkeypatch.setattr(module.logger, "error", lambda message: None)
     return messages
+
+
+class _FakeEnvManager:
+    """Fake env-config manager for sub_job_id resolution.
+
+    Jobs absent from the mapping are non-split (get_sub_job_ids -> None).
+    """
+
+    def __init__(self, sub_job_ids: Optional[Dict[str, List[str]]] = None):
+        self.sub_job_ids = dict(sub_job_ids or {})
+        self.requested_job_ids: List[str] = []
+
+    def get_sub_job_ids(self, job_id: str, *, checkout_latest: bool = True):
+        self.requested_job_ids.append(job_id)
+        return self.sub_job_ids.get(job_id)
+
+    def close(self):
+        return None
+
+
+def _install_sub_job_env(monkeypatch, sub_job_ids=None) -> _FakeEnvManager:
+    """Route client._get_env_manager() to a fake without touching S3."""
+    fake = _FakeEnvManager(sub_job_ids)
+    monkeypatch.setattr(
+        env_manager_module, "EnvConfigManager", lambda *args, **kwargs: fake
+    )
+    return fake
 
 
 def _make_landing_record(record_id: str = "rec-1") -> LandingRecord:
@@ -429,11 +470,13 @@ def test_wt_gateway_client_writes_metrics_log_file(monkeypatch):
 
 def test_pull_data_prunes_job_id_partition_from_where_sql(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "is_terminal": True,
             "created_at": 100,
             "id": "rec-1",
@@ -456,12 +499,14 @@ def test_pull_data_prunes_job_id_partition_from_where_sql(monkeypatch):
     )
 
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
+    # Non-split job: the SDK rewrites the job_id filter to sub_job_id IN (job_id).
+    assert "sub_job_id IN ('job-123')" in fake_session.last_filter_kwargs["query"]
     assert fake_session.last_filter_kwargs["partition_cond"] is None
 
 
 def test_pull_and_iter_data_batches_can_read_named_serving_table(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["serving_test"] = [
         {
             "dataset_type": "RL",
@@ -501,7 +546,7 @@ def test_pull_and_iter_data_batches_can_read_named_serving_table(monkeypatch):
 
 def test_export_data_batches_builds_fixed_manifest_and_defaults_to_serving(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["serving_test"] = [
         {
             "dataset_type": "RL",
@@ -550,7 +595,7 @@ def test_export_data_batches_builds_fixed_manifest_and_defaults_to_serving(monke
 
 def test_export_data_batches_rejects_duplicate_ids_before_yielding(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["serving_test"] = [
         {"dataset_type": "RL", "id": "duplicate", "__partition": 1},
         {"dataset_type": "RL", "id": "duplicate", "__partition": 2},
@@ -568,11 +613,13 @@ def test_export_data_batches_rejects_duplicate_ids_before_yielding(monkeypatch):
 
 def test_query_data_converts_job_id_partition_string_to_hash_bucket(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "session_id": "session-1",
             "created_at": 100,
             "id": "rec-1",
@@ -594,11 +641,13 @@ def test_query_data_supports_production_job_id_with_hash_separators(monkeypatch)
     job_id = "dataset#harness#model#task-type#20260804#owner#integration-run"
     bucket = stable_hash(job_id) % 128
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": job_id,
+            "sub_job_id": job_id,
             "session_id": "session-production-job-id",
             "created_at": 100,
             "id": "rec-production-job-id",
@@ -618,13 +667,14 @@ def test_query_data_supports_production_job_id_with_hash_separators(monkeypatch)
     assert f"job_id = '{job_id}'" in fake_session.last_filter_kwargs["query"]
 
 
-def test_query_data_adds_job_id_filter_when_partition_string_is_raw_job_id(monkeypatch):
+def test_query_data_adds_partition_filter_when_partition_string_is_raw_sub_job_id(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "session_id": "session-1",
             "created_at": 100,
             "id": "rec-1",
@@ -632,6 +682,7 @@ def test_query_data_adds_job_id_filter_when_partition_string_is_raw_job_id(monke
         {
             "dataset_type": "RL",
             "job_id": "job-collision",
+            "sub_job_id": "job-collision",
             "session_id": "session-1",
             "created_at": 101,
             "id": "rec-2",
@@ -647,16 +698,17 @@ def test_query_data_adds_job_id_filter_when_partition_string_is_raw_job_id(monke
     )
 
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
-    assert "job_id = 'job-123'" in fake_session.last_filter_kwargs["query"]
+    assert "sub_job_id = 'job-123'" in fake_session.last_filter_kwargs["query"]
 
 
-def test_count_landing_with_raw_job_id_partition_filters_within_hash_bucket(monkeypatch):
+def test_count_landing_with_raw_partition_filters_within_sub_job_id_hash_bucket(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "created_at": 100,
             "id": "rec-1",
         }
@@ -669,12 +721,12 @@ def test_count_landing_with_raw_job_id_partition_filters_within_hash_bucket(monk
 
     assert count == 1
     assert fake_session.last_filter_kwargs["partitions"] == [stable_hash("job-123") % 128]
-    assert fake_session.last_filter_kwargs["query"] == "job_id = 'job-123'"
+    assert fake_session.last_filter_kwargs["query"] == "sub_job_id = 'job-123'"
 
 
 def test_count_serving_uses_the_same_job_id_hash_collision_filter(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["serving_test"] = [
         {
             "dataset_type": "RL",
@@ -695,7 +747,7 @@ def test_count_serving_uses_the_same_job_id_hash_collision_filter(monkeypatch):
 
 def test_query_data_can_query_named_serving_table(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["serving_test"] = [
         {
             "dataset_type": "RL",
@@ -734,7 +786,7 @@ def test_query_data_can_query_named_serving_table(monkeypatch):
 
 def test_keyword_search_only_targets_search_text(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
@@ -757,11 +809,13 @@ def test_keyword_search_only_targets_search_text(monkeypatch):
 
 def test_public_row_read_apis_can_deserialize_json_columns(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     bucket = stable_hash("job-json") % 128
     row = {
         "dataset_type": "RL",
         "job_id": "job-json",
+        "sub_job_id": "job-json",
         "session_id": "session-json",
         "created_at": 100,
         "id": "record-json",
@@ -841,7 +895,7 @@ def test_public_row_read_apis_can_deserialize_json_columns(monkeypatch):
 
 def test_get_tags_distribution_uses_non_empty_filter(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["serving_test"] = [
         {"id": "serving-1", "tags": ["safe", "trainable"]},
         {"id": "serving-2", "tags": ["safe"]},
@@ -856,7 +910,7 @@ def test_get_tags_distribution_uses_non_empty_filter(monkeypatch):
 
 def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["v2_landing_test"] = [
         {
             "dataset_type": "RL",
@@ -890,7 +944,7 @@ def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):
 
 def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="v2_landing_test")))
@@ -910,6 +964,7 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
     assert [item["column"] for item in summary["indexes_created"]] == [
         "id",
         "job_id",
+        "sub_job_id",
         "session_id",
         "created_at",
         "source_updated_at",
@@ -932,7 +987,7 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
 
 def test_index_maintenance_uses_dldb_table_resolution(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="v2_landing_test")))
@@ -957,7 +1012,7 @@ def test_index_maintenance_uses_dldb_table_resolution(monkeypatch):
 
 def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
@@ -1005,7 +1060,7 @@ def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatc
 
 def test_serving_index_maintenance_requires_explicit_partition_scope(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
@@ -1016,7 +1071,7 @@ def test_serving_index_maintenance_requires_explicit_partition_scope(monkeypatch
 
 def test_index_maintenance_rejects_custom_table(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
     client = WTGatewayClient()
@@ -1027,11 +1082,13 @@ def test_index_maintenance_rejects_custom_table(monkeypatch):
 
 def test_get_max_created_at_prunes_landing_hash_partition(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "created_at": 100,
             "id": "rec-1",
         }
@@ -1048,11 +1105,13 @@ def test_get_max_created_at_prunes_landing_hash_partition(monkeypatch):
 
 def test_search_landing_prunes_job_id_hash_partition(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "created_at": 100,
             "id": "rec-1",
         }
@@ -1068,11 +1127,13 @@ def test_search_landing_prunes_job_id_hash_partition(monkeypatch):
 
 def test_delete_landing_prunes_job_id_hash_partition(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "created_at": 100,
             "id": "rec-1",
         }
@@ -1091,11 +1152,13 @@ def test_delete_landing_prunes_job_id_hash_partition(monkeypatch):
 def test_delete_landing_skips_never_materialized_buckets(monkeypatch):
     """A filter covering a job_id whose bucket was never written must not raise."""
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-a",
+            "sub_job_id": "job-a",
             "created_at": 100,
             "id": "rec-1",
         }
@@ -1113,13 +1176,14 @@ def test_delete_landing_skips_never_materialized_buckets(monkeypatch):
     assert fake_session.last_delete_kwargs["partition"] != stable_hash("job-b") % 128
 
 
-def test_update_landing_converts_job_id_partition_string_to_hash_bucket(monkeypatch):
+def test_update_landing_converts_sub_job_id_partition_string_to_hash_bucket(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "created_at": 100,
             "id": "rec-1",
             "is_terminal": False,
@@ -1138,13 +1202,14 @@ def test_update_landing_converts_job_id_partition_string_to_hash_bucket(monkeypa
     assert fake_session.last_update_kwargs["partition"] == stable_hash("job-123") % 128
 
 
-def test_update_landing_adds_job_id_filter_when_partition_string_is_raw_job_id(monkeypatch):
+def test_update_landing_adds_sub_job_id_filter_when_partition_string_is_raw_sub_job_id(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
+            "sub_job_id": "job-123",
             "created_at": 100,
             "id": "rec-1",
             "is_terminal": False,
@@ -1161,14 +1226,15 @@ def test_update_landing_adds_job_id_filter_when_partition_string_is_raw_job_id(m
     )
 
     assert fake_session.last_update_kwargs["partition"] == stable_hash("job-123") % 128
-    assert "job_id = 'job-123'" in fake_session.last_update_kwargs["where"]
+    assert "sub_job_id = 'job-123'" in fake_session.last_update_kwargs["where"]
 
 
 def test_update_landing_touches_source_time_without_mutating_input(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
     monkeypatch.setattr(sdk_time, "now_ms", lambda: 1_800_000_000_123)
+    _install_sub_job_env(monkeypatch)
     updates = {"is_trainable": True}
 
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
@@ -1189,7 +1255,8 @@ def test_update_landing_touches_source_time_without_mutating_input(monkeypatch):
 
 def test_update_landing_can_skip_source_touch_and_strictly_validates_flag(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
-    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    _install_sub_job_env(monkeypatch)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
 
@@ -1367,11 +1434,13 @@ def test_landing_partial_upsert_submits_only_provided_columns(monkeypatch):
     assert kwargs["insert_missing"] is False
     # Only explicitly provided columns plus match keys / source_updated_at are
     # submitted; created_at, dt, serving_updated_at and wide payload columns
-    # (messages) are absent.
+    # (messages) are absent. sub_job_id rides along: the auto-derive validator
+    # backfills it into model_fields_set so partial frames can hash-route.
     assert set(kwargs["datas"].columns) == {
         "dataset_type",
         "id",
         "job_id",
+        "sub_job_id",
         "is_terminal",
         "step_reward",
         "source_updated_at",
@@ -1647,3 +1716,119 @@ def test_env_config_manager_allows_stale_snapshot_override(monkeypatch):
 
     assert len(configs) == 1
     assert fake_session.filter_calls[-1]["checkout_latest"] is False
+
+
+# ==================== Job splitting: sub_job_id behavior ====================
+
+
+def _make_split_landing_client(monkeypatch, sub_job_ids):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    env = _install_sub_job_env(monkeypatch, sub_job_ids)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    return fake_session, env, client
+
+
+def test_query_data_rewrites_split_job_filter_to_all_shard_buckets(monkeypatch):
+    shards = ["job-split#a1", "job-split#b2"]
+    fake_session, _, client = _make_split_landing_client(
+        monkeypatch, {"job-split": shards}
+    )
+    fake_session.rows["landing_test"] = [
+        {
+            "dataset_type": "RL",
+            "job_id": "job-split",
+            "sub_job_id": shard,
+            "created_at": 100,
+            "id": f"rec-{index}",
+        }
+        for index, shard in enumerate(shards)
+    ]
+
+    result = client.query_data("job_id = 'job-split'")
+
+    assert [record["id"] for record in result] == ["rec-0", "rec-1"]
+    assert fake_session.last_filter_kwargs["partitions"] == sorted(
+        stable_hash(shard) % 128 for shard in shards
+    )
+    assert "sub_job_id IN ('job-split#a1', 'job-split#b2')" in (
+        fake_session.last_filter_kwargs["query"]
+    )
+    assert "job_id = 'job-split'" in fake_session.last_filter_kwargs["query"]
+
+
+def test_query_data_leaves_explicit_sub_job_id_filters_untouched(monkeypatch):
+    fake_session, env, client = _make_split_landing_client(
+        monkeypatch, {"job-split": ["job-split#a1", "job-split#b2"]}
+    )
+    fake_session.rows["landing_test"] = [
+        {
+            "dataset_type": "RL",
+            "job_id": "job-split",
+            "sub_job_id": "job-split#a1",
+            "created_at": 100,
+            "id": "rec-0",
+        }
+    ]
+
+    client.query_data("job_id = 'job-split' AND sub_job_id = 'job-split#a1'")
+
+    # An explicit shard predicate must skip env resolution entirely.
+    assert env.requested_job_ids == []
+    assert fake_session.last_filter_kwargs["partitions"] == [
+        stable_hash("job-split#a1") % 128
+    ]
+    assert "sub_job_id IN" not in fake_session.last_filter_kwargs["query"]
+
+
+def test_resolve_sub_jobs_returns_and_caches_shards(monkeypatch):
+    _, env, client = _make_split_landing_client(
+        monkeypatch, {"job-split": ["job-split#a1", "job-split#b2"]}
+    )
+
+    assert client.resolve_sub_jobs("job-split") == ["job-split#a1", "job-split#b2"]
+    # Cached: the second call must not hit the env manager again.
+    assert client.resolve_sub_jobs("job-split") == ["job-split#a1", "job-split#b2"]
+    assert env.requested_job_ids == ["job-split"]
+
+    # Non-split jobs (no env row) resolve to a self-referencing list.
+    assert client.resolve_sub_jobs("job-plain") == ["job-plain"]
+
+    with pytest.raises(ValueError, match="non-empty string"):
+        client.resolve_sub_jobs("  ")
+
+
+def test_landing_record_auto_derives_sub_job_id(monkeypatch):
+    record = _make_landing_record()
+    assert record.sub_job_id == "job-123"
+
+    explicit = _make_landing_record().model_copy(update={"sub_job_id": "job-123#s9"})
+    assert explicit.sub_job_id == "job-123#s9"
+
+
+def test_upsert_landing_rejects_foreign_sub_job_id(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+
+    foreign = _make_landing_record().model_copy(update={"sub_job_id": "other-job#s1"})
+    with pytest.raises(ValueError, match="sub_job_id"):
+        client.upsert_landing(foreign)
+
+    missing = _make_landing_record().model_copy(update={"sub_job_id": None})
+    with pytest.raises(ValueError, match="sub_job_id"):
+        client.upsert_landing(missing)
+
+    assert fake_session.last_upsert_kwargs is None
+
+
+def test_update_landing_protects_sub_job_id(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+
+    with pytest.raises(ValueError, match="protected columns"):
+        client.update_landing("id = 'rec-1'", {"sub_job_id": "job-123#s1"})
+
+    assert fake_session.last_update_kwargs is None

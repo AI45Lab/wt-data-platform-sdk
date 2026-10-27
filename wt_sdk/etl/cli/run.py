@@ -91,6 +91,9 @@ def _summary_payload(
         "landing_rows_updated": summary.landing_rows_updated,
         "serving_rows_upserted": summary.serving_rows_upserted,
         "job_ids": sorted(summary.job_ids),
+        "sub_job_ids": sorted(summary.sub_job_ids),
+        "successful_sub_job_ids": sorted(summary.successful_sub_job_ids),
+        "failed_sub_job_ids": sorted(summary.failed_sub_job_ids),
         "serving_reward_positive_rows": (
             sum(positive_counts.values()) if positive_counts is not None else None
         ),
@@ -281,6 +284,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-time", default=None, help="Manual inclusive range start.")
     parser.add_argument("--end-time", default=None, help="Manual inclusive range end.")
     parser.add_argument("--job-id", action="extend", nargs="+", default=None)
+    parser.add_argument(
+        "--sub-job-id",
+        default=None,
+        help=(
+            "Restrict a --job-id run to one write shard (split jobs) for "
+            "manual re-runs. Requires exactly one --job-id."
+        ),
+    )
     parser.add_argument("--session-id", action="extend", nargs="+", default=None)
     parser.add_argument(
         "--session",
@@ -336,6 +347,12 @@ def main() -> int:
         raise SystemExit("--session-id requires --job-id")
     if args.session_id and len(args.job_id) != 1:
         raise SystemExit("--session-id requires exactly one --job-id")
+    if args.sub_job_id and not args.job_id:
+        raise SystemExit("--sub-job-id requires --job-id")
+    if args.sub_job_id and len(args.job_id) != 1:
+        raise SystemExit("--sub-job-id requires exactly one --job-id")
+    if args.sub_job_id and args.session_id:
+        raise SystemExit("--sub-job-id cannot be combined with --session-id")
     if args.session and (args.job_id or args.session_id):
         raise SystemExit("--session cannot be combined with --job-id/--session-id")
     if args.end_time and not args.start_time:
@@ -419,6 +436,13 @@ def main() -> int:
                     summary = engine.run_sessions(
                         pipeline,
                         [SessionKey(args.job_id[0], session_id) for session_id in args.session_id],
+                        dry_run=args.dry_run,
+                    )
+                elif args.job_id and args.sub_job_id:
+                    summary = engine.run_job(
+                        pipeline,
+                        args.job_id[0],
+                        sub_job_id=args.sub_job_id,
                         dry_run=args.dry_run,
                     )
                 elif args.job_id:

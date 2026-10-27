@@ -82,6 +82,10 @@ class RunSummary:
     job_ids: set[str] = field(default_factory=set)
     dirty_sessions: set[SessionKey] = field(default_factory=set)
     successful_sessions: set[SessionKey] = field(default_factory=set)
+    # Job splitting: shards touched by this run and their per-shard outcome.
+    sub_job_ids: set[str] = field(default_factory=set)
+    successful_sub_job_ids: set[str] = field(default_factory=set)
+    failed_sub_job_ids: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.trainability_policy = normalize_trainability_policy(
@@ -148,6 +152,9 @@ class RunSummary:
         self.job_ids.update(other.job_ids)
         self.dirty_sessions.update(other.dirty_sessions)
         self.successful_sessions.update(other.successful_sessions)
+        self.sub_job_ids.update(other.sub_job_ids)
+        self.successful_sub_job_ids.update(other.successful_sub_job_ids)
+        self.failed_sub_job_ids.update(other.failed_sub_job_ids)
 
     @property
     def status(self) -> str:

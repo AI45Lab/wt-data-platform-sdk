@@ -28,6 +28,11 @@ BASE_FIELDS = [
     # 2026.3.3 added
     pa.field('env_id', pa.string(), nullable=True),
     pa.field('job_id', pa.string(), nullable=True),
+    # 2026.10 job splitting: sub_job_id is the internal write shard id.
+    # job_id remains the full, user-visible task id everywhere.
+    # Non-split tasks: sub_job_id = job_id (self-reference convention).
+    # Split tasks: sub_job_id = "{job_id}#{random suffix}", unique per shard.
+    pa.field('sub_job_id', pa.string(), nullable=True),
     pa.field('is_truncated', pa.bool_(), nullable=True),
     
     # --- 评分  ---
@@ -74,8 +79,11 @@ SERVING_SCHEMA = LANDING_SCHEMA
 # 4. Partition Definitions
 # ==============================================================================
 
-# Landing table: partition by job_id (HASH partition)
-LANDING_PARTITION_COLUMN = "job_id"
+# Landing table: partition by sub_job_id (HASH partition).
+# 2026.10 job splitting: workers of a split job write disjoint sub_job_ids,
+# so concurrent writers land in different physical buckets and no longer
+# contend on the same commit. job_id stays queryable via scalar index.
+LANDING_PARTITION_COLUMN = "sub_job_id"
 LANDING_PARTITION_TYPE = "HASH"
 LANDING_PARTITIONS = 128
 
@@ -94,6 +102,7 @@ SERVING_PARTITIONS = 128
 LANDING_SCALAR_INDEXES = [
     ("id", "BTREE"),
     ("job_id", "BTREE"),
+    ("sub_job_id", "BTREE"),
     ("session_id", "BTREE"),
     ("created_at", "BTREE"),
     ("source_updated_at", "BTREE"),

@@ -75,6 +75,15 @@ class WTGatewayClient:
         )
         self.landing_uri = self.config.tables.landing_uri()
         self.serving_uri = self.config.tables.serving_uri()
+
+        # Job splitting: cache of job_id -> resolved sub_job_ids. Shard lists
+        # are written once at task creation and never change, so a successful
+        # resolution is valid for the client's lifetime (no TTL needed). The
+        # env-config manager is created lazily on first shard resolution so
+        # clients that never query by job_id pay no extra connection.
+        self._sub_job_ids_cache: Dict[str, List[str]] = {}
+        self._env_manager: Optional[Any] = None
+
         logger.info(f"WTGatewayClient initialized")
         logger.info(f"Landing table URI: {self.landing_uri}")
         logger.info(f"Serving table URI: {self.serving_uri}")
@@ -370,11 +379,103 @@ class WTGatewayClient:
         return partition_filter
 
     def _resolve_landing_query_partitions(self, table_name: str, query: str) -> Optional[list]:
-        """Resolve job_id partitions for landing-like tables when the query contains job_id."""
+        """Resolve HASH partitions for landing/serving tables from the query.
+
+        The two SDK tables partition on different columns since job splitting
+        (landing: sub_job_id, serving: job_id); pruning uses the table's
+        actual metadata partition column either way.
+        """
         metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
-        if metadata.get("partition_column") != self.LANDING_PARTITION_KEY:
+        partition_column = metadata.get("partition_column")
+        if partition_column not in (self.LANDING_PARTITION_KEY, self.SERVING_PARTITION_KEY):
             return None
-        return self._resolve_partitions_for_query(table_name, query, self.LANDING_PARTITION_KEY)
+        return self._resolve_partitions_for_query(table_name, query, partition_column)
+
+    # ==================== Job splitting: sub_job_id resolution ====================
+
+    def _get_env_manager(self) -> Any:
+        """Lazily create the env-config manager used for shard resolution."""
+        if self._env_manager is None:
+            from wt_sdk.env_config_client import EnvConfigManager
+
+            self._env_manager = EnvConfigManager(
+                profile=self.config.tables.profile,
+            )
+        return self._env_manager
+
+    def _resolve_sub_job_ids(self, job_id: str) -> List[str]:
+        """Resolve the write shards of a job via the env config table.
+
+        Non-split jobs (no env row carrying sub_job_ids, or no env row at
+        all) resolve to ``[job_id]``. Env read failures propagate to the
+        caller — a fallback value is never cached.
+        """
+        cached = self._sub_job_ids_cache.get(job_id)
+        if cached is not None:
+            return list(cached)
+
+        manager = self._get_env_manager()
+        sub_job_ids = manager.get_sub_job_ids(job_id)
+        resolved = list(sub_job_ids) if sub_job_ids else [job_id]
+        for shard in resolved:
+            if not str(shard or "").strip():
+                raise ValueError(
+                    f"env config for job '{job_id}' contains an empty sub_job_id"
+                )
+        self._sub_job_ids_cache[job_id] = resolved
+        return list(resolved)
+
+    def resolve_sub_jobs(self, job_id: str) -> List[str]:
+        """Return the write shards (sub_job_ids) of a job.
+
+        Non-split jobs resolve to ``[job_id]``. Split jobs return the shard
+        ids recorded in the env config table at task creation. Results are
+        cached per client instance; shard lists are immutable after creation.
+        """
+        if not job_id or not job_id.strip():
+            raise ValueError("job_id must be a non-empty string")
+        return self._resolve_sub_job_ids(job_id)
+
+    def _rewrite_landing_filter_for_sub_jobs(
+        self,
+        filter_query: str,
+        table_name: Optional[str] = None,
+    ) -> str:
+        """Expand job_id predicates into sub_job_id predicates for landing.
+
+        The landing table is HASH-partitioned on sub_job_id, so a job_id-only
+        filter cannot prune partitions. When the filter carries job_id values
+        and no sub_job_id condition, append ``sub_job_id IN (<shards>)``
+        resolved from the env config table so partition pruning stays
+        effective. Filters that already constrain sub_job_id, tables whose
+        partition column is not sub_job_id, and filters without job_id
+        predicates pass through unchanged.
+        """
+        if not filter_query or not filter_query.strip():
+            return filter_query
+        resolved_table = table_name or self.config.tables.landing_table
+        metadata = self._get_partition_metadata_for_table(
+            resolved_table, self.LANDING_PARTITION_KEY
+        )
+        if metadata.get("partition_column") != self.LANDING_PARTITION_KEY:
+            return filter_query
+        if self._extract_partition_values_from_query(filter_query, self.LANDING_PARTITION_KEY):
+            return filter_query
+        job_ids = self._extract_partition_values_from_query(filter_query, "job_id")
+        if not job_ids:
+            return filter_query
+
+        shards: List[str] = []
+        for job_id in job_ids:
+            for shard in self._resolve_sub_job_ids(job_id):
+                if shard not in shards:
+                    shards.append(shard)
+        if not shards:
+            return filter_query
+        shard_literals = ", ".join(
+            f"'{self._escape_sql_string(shard)}'" for shard in shards
+        )
+        return f"({filter_query}) AND {self.LANDING_PARTITION_KEY} IN ({shard_literals})"
 
     def _get_table_info(self, table: str) -> Dict[str, Any]:
         """Return metadata and record converters for landing or serving."""
@@ -559,6 +660,28 @@ class WTGatewayClient:
                 f"missing for IDs: {', '.join(missing_job_ids)}"
             )
 
+        # Job splitting: every row must carry a shard id, and it must route
+        # back to its own job — either the self-referencing job_id (non-split
+        # tasks, backfilled by the record model) or "{job_id}#{suffix}".
+        # This guards the invariant that job_id is always the full task id
+        # and never a shard id.
+        invalid_sub_job_ids = []
+        for record in source_records:
+            sub_job_id = str(getattr(record, "sub_job_id", None) or "").strip()
+            if not sub_job_id:
+                invalid_sub_job_ids.append(f"{record.id}: sub_job_id missing")
+            elif sub_job_id != record.job_id and not sub_job_id.startswith(f"{record.job_id}#"):
+                invalid_sub_job_ids.append(
+                    f"{record.id}: sub_job_id {sub_job_id!r} must equal job_id "
+                    f"{record.job_id!r} or start with {record.job_id + '#'!r}"
+                )
+        if invalid_sub_job_ids:
+            raise ValueError(
+                f"{operation} requires sub_job_id == job_id or "
+                f"'{{job_id}}#{{suffix}}' for every record; "
+                f"invalid: {'; '.join(invalid_sub_job_ids)}"
+            )
+
         missing_keys = []
         for record in source_records:
             for column in match_columns:
@@ -592,6 +715,8 @@ class WTGatewayClient:
     # Columns never written by a partial landing upsert: these are immutable or
     # SDK-owned fields.  ``dt`` is derived from ``created_at`` by the model and
     # may appear in ``model_fields_set`` even when the caller omitted it.
+    # NOTE: sub_job_id must NOT be excluded here — the partial frame needs the
+    # landing partition column (present via model backfill) for HASH routing.
     PARTIAL_LANDING_UPDATE_EXCLUDED_COLUMNS = (
         "created_at",
         "dt",
@@ -746,6 +871,12 @@ class WTGatewayClient:
     ) -> Union[List[LandingRecord], List[ServingRecord]]:
         """Internal generic query path for landing and serving tables."""
         info = self._get_table_info(table)
+        if table == "landing":
+            # Job splitting: expand job_id predicates into sub_job_id
+            # predicates so HASH pruning stays effective on landing.
+            filter_query = self._rewrite_landing_filter_for_sub_jobs(
+                filter_query, info["table_name"]
+            )
         effective_query = filter_query
         partitions = None
         if partition is not None:
@@ -853,6 +984,12 @@ class WTGatewayClient:
 
     def _delete(self, table: str, filter_query: str) -> int:
         info = self._get_table_info(table)
+        if table == "landing":
+            # Job splitting: expand job_id predicates into sub_job_id
+            # predicates so HASH pruning stays effective on landing.
+            filter_query = self._rewrite_landing_filter_for_sub_jobs(
+                filter_query, info["table_name"]
+            )
         fallback_key = self.LANDING_PARTITION_KEY if table == "landing" else self.SERVING_PARTITION_KEY
         partitions = self._resolve_partitions_for_query(
             info["table_name"],
@@ -991,6 +1128,13 @@ class WTGatewayClient:
             )
             partitions = [resolved_partition]
         else:
+            # Job splitting: expand job_id predicates into sub_job_id
+            # predicates so HASH pruning stays effective on landing (the
+            # helper no-ops on tables whose partition column is not
+            # sub_job_id, such as serving and env-config tables).
+            effective_query = self._rewrite_landing_filter_for_sub_jobs(
+                effective_query, table_name
+            )
             partitions = self._resolve_partitions_for_query(
                 table_name,
                 effective_query,
@@ -1039,9 +1183,10 @@ class WTGatewayClient:
     ) -> Dict[str, Any]:
         """Update matching landing rows and return an execution acknowledgement.
 
-        SDK-managed timestamps, id, created_at, and job_id are immutable to
-        callers. Source time is refreshed by default. Include job_id for HASH
-        pruning.
+        SDK-managed timestamps, id, created_at, job_id, and sub_job_id are
+        immutable to callers. Source time is refreshed by default. A job_id
+        filter is expanded to the job's sub_job_ids for HASH pruning; the
+        optional ``partition`` argument is interpreted as a sub_job_id value.
         """
         if not filter_query or not filter_query.strip():
             raise ValueError("filter_query is required for update_landing")
@@ -1054,6 +1199,7 @@ class WTGatewayClient:
             "id",
             "created_at",
             "job_id",
+            "sub_job_id",
             "source_updated_at",
             "serving_updated_at",
         }
@@ -1067,6 +1213,11 @@ class WTGatewayClient:
             effective_updates["source_updated_at"] = sdk_time.now_ms()
 
         info = self._get_table_info("landing")
+        # Job splitting: rewrite job_id predicates into sub_job_id
+        # predicates before any partition resolution below.
+        filter_query = self._rewrite_landing_filter_for_sub_jobs(
+            filter_query, info["table_name"]
+        )
         effective_filter_query = self._add_hash_partition_filter_for_raw_value(
             info["table_name"],
             filter_query,
@@ -1211,6 +1362,12 @@ class WTGatewayClient:
         if end_time is not None:
             filters.append(f"created_at <= {end_time}")
         if where_sql:
+            # Job splitting: expand job_id predicates into sub_job_id
+            # predicates so HASH pruning stays effective on landing (the
+            # helper no-ops on non-sub_job_id partition columns).
+            where_sql = self._rewrite_landing_filter_for_sub_jobs(
+                where_sql, table_name
+            )
             filters.append(f"({where_sql})")
 
         # Legacy dt tables still use date-range pruning.
@@ -1283,6 +1440,11 @@ class WTGatewayClient:
 
         table_name = table or self.config.tables.serving_table
         effective_query = filter_query if filter_query and filter_query.strip() else "id IS NOT NULL"
+        # Job splitting: expand job_id predicates into sub_job_id predicates
+        # when exporting a sub_job_id-partitioned table (no-op on serving).
+        effective_query = self._rewrite_landing_filter_for_sub_jobs(
+            effective_query, table_name
+        )
         existing_partitions = self._list_existing_partitions_for_table(table_name)
         resolved_partitions = self._resolve_partitions_for_query(
             table_name,
@@ -1460,6 +1622,13 @@ class WTGatewayClient:
 
         final_filter = " AND ".join(filters)
 
+        # Job splitting: expand job_id predicates into sub_job_id predicates
+        # when pulling from a sub_job_id-partitioned table.
+        if partition_key == self.LANDING_PARTITION_KEY:
+            final_filter = self._rewrite_landing_filter_for_sub_jobs(
+                final_filter, table_name
+            )
+
         # Legacy dt tables still use date-range pruning.
         partition_cond = None
         partitions = None
@@ -1509,6 +1678,9 @@ class WTGatewayClient:
     ) -> Optional[dict]:
         """Return the latest matching row, optionally decoding JSON columns."""
         table_name = table or self.config.tables.landing_table
+        # Job splitting: expand job_id predicates into sub_job_id predicates
+        # so HASH pruning stays effective on landing.
+        where_sql = self._rewrite_landing_filter_for_sub_jobs(where_sql, table_name)
         partitions = self._resolve_landing_query_partitions(table_name, where_sql)
 
         logger.info(f"Getting max record from table '{table_name}': filter={where_sql}")
@@ -1577,6 +1749,10 @@ class WTGatewayClient:
             filters.append(f"(search_text LIKE '%{escaped_query}%' ESCAPE '\\')")
 
         final_filter = " AND ".join(filters) if filters else "id IS NOT NULL"
+        # Job splitting: expand job_id predicates into sub_job_id predicates
+        # when the target is a sub_job_id-partitioned landing table (the
+        # helper no-ops on job_id-partitioned serving tables).
+        final_filter = self._rewrite_landing_filter_for_sub_jobs(final_filter, table_name)
         partitions = self._resolve_landing_query_partitions(table_name, final_filter)
 
         logger.info(f"Searching table '{table_name}': query={query}, limit={limit}, stream={stream}, dataset_type={dataset_type}")
@@ -1866,6 +2042,12 @@ class WTGatewayClient:
     # ==================== Lifecycle Management ====================
 
     def close(self) -> Optional[Dict[str, Any]]:
+        if self._env_manager is not None:
+            try:
+                self._env_manager.close()
+            except Exception:
+                logger.debug("Error closing env config manager", exc_info=True)
+            self._env_manager = None
         summary = self.session.shutdown()
         if isinstance(summary, dict):
             self._log_dldb_metrics_summary(summary)

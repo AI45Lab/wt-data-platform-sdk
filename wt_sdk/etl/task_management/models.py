@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -43,6 +44,10 @@ ETL_TASK_SCHEMA = pa.schema(
         pa.field("report_dir", pa.string(), nullable=True),
         pa.field("last_error", pa.string(), nullable=True),
         pa.field("summary_json", pa.string(), nullable=True),
+        # Job splitting: shards whose processing completed successfully,
+        # stored as a JSON string array. Job-level completion means every
+        # shard of env.sub_job_ids is listed here.
+        pa.field("completed_sub_job_ids", pa.string(), nullable=True),
     ]
 )
 
@@ -72,6 +77,7 @@ class ETLTask:
     report_dir: Optional[str] = None
     last_error: Optional[str] = None
     summary_json: Optional[str] = None
+    completed_sub_job_ids: Tuple[str, ...] = ()
     created_at_text: str = field(init=False)
     updated_at_text: str = field(init=False)
     started_at_text: Optional[str] = field(init=False)
@@ -98,6 +104,16 @@ class ETLTask:
 
     def with_updates(self, **changes) -> "ETLTask":
         return replace(self, **changes)
+
+    @property
+    def completed_sub_job_ids_json(self) -> Optional[str]:
+        """Encode the shard-completion markers for the task-table column."""
+
+        return (
+            json.dumps(list(self.completed_sub_job_ids))
+            if self.completed_sub_job_ids
+            else None
+        )
 
 
 def format_task_time(value_ms: Optional[int]) -> Optional[str]:

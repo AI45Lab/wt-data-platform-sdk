@@ -9,10 +9,12 @@ from wt_sdk.core.schemas import (
     JSON_TYPE,
     LANDING_PARTITION_COLUMN,
     LANDING_PARTITION_TYPE,
+    LANDING_PARTITIONS,
     LANDING_SCALAR_INDEXES,
     LANDING_SCHEMA,
     SERVING_PARTITION_COLUMN,
     SERVING_PARTITION_TYPE,
+    SERVING_PARTITIONS,
     SERVING_SCALAR_INDEXES,
     SERVING_SCHEMA,
 )
@@ -235,8 +237,12 @@ def test_blob_manifest_derivation_failure_never_blocks_record_creation(monkeypat
 
 def test_landing_and_serving_use_the_same_schema_and_hash_partition():
     assert LANDING_SCHEMA is SERVING_SCHEMA
-    assert LANDING_PARTITION_COLUMN == SERVING_PARTITION_COLUMN == "job_id"
+    # Job splitting: landing shards writes by sub_job_id; serving keeps the
+    # user-visible job_id as its partition value.
+    assert LANDING_PARTITION_COLUMN == "sub_job_id"
+    assert SERVING_PARTITION_COLUMN == "job_id"
     assert LANDING_PARTITION_TYPE == SERVING_PARTITION_TYPE == "HASH"
+    assert LANDING_PARTITIONS == SERVING_PARTITIONS == 128
     assert LandingRecord.model_fields.keys() == ServingRecord.model_fields.keys()
 
     for field_name in (
@@ -264,6 +270,7 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
     assert LANDING_SCALAR_INDEXES == [
         ("id", "BTREE"),
         ("job_id", "BTREE"),
+        ("sub_job_id", "BTREE"),
         ("session_id", "BTREE"),
         ("created_at", "BTREE"),
         ("source_updated_at", "BTREE"),

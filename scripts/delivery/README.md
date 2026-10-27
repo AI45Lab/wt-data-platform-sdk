@@ -63,7 +63,9 @@ landing table names are rejected.
 
 When `--columns` is omitted, the command uses the reviewed external-delivery
 column set. `search_text` is excluded by default because it is an internal
-frontend-search field. A caller may still request it explicitly.
+frontend-search field, and `sub_job_id` (the internal write-shard id since
+job splitting) is excluded because it is not part of the external contract.
+A caller may still request either explicitly.
 
 The fixed output format is UTF-8 JSONL: one JSON object per line. JSON payload
 columns such as `messages`, `chosen_trace`, and `meta_json` are decoded into

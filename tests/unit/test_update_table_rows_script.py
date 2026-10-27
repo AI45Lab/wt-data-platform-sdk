@@ -130,7 +130,9 @@ def test_update_and_verify_uses_landing_api_and_preserves_source_filter():
         "(job_id = 'job-1' AND id IN ('record-1'))"
     )
     assert updates == {"is_session_completed": True}
-    assert partition == "job-1"
+    # Landing is HASH(sub_job_id): no explicit partition is passed; the SDK
+    # rewrites the job_id predicate and resolves the shard buckets itself.
+    assert partition is None
 
 
 def test_update_and_verify_updates_serving_through_dldb_and_stamps_time(monkeypatch):

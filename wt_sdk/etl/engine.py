@@ -247,26 +247,82 @@ class ETLEngine:
         pipeline: PipelineDefinition,
         job_id: str,
         *,
+        sub_job_id: Optional[str] = None,
         dry_run: bool = False,
     ) -> RunSummary:
-        """Immediately process every non-null session currently in one job."""
+        """Immediately process every non-null session currently in one job.
+
+        Split jobs iterate their shards one at a time (shard list from the
+        env config table; non-split jobs resolve to ``[job_id]`` alone, so
+        their behavior is unchanged). Each shard's queries filter on
+        ``job_id AND sub_job_id`` so landing reads stay pruned to that
+        shard's single HASH bucket. ``sub_job_id`` restricts the run to one
+        shard for manual re-runs.
+        """
 
         normalized_job_id = job_id.strip()
         if not normalized_job_id:
             raise ValueError("job_id is required")
-        source_table = self.client.config.tables.landing_table
-        discovery_filters = [f"job_id = '{_escape_sql(normalized_job_id)}'"]
-        if pipeline.job_discovery_filter is not None:
-            discovery_filters.append(f"({pipeline.job_discovery_filter})")
+        if sub_job_id is not None:
+            normalized_sub_job_id = sub_job_id.strip()
+            if not normalized_sub_job_id:
+                raise ValueError("sub_job_id must be non-empty when provided")
+            if (
+                normalized_sub_job_id != normalized_job_id
+                and not normalized_sub_job_id.startswith(f"{normalized_job_id}#")
+            ):
+                raise ValueError(
+                    "sub_job_id must equal job_id or be "
+                    f"'{{job_id}}#{{suffix}}': got {normalized_sub_job_id!r}"
+                )
+            shards = [normalized_sub_job_id]
+        else:
+            shards = self.client.resolve_sub_jobs(normalized_job_id)
+
         summary = self._new_summary(pipeline)
         summary.job_ids.add(normalized_job_id)
+        for shard in shards:
+            failed_rows_before = summary.failed_rows
+            self._run_job_shard(
+                pipeline,
+                normalized_job_id,
+                shard,
+                summary=summary,
+                dry_run=dry_run,
+            )
+            summary.sub_job_ids.add(shard)
+            if summary.failed_rows == failed_rows_before:
+                summary.successful_sub_job_ids.add(shard)
+            else:
+                summary.failed_sub_job_ids.add(shard)
+        if summary.failed_rows:
+            raise ETLRunFailed(summary)
+        return summary
+
+    def _run_job_shard(
+        self,
+        pipeline: PipelineDefinition,
+        normalized_job_id: str,
+        shard: str,
+        *,
+        summary: RunSummary,
+        dry_run: bool,
+    ) -> None:
+        """Discover and process one write shard of a job, in place on ``summary``."""
+
+        source_table = self.client.config.tables.landing_table
+        discovery_filters = [
+            f"job_id = '{_escape_sql(normalized_job_id)}'",
+            f"sub_job_id = '{_escape_sql(shard)}'",
+        ]
+        if pipeline.job_discovery_filter is not None:
+            discovery_filters.append(f"({pipeline.job_discovery_filter})")
         discovery_started_ns = time.perf_counter_ns()
         try:
             rows = self._query_source_with_retry(
-                description=f"discover job {normalized_job_id!r}",
+                description=f"discover job {normalized_job_id!r} shard {shard!r}",
                 filter_query=" AND ".join(discovery_filters),
                 columns=["id", "job_id", "session_id"],
-                partition=normalized_job_id,
                 checkout_latest=True,
                 table=source_table,
                 exclude_none=False,
@@ -280,7 +336,7 @@ class ETLEngine:
                     exc,
                 )
             )
-            raise ETLRunFailed(summary) from exc
+            return
         finally:
             summary.discovery_duration_ms += _elapsed_ms(discovery_started_ns)
         summary.discovery_rows += len(rows)
@@ -306,13 +362,11 @@ class ETLEngine:
             keys,
             dry_run=dry_run,
             refresh_latest=False,
+            sub_job_id=shard,
         )
         summary.merge(processed)
         for failure in discovery_failures:
             summary.add_failure(failure)
-        if summary.failed_rows:
-            raise ETLRunFailed(summary)
-        return summary
 
     def run_jobs(
         self,
@@ -676,6 +730,7 @@ class ETLEngine:
         *,
         dry_run: bool,
         refresh_latest: bool,
+        sub_job_id: Optional[str] = None,
     ) -> RunSummary:
         """Batch-load sessions while preserving session-at-a-time stage execution."""
 
@@ -696,6 +751,7 @@ class ETLEngine:
                         pipeline,
                         batch,
                         checkout_latest=checkout_latest,
+                        sub_job_id=sub_job_id,
                     )
                 except Exception as exc:
                     batch_failed = True
@@ -842,10 +898,11 @@ class ETLEngine:
                     f"AND id IN ({ids})"
                 )
                 try:
+                    # No raw partition value: update_landing rewrites the
+                    # job_id predicate to the job's sub_job_ids and prunes.
                     self.client.update_landing(
                         query,
                         updates,
-                        partition=job_id,
                     )
                 except Exception as exc:
                     for result_index, patch in chunk:
@@ -922,6 +979,7 @@ class ETLEngine:
         keys: Sequence[SessionKey],
         *,
         checkout_latest: bool,
+        sub_job_id: Optional[str] = None,
     ) -> dict[SessionKey, list[dict[str, object]]]:
         if not keys:
             return {}
@@ -937,6 +995,13 @@ class ETLEngine:
             f"job_id = '{_escape_sql(job_id)}' "
             f"AND session_id IN ({session_values})"
         )
+        if sub_job_id is not None:
+            # Shard-pinned read: prunes to the shard's single HASH bucket
+            # without an env-table lookup.
+            query = f"{query} AND sub_job_id = '{_escape_sql(sub_job_id)}'"
+        # No raw partition value is passed: the landing partition column is
+        # sub_job_id since job splitting, and the client resolves buckets
+        # from the sub_job_id literals in this filter.
         if pipeline.input_scope is PipelineInputScope.MATCHED_ROWS:
             # MATCHED_ROWS is validated to have one safe pipeline predicate.
             # The canonical serving pipeline uses this to avoid loading the
@@ -945,10 +1010,10 @@ class ETLEngine:
         rows = self._query_source_with_retry(
             description=(
                 f"load {len(keys)} session(s) for job {job_id!r}"
+                + (f" shard {sub_job_id!r}" if sub_job_id is not None else "")
             ),
             filter_query=query,
             columns=list(pipeline.source_columns or ()),
-            partition=job_id,
             checkout_latest=checkout_latest,
             table=source_table,
             exclude_none=False,
