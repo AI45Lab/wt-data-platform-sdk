@@ -42,6 +42,10 @@ fi
 # Only this job gets the raised timeout; interactive writers keep defaults.
 export WT_SDK_S3_REQUEST_TIMEOUT="${WT_SDK_S3_REQUEST_TIMEOUT:-300}"
 
+# Always import wt_sdk from THIS repo, not whatever the python env's editable
+# install points at (hosts may share the env with other services).
+export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
 for table in "$@"; do
     ts=$(date +%Y%m%d_%H%M%S)
     log_file="$LOG_DIR/maintain_${table}_${ts}.log"
