@@ -10,7 +10,15 @@
 set -u
 
 REPO_DIR="${REPO_DIR:-$HOME/wt-data-platform-sdk}"
-PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/wt-dldb-v1/bin/python}"
+# Prefer a wt-dldb-v1 env in the invoking user's home, fall back to the
+# original /root location (big-worker-hs2).
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if [ -x "$HOME/miniconda3/envs/wt-dldb-v1/bin/python" ]; then
+        PYTHON_BIN="$HOME/miniconda3/envs/wt-dldb-v1/bin/python"
+    else
+        PYTHON_BIN="/root/miniconda3/envs/wt-dldb-v1/bin/python"
+    fi
+fi
 LOG_DIR="${LOG_DIR:-$REPO_DIR/maintain_logs}"
 HEALTH_CHECK="$REPO_DIR/scripts/ops/bucket_health_check.py"
 MAINTAIN="$REPO_DIR/scripts/ops/maintain_table_indexes.py"
