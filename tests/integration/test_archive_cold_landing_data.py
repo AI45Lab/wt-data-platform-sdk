@@ -142,7 +142,7 @@ def test_archive_cold_landing_data_real_copy_delete_and_cleanup():
             assert result["archived_jobs"] == [
                 {
                     "job_id": job_id,
-                    "bucket": target_bucket,
+                    "buckets": [target_bucket],
                     "rows": 3,
                     "new_rows_copied": 3,
                 }

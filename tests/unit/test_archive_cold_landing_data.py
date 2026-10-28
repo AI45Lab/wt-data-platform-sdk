@@ -167,6 +167,7 @@ def test_dry_run_discovers_without_creating_archive(monkeypatch):
 
     monkeypatch.setattr(archive.dldb, "connect", lambda *args, **kwargs: session)
     monkeypatch.setattr(archive, "verify_landing_layout", lambda *args, **kwargs: None)
+    monkeypatch.setattr(archive, "verify_serving_layout", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         archive,
         "discover_cold_jobs",

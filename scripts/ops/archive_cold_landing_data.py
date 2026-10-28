@@ -50,6 +50,9 @@ from wt_sdk.core.schemas import (
     LANDING_PARTITIONS,
     LANDING_SCHEMA,
     SERVING_PARTITIONS,
+    SERVING_PARTITION_COLUMN,
+    SERVING_PARTITION_TYPE,
+    SERVING_SCHEMA,
 )
 
 
@@ -188,6 +191,27 @@ def verify_landing_layout(session, table_name: str) -> None:
         )
     if session.get_schema(table_name) != LANDING_SCHEMA:
         raise ValueError(f"Table {table_name!r} schema differs from LANDING_SCHEMA")
+
+
+def expected_serving_metadata() -> Dict[str, Any]:
+    return {
+        "partition_column": SERVING_PARTITION_COLUMN,
+        "partition_type": SERVING_PARTITION_TYPE,
+        "partitions": SERVING_PARTITIONS,
+    }
+
+
+def verify_serving_layout(session, table_name: str) -> None:
+    if not session.table_exists(table_name):
+        raise ValueError(f"Required table {table_name!r} does not exist")
+    record = session.schema_table.get(table_name)
+    if partition_metadata(record) != expected_serving_metadata():
+        raise ValueError(
+            f"Table {table_name!r} has unexpected partition metadata: "
+            f"{partition_metadata(record)}"
+        )
+    if session.get_schema(table_name) != SERVING_SCHEMA:
+        raise ValueError(f"Table {table_name!r} schema differs from SERVING_SCHEMA")
 
 
 def list_partitions(session, table_name: str) -> List[int]:
@@ -758,7 +782,7 @@ def run_archive(
     serving_session = _connect(serving_db_uri)
     try:
         verify_landing_layout(session, target.source_table)
-        verify_landing_layout(serving_session, target.serving_table)
+        verify_serving_layout(serving_session, target.serving_table)
         jobs, excluded_reasons = discover_cold_jobs(
             session,
             serving_session,
