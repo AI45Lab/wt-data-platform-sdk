@@ -1,7 +1,8 @@
-"""Real DLDB/S3 coverage for unified read APIs and reliable serving export.
+"""Real DLDB coverage for unified read APIs and reliable serving export.
 
-Every operation is pinned to ``v2_landing_test`` or ``serving_test``.  Each test
-uses a unique ``job_id`` and verifies cleanup in ``finally`` before exiting.
+Every operation is pinned to ``landing_test`` (GPFS landing DB) or
+``serving_test`` (S3 serving DB).  Each test uses a unique ``job_id`` and
+verifies cleanup in ``finally`` before exiting.
 """
 
 import json
@@ -16,12 +17,16 @@ from wt_sdk import (
     TableConfig,
     WTGatewayClient,
 )
+from wt_sdk.config import (
+    TEST_LANDING_TABLE as LANDING_TEST_TABLE,
+    TEST_SERVING_TABLE as SERVING_TEST_TABLE,
+)
 
 
-LANDING_TEST_TABLE = "v2_landing_test"
-SERVING_TEST_TABLE = "serving_test"
+# New-generation stack: test tables in their role databases (GPFS landing / S3 serving).
 TEST_TABLE_CONFIG = GatewayConfig(
     tables=TableConfig(
+        profile="test",
         landing_table=LANDING_TEST_TABLE,
         serving_table=SERVING_TEST_TABLE,
     )

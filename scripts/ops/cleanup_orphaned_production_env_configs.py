@@ -3,8 +3,8 @@
 
 The production environment-config table is a control-plane table, while the
 production landing table is the source of truth for active SAfactory jobs.
-This command deliberately compares only those two tables.  The historical
-``wind_tunnel_landing_legacy`` table and all test tables are out of scope.
+This command deliberately compares only those two tables; test tables are out
+of scope.
 
 The default mode is a read-only dry run.  A destructive run requires both
 ``--execute`` and ``--confirm-delete``.  The production landing job-id set and
@@ -179,8 +179,9 @@ def delete_env_rows_by_job_id(
 
 
 def _build_production_client() -> WTGatewayClient:
+    # No database URI is pinned: TableConfig defaults route landing to the
+    # GPFS landing database and serving to S3.
     tables = TableConfig(
-        db_uri=default_config.tables.db_uri,
         landing_table=DEFAULT_LANDING_TABLE,
         serving_table=DEFAULT_SERVING_TABLE,
         profile="production",
@@ -253,7 +254,10 @@ def run(
     allow_empty_landing: bool,
 ) -> int:
     client = _build_production_client()
-    manager = EnvConfigManager(profile="production")
+    manager = EnvConfigManager(
+        table_name=DEFAULT_ENV_CONFIG_TABLE,
+        profile="production",
+    )
     try:
         landing_job_ids = collect_production_landing_job_ids(client)
         env_rows = load_production_env_rows(manager)
@@ -335,7 +339,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Preview/delete production env-config rows whose job_id is absent "
-            "from production wind_tunnel_landing"
+            "from production wt_landing"
         )
     )
     mode = parser.add_mutually_exclusive_group()

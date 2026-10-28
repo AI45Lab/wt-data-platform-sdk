@@ -81,23 +81,29 @@ class EnvConfigManager:
     ):
         from wt_sdk.config import (
             S3Config,
+            is_remote_uri,
             resolve_env_config_db_uri,
             resolve_env_config_table_name,
         )
 
         self.table_name = resolve_env_config_table_name(table_name, profile)
         self.db_uri = resolve_env_config_db_uri(db_uri)
-        self.storage_options = storage_options or S3Config().to_storage_options()
+        if storage_options is not None:
+            self.storage_options = storage_options
+        elif is_remote_uri(self.db_uri):
+            self.storage_options = S3Config().to_storage_options()
+        else:
+            # Local filesystem databases (GPFS hot layer) take no S3 options.
+            self.storage_options = None
         self._dldb_model = resolve_dldb_model(dldb_model)
         self._enable_dldb_timing_logs = resolve_enable_dldb_timing_logs(enable_dldb_timing_logs)
         self._log_dldb_metrics_summary_on_close = log_dldb_metrics_summary_on_close
         self._dldb_metrics_log_path = resolve_dldb_metrics_log_path(dldb_metrics_log_path)
 
-        self.session = dldb.connect(
-            self.db_uri,
-            storage_options=self.storage_options,
-            model=self._dldb_model,
-        )
+        connect_kwargs = {"model": self._dldb_model}
+        if self.storage_options is not None:
+            connect_kwargs["storage_options"] = self.storage_options
+        self.session = dldb.connect(self.db_uri, **connect_kwargs)
 
         logger.debug(f"EnvConfigManager initialized: table={self.table_name}, db={self.db_uri}")
 

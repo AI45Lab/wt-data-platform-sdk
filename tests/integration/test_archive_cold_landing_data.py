@@ -1,8 +1,9 @@
-"""Real dldb/S3 validation for the online cold landing archive workflow.
+"""Real dldb validation for the online cold landing archive workflow.
 
-The test is scoped to unique rows in ``v2_landing_test``/``serving_test`` and a
-unique temporary archive table. Cleanup runs even when the archive assertion
-fails. Production tables are never selected.
+The test is scoped to unique rows in ``landing_test`` (GPFS landing DB) /
+``serving_test`` (S3 serving DB) and a unique temporary archive table. Cleanup
+runs even when the archive assertion fails. Production tables are never
+selected.
 """
 
 import json
@@ -20,15 +21,26 @@ from wt_sdk import (
     TableConfig,
     WTGatewayClient,
 )
+from wt_sdk.config import TEST_LANDING_TABLE, storage_options_for
 
 
+# New-generation stack: landing (source + archive) on GPFS, serving on S3.
 TEST_CONFIG = GatewayConfig(
     tables=TableConfig(
         profile="test",
-        landing_table="v2_landing_test",
+        landing_table=TEST_LANDING_TABLE,
         serving_table="serving_test",
     )
 )
+
+
+def _connect(db_uri: str):
+    """Open a dldb session with storage options only for remote (S3) URIs."""
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    return dldb.connect(db_uri, **connect_kwargs)
 
 
 def _record(
@@ -58,10 +70,7 @@ def _record(
 
 
 def _drop_temporary_archive(table_name: str) -> None:
-    session = dldb.connect(
-        TEST_CONFIG.tables.db_uri,
-        storage_options=TEST_CONFIG.s3.to_storage_options(),
-    )
+    session = _connect(TEST_CONFIG.tables.landing_db_uri)
     try:
         if session.table_exists(table_name):
             session.drop_table(table_name)
@@ -71,17 +80,14 @@ def _drop_temporary_archive(table_name: str) -> None:
 
 
 def _unique_job_in_existing_landing_bucket() -> tuple[str, int, str]:
-    session = dldb.connect(
-        TEST_CONFIG.tables.db_uri,
-        storage_options=TEST_CONFIG.s3.to_storage_options(),
-    )
+    session = _connect(TEST_CONFIG.tables.landing_db_uri)
     try:
-        landing_buckets = set(archive.list_partitions(session, "v2_landing_test"))
+        landing_buckets = set(archive.list_partitions(session, TEST_LANDING_TABLE))
     finally:
         session.shutdown()
 
     if not landing_buckets:
-        raise RuntimeError("v2_landing_test has no existing HASH bucket")
+        raise RuntimeError(f"{TEST_LANDING_TABLE} has no existing HASH bucket")
     target_bucket = sorted(landing_buckets)[0]
     for _ in range(1_000):
         suffix = uuid.uuid4().hex
@@ -99,7 +105,7 @@ def test_archive_cold_landing_data_real_copy_delete_and_cleanup():
         datetime(2026, 8, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
         * 1000
     )
-    archive_table = f"archived_integration_{suffix}_v2_landing_test"
+    archive_table = f"archived_integration_{suffix}_{TEST_LANDING_TABLE}"
     record_ids = [f"archive-integration-{suffix}-{index}" for index in range(3)]
     landing_records = [
         _record(
@@ -124,13 +130,13 @@ def test_archive_cold_landing_data_real_copy_delete_and_cleanup():
                 execute=True,
                 confirm_delete=True,
                 max_jobs=None,
-                db_uri=TEST_CONFIG.tables.db_uri,
+                db_uri=None,
                 profile="test",
                 job_ids=[job_id],
                 archive_table_override=archive_table,
             )
             assert result["profile"] == "test"
-            assert result["source_table"] == "v2_landing_test"
+            assert result["source_table"] == TEST_LANDING_TABLE
             assert result["serving_table"] == "serving_test"
             assert result["archive_table"] == archive_table
             assert result["archived_jobs"] == [
@@ -144,15 +150,12 @@ def test_archive_cold_landing_data_real_copy_delete_and_cleanup():
 
             source_rows = client.query_data(
                 filter_query=filter_query,
-                table="v2_landing_test",
+                table=TEST_LANDING_TABLE,
                 checkout_latest=True,
             )
             assert source_rows == []
 
-            session = dldb.connect(
-                TEST_CONFIG.tables.db_uri,
-                storage_options=TEST_CONFIG.s3.to_storage_options(),
-            )
+            session = _connect(TEST_CONFIG.tables.landing_db_uri)
             try:
                 archive.verify_landing_layout(session, archive_table)
                 archived = archive.query_partition(

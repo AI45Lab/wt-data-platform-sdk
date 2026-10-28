@@ -29,7 +29,7 @@ def _manager_with(monkeypatch, session):
     monkeypatch.setattr(
         env_config_module.dldb, "connect", lambda db_uri, **kwargs: session
     )
-    manager = EnvConfigManager(table_name="env_config_test")
+    manager = EnvConfigManager(table_name="env_test")
     return manager
 
 
@@ -44,7 +44,7 @@ def test_update_configs_where_returns_matched_count_and_updates_once(monkeypatch
     assert n == 3
     assert len(session.update_calls) == 1
     call = session.update_calls[0]
-    assert call["table"] == "env_config_test"
+    assert call["table"] == "env_test"
     assert call["where"] == "job_id = 'job-9' AND finished = false"
     assert call["values"] == {"finished": True}
     # Pre-count is a cheap id-projection read

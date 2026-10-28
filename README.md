@@ -36,8 +36,11 @@ Copy [.env.example](.env.example) into the integrating service as .env, replace 
 
 ```bash
 # .env
-WT_SDK_DB_URI=s3://your-dldb-bucket
-WT_SDK_ENV_CONFIG_DB_URI=s3://your-env-config-bucket
+# Optional: landing/env-config live on a local (GPFS) path, serving on S3.
+# Unset, they default to the platform's split-stack locations.
+WT_SDK_LANDING_DB_URI=/mnt/shared-storage-user/adpc-share/wt-data-platform/landing
+WT_SDK_SERVING_DB_URI=s3://wt-data-platform
+WT_SDK_ENV_CONFIG_DB_URI=/mnt/shared-storage-user/adpc-share/wt-data-platform/env-config
 WT_SDK_S3_ENDPOINT=http://your-s3-endpoint:8060
 WT_SDK_S3_ALLOW_HTTP=true
 AWS_ACCESS_KEY_ID=replace-with-your-access-key
@@ -58,8 +61,9 @@ python your_service.py
 For CI, systemd, Kubernetes, or another deployment system, inject the same variables directly:
 
 ```bash
-export WT_SDK_DB_URI=s3://your-dldb-bucket
-export WT_SDK_ENV_CONFIG_DB_URI=s3://your-env-config-bucket
+export WT_SDK_LANDING_DB_URI=/mnt/shared-storage-user/adpc-share/wt-data-platform/landing
+export WT_SDK_SERVING_DB_URI=s3://wt-data-platform
+export WT_SDK_ENV_CONFIG_DB_URI=/mnt/shared-storage-user/adpc-share/wt-data-platform/env-config
 export WT_SDK_S3_ENDPOINT=http://your-s3-endpoint:8060
 export WT_SDK_S3_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=replace-with-your-access-key
@@ -85,8 +89,8 @@ values and method arguments such as `search(table="...")` take precedence.
 
 | Profile | Landing table | Serving table | Environment-config table | ETL checkpoint table (only when ETL runs) |
 | --- | --- | --- | --- | --- |
-| `test` or omitted | `v2_landing_test` | `serving_test` | `env_config_test` | `etl_checkpoints_test` |
-| `production` or `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `evaluation_env_config` | `wind_tunnel_etl_checkpoints` |
+| `test` or omitted | `landing_test` | `serving_test` | `env_test` | `etl_checkpoints_test` |
+| `production` or `prod` | `wt_landing` | `wt_serving` | `wt_env_config` | `wind_tunnel_etl_checkpoints` |
 
 Omitting `WT_SDK_PROFILE` safely defaults to `test`. Production access must be
 selected explicitly with `production` or `prod`.
@@ -100,7 +104,7 @@ Missing it does not affect `WT_SDK_PROFILE` resolution. When the ETL state
 database is used, the same profile selects the checkpoint table shown above.
 
 `EnvConfigManager` uses the separate `WT_SDK_ENV_CONFIG_DB_URI` database. The
-same profile selects `env_config_test` or `evaluation_env_config`; an explicit
+same profile selects `env_test` or `wt_env_config`; an explicit
 `table_name=` overrides the profile, and an explicit `db_uri=` overrides the
 environment-config database URI. The endpoint and AWS credentials above are
 shared by both databases.
@@ -421,7 +425,7 @@ job:
 ```python
 with WTGatewayClient() as client:
     summary = client.maintain_table_indexes(
-        "wind_tunnel_landing",
+        "wt_landing",
         partitions=["evaluation-run-001"],
     )
 ```
@@ -470,7 +474,7 @@ information-schema record and reuses its logical-table wrapper and opened
 physical bucket objects. The SDK does not reconstruct or pin dldb wrappers.
 This applies to reads, writes, index maintenance, and scripts built on the
 client; it does not cache query results or change `checkout_latest`. Code that
-mutates the logical catalog through `client.session` must call
+mutates the logical catalog through `client.session_for(table_name)` must call
 `client.invalidate_table_cache(table_name)` before the next SDK operation.
 
 ## Client Interface
@@ -539,8 +543,8 @@ current result frame.
 ### Environment Configs
 
 Environment configs live in the separate database selected by
-`WT_SDK_ENV_CONFIG_DB_URI`. `WT_SDK_PROFILE` selects `env_config_test` for test
-or `evaluation_env_config` for production. An explicit `table_name=` overrides
+`WT_SDK_ENV_CONFIG_DB_URI`. `WT_SDK_PROFILE` selects `env_test` for test
+or `wt_env_config` for production. An explicit `table_name=` overrides
 the profile. Read APIs default to `checkout_latest=True` so a long-lived gateway
 process can see configs written by a launcher process after the gateway started.
 
@@ -549,7 +553,7 @@ from wt_sdk import EnvConfigManager
 
 test_envs = EnvConfigManager()  # test is the safe default
 production_envs = EnvConfigManager(profile="production")
-explicit_envs = EnvConfigManager(table_name="evaluation_env_config")
+explicit_envs = EnvConfigManager(table_name="wt_env_config")
 ```
 
 | Method | Purpose |
@@ -567,11 +571,11 @@ names. The exact table name selects the landing or serving index definitions.
 Callers must provide raw job IDs/HASH bucket integers or `all_partitions=True`;
 the method creates missing indexes and runs dldb optimize by default.
 
-The two unpartitioned environment-config tables use their own database and
-maintenance command. The default database URI is
-`s3://wind-tunnel-env-config`, overridden by `WT_SDK_ENV_CONFIG_DB_URI` or
-`--db-uri`. Inspect production fragment and index health without modifying the
-table:
+The two HASH(job_id)-partitioned environment-config tables use their own
+database and maintenance command. The default database URI is the GPFS
+env-config path (`/mnt/shared-storage-user/adpc-share/wt-data-platform/env-config`),
+overridden by `WT_SDK_ENV_CONFIG_DB_URI` or `--db-uri`. Inspect production
+fragment and index health without modifying the table:
 
 ```bash
 python scripts/inspect/show_env_config_status.py --profile production
@@ -623,11 +627,12 @@ The timing test writes a readable JSONL example to the ignored
 
 ### Real DLDB/S3 integration tests
 
-Integration tests write a few uniquely scoped rows to the existing `v2_landing_test`
-and `serving_test` tables, then clean and verify them in `finally`. They target
-these explicit test tables independently of `WT_SDK_PROFILE`; `WT_SDK_DB_URI`
-chooses the database. Both tables must use the current schema: landing is
-`HASH(sub_job_id)` and serving is `HASH(job_id)`.
+Integration tests write a few uniquely scoped rows to the `landing_test` and
+`serving_test` tables, then clean and verify them in `finally`. They target
+these explicit test tables independently of `WT_SDK_PROFILE`; each role uses its
+own database (landing on GPFS, serving on S3 `s3://wt-data-platform`). Both
+tables must use the current schema: landing is `HASH(sub_job_id)` and serving
+is `HASH(job_id)`.
 
 ```bash
 set -a && source .env && set +a
@@ -657,13 +662,13 @@ python scripts/ops/table_manager.py list
 python scripts/ops/table_manager.py list --db-uri s3://my-dldb-bucket
 
 # Inspect schema, partition metadata, and scalar indexes
-python scripts/ops/table_manager.py show-schema wind_tunnel_landing
+python scripts/ops/table_manager.py show-schema wt_landing
 
 # List physical dldb/Lance tables behind a logical table
-python scripts/ops/table_manager.py show-physical v2_landing_test
+python scripts/ops/table_manager.py show-physical landing_test
 
 # Inspect the production environment-config table
-python scripts/ops/table_manager.py show-schema evaluation_env_config \
+python scripts/ops/table_manager.py show-schema wt_env_config \
   --db-uri "$WT_SDK_ENV_CONFIG_DB_URI"
 
 # Environment-config initialization defaults to the test profile and is destructive
@@ -675,11 +680,11 @@ python scripts/ops/init_evaluation_env_table.py \
   --profile production --dry-run
 
 # Interactive delete: type the exact table name, then DROP
-python scripts/ops/table_manager.py drop v2_landing_test
+python scripts/ops/table_manager.py drop landing_test
 
 # Non-interactive delete: repeat the exact target
-python scripts/ops/table_manager.py drop v2_landing_test \
-  --force --confirm-table v2_landing_test
+python scripts/ops/table_manager.py drop landing_test \
+  --force --confirm-table landing_test
 
 # Delete one HASH bucket from a disposable test table
 python scripts/ops/table_manager.py drop serving_test --partition 42
@@ -700,89 +705,89 @@ only the selected columns and computes uniqueness in the script.
 
 ```bash
 # Count rows
-python scripts/inspect/query_data.py --table wind_tunnel_landing --count
+python scripts/inspect/query_data.py --table wt_landing --count
 
 # Count one exact job_id using HASH bucket pruning
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id = 'job-001'" --count
 
 # List all distinct job IDs and their count
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --distinct job_id
 
 # Count distinct sessions inside one job without printing every value
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id = 'job-001'" \
   --distinct session_id \
   --count
 
 # List distinct job/session combinations and dump them to JSON
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id LIKE '%panjia%'" \
   --distinct "job_id,session_id" \
   --output ./artifacts/panjia_distinct_sessions.json
 
 # Query the test environment-config table; both env table names automatically
 # use WT_SDK_ENV_CONFIG_DB_URI
-python scripts/inspect/query_data.py --table env_config_test \
+python scripts/inspect/query_data.py --table env_test \
   --query "job_id = 'job-001'" \
   --columns "id,job_id,env_id,env_name,group_id,finished" \
   --limit 20
 
 # Count production environment configs for one job
-python scripts/inspect/query_data.py --table evaluation_env_config \
+python scripts/inspect/query_data.py --table wt_env_config \
   --query "job_id = 'job-001'" --count
 
 # Dump environment configs to a local JSON file
-python scripts/inspect/query_data.py --table evaluation_env_config \
+python scripts/inspect/query_data.py --table wt_env_config \
   --query "job_id = 'job-001'" \
   --output ./artifacts/job_001_env_configs.json
 
 # Query selected columns
-python scripts/inspect/query_data.py --table v2_landing_test \
+python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
 # Count rows matching a SQL filter
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id LIKE '%panjia%' AND is_trainable = true" --count
 
 # Decode and inspect JSON payload columns without display truncation
-python scripts/inspect/query_data.py --table v2_landing_test --limit 1 \
+python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
 # Dump one sample row to a local JSON file, expanding JSON payload columns
-python scripts/inspect/query_data.py --table v2_landing_test \
+python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --limit 1 \
   --output ./artifacts/landing_job_001_sample.json
 
 # Dump selected production rows to a local JSON file
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id LIKE '%panjia%' AND is_trainable = true" \
   --columns "id,job_id,session_id,step_id,source_updated_at" \
   --output ./artifacts/panjia_trainable_rows.json
 
 # Show expected versus existing scalar indexes by partition
-python scripts/inspect/show_table_indexes.py v2_landing_test
+python scripts/inspect/show_table_indexes.py landing_test
 
 # Show aggregate fragment statistics and index coverage for selected HASH buckets
-python scripts/inspect/show_partition_status.py --table v2_landing_test \
+python scripts/inspect/show_partition_status.py --table landing_test \
   --partition 34 --partition 94
 
 # Inspect every logical bucket, including buckets that have not materialized yet
 python scripts/inspect/show_partition_status.py \
-  --table wind_tunnel_landing --all-partitions
+  --table wt_landing --all-partitions
 
 # Column definitions and STATE meanings are documented in scripts/README.md.
 
 # Scan a logical table for duplicate IDs
-python scripts/inspect/scan_duplicate_id.py --table v2_landing_test --max-output 100
+python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 100
 
 # Legacy diagnostic for payload decode failures in pre-JSON-schema data
-python scripts/inspect/scan_landing_nested_decode.py --table v2_landing_test
+python scripts/inspect/scan_landing_nested_decode.py --table landing_test
 
 # Inspect serving tags and ETL-generated search text
-python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
-python scripts/inspect/check_search_text.py --table wind_tunnel_serving
+python scripts/inspect/get_unique_tags.py --table wt_serving
+python scripts/inspect/check_search_text.py --table wt_serving
 ```
 
 ### Cleanup and Indexes
@@ -793,19 +798,19 @@ preview/count columns during dry-runs.
 
 ```bash
 # Preview matching landing data before deletion
-python scripts/ops/cleanup_data.py --table v2_landing_test \
+python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'" --dry-run
 
 # Delete matching test data
-python scripts/ops/cleanup_data.py --table v2_landing_test \
+python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
 
 # Preview dirty test env config rows; this table automatically uses WT_SDK_ENV_CONFIG_DB_URI
-python scripts/ops/cleanup_data.py --table env_config_test \
+python scripts/ops/cleanup_data.py --table env_test \
   --query "job_id = 'gateway'" --dry-run
 
 # Delete dirty test env config rows after preview
-python scripts/ops/cleanup_data.py --table env_config_test \
+python scripts/ops/cleanup_data.py --table env_test \
   --query "job_id = 'gateway'"
 
 # Preview and patch filtered landing rows in the test profile
@@ -820,11 +825,11 @@ python scripts/ops/update_table_rows.py --profile prod --table serving \
 
 # Create missing indexes and optimize every existing landing bucket
 python scripts/ops/maintain_table_indexes.py \
-  --table wind_tunnel_landing --all-partitions
+  --table wt_landing --all-partitions
 
 # Create missing indexes and optimize every existing serving bucket
 python scripts/ops/maintain_table_indexes.py \
-  --table wind_tunnel_serving --all-partitions
+  --table wt_serving --all-partitions
 ```
 
 `update_table_rows.py` only targets the active landing/serving table selected

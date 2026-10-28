@@ -2,7 +2,7 @@
 """Drop and recreate the active production landing table after archive copy.
 
 This script implements the destructive half of the periodic landing archive
-workflow. It refuses to drop ``wind_tunnel_landing`` unless the dated archive
+workflow. It refuses to drop ``wt_landing`` unless the dated archive
 table exists and matches the current source table by schema, HASH partition
 metadata, and total row count.
 
@@ -18,7 +18,7 @@ from typing import Any, Dict
 
 import dldb
 
-from wt_sdk.config import DEFAULT_LANDING_TABLE, default_config
+from wt_sdk.config import DEFAULT_LANDING_TABLE, db_uri_for_table, storage_options_for
 from wt_sdk.core.schemas import (
     LANDING_PARTITION_COLUMN,
     LANDING_PARTITION_TYPE,
@@ -106,13 +106,15 @@ def drop_and_recreate_landing(
     if archive_table.startswith(source_table):
         raise ValueError(
             "Archive table name must not start with the source table name; "
-            "use archived_YYYYMMDD_wind_tunnel_landing to avoid dldb prefix confusion."
+            "use archived_YYYYMMDD_wt_landing to avoid dldb prefix confusion."
         )
 
-    session = dldb.connect(
-        default_config.tables.db_uri,
-        storage_options=default_config.s3.to_storage_options(),
-    )
+    db_uri = db_uri_for_table(source_table)
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
     try:
         archived_rows = _verify_archive_matches_source(
             session,
@@ -123,7 +125,7 @@ def drop_and_recreate_landing(
         print("=" * 80)
         print("Production landing drop/recreate preflight passed")
         print("=" * 80)
-        print(f"Database:           {default_config.tables.db_uri}")
+        print(f"Database:           {db_uri}")
         print(f"Archive table:      {archive_table} ({archived_rows} rows)")
         print(f"Active table:       {source_table} ({archived_rows} rows, will be replaced)")
         print(f"New partitioning:   {LANDING_PARTITION_TYPE}({LANDING_PARTITION_COLUMN})")
@@ -191,7 +193,7 @@ def drop_and_recreate_landing(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Drop and recreate wind_tunnel_landing after verifying its archive table.",
+        description="Drop and recreate wt_landing after verifying its archive table.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--source-table", default=DEFAULT_LANDING_TABLE)

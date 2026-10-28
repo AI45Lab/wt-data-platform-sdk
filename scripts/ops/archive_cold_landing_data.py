@@ -36,11 +36,13 @@ import pyarrow as pa
 from dldb.utils import stable_hash
 
 from wt_sdk.config import (
+    DEFAULT_SERVING_DB_URI,
     DEFAULT_LANDING_TABLE,
     DEFAULT_SERVING_TABLE,
     TEST_LANDING_TABLE,
     TEST_SERVING_TABLE,
-    default_config,
+    db_uri_for_table,
+    storage_options_for,
 )
 from wt_sdk.core.schemas import (
     LANDING_PARTITION_COLUMN,
@@ -134,6 +136,15 @@ def default_archive_table(
     timezone = ZoneInfo(ARCHIVE_TIMEZONE)
     current = now.astimezone(timezone) if now is not None else datetime.now(timezone)
     return f"archived_{current.strftime('%Y%m%d')}_{source_table}"
+
+
+def _connect(db_uri: str):
+    """Open a dldb session with storage options only for remote (S3) URIs."""
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    return dldb.connect(db_uri, **connect_kwargs)
 
 
 def quote_sql_string(value: str) -> str:
@@ -318,7 +329,7 @@ def evaluate_cold_job(
 
 
 def verify_serving_publication(
-    session,
+    serving_session,
     *,
     job: ColdJob,
     serving_table: str,
@@ -330,7 +341,7 @@ def verify_serving_publication(
     # how many landing shard buckets the job spans.
     serving_bucket = stable_hash(job.job_id) % SERVING_PARTITIONS
     frame = query_partition(
-        session,
+        serving_session,
         table_name=serving_table,
         partition=serving_bucket,
         query=exact_job_filter(job.job_id),
@@ -365,6 +376,7 @@ def verify_serving_publication(
 
 def discover_cold_jobs(
     session,
+    serving_session,
     *,
     source_table: str,
     serving_table: str,
@@ -373,7 +385,7 @@ def discover_cold_jobs(
     only_job_ids: Sequence[str] | None = None,
 ) -> tuple[List[ColdJob], Dict[str, int]]:
     source_partitions = list_partitions(session, source_table)
-    serving_partitions = set(list_partitions(session, serving_table))
+    serving_partitions = set(list_partitions(serving_session, serving_table))
 
     # Landing is HASH(sub_job_id): a job's rows may span several buckets, so
     # candidate discovery doubles as bucket attribution (used only for
@@ -437,7 +449,7 @@ def discover_cold_jobs(
             )
             continue
         published, reason = verify_serving_publication(
-            session,
+            serving_session,
             job=job,
             serving_table=serving_table,
             serving_partitions=serving_partitions,
@@ -719,11 +731,11 @@ def run_archive(
             raise ValueError("archive_table_override is restricted to test profile")
         valid_test_archive_name = (
             archive_table_override.startswith("archived_")
-            and archive_table_override.endswith("_v2_landing_test")
+            and archive_table_override.endswith(f"_{TEST_LANDING_TABLE}")
         )
         if not valid_test_archive_name:
             raise ValueError(
-                "test archive override must match archived_*_v2_landing_test"
+                f"test archive override must match archived_*_{TEST_LANDING_TABLE}"
             )
         target = ArchiveTarget(
             profile=target.profile,
@@ -738,15 +750,18 @@ def run_archive(
     if max_jobs is not None and max_jobs <= 0:
         raise ValueError("max_jobs must be positive")
 
-    session = dldb.connect(
-        db_uri or default_config.tables.db_uri,
-        storage_options=default_config.s3.to_storage_options(),
-    )
+    # Landing (source + archive) and serving live in separate databases since
+    # the 2026.10 storage split; an explicit --db-uri overrides both.
+    landing_db_uri = db_uri or db_uri_for_table(target.source_table)
+    serving_db_uri = db_uri or DEFAULT_SERVING_DB_URI
+    session = _connect(landing_db_uri)
+    serving_session = _connect(serving_db_uri)
     try:
         verify_landing_layout(session, target.source_table)
-        verify_landing_layout(session, target.serving_table)
+        verify_landing_layout(serving_session, target.serving_table)
         jobs, excluded_reasons = discover_cold_jobs(
             session,
+            serving_session,
             source_table=target.source_table,
             serving_table=target.serving_table,
             cutoff_exclusive_ms=cutoff_exclusive_ms,
@@ -755,7 +770,8 @@ def run_archive(
         )
         summary: Dict[str, Any] = {
             "mode": "execute" if execute else "dry-run",
-            "database": db_uri or default_config.tables.db_uri,
+            "database": landing_db_uri,
+            "serving_database": serving_db_uri,
             "profile": target.profile,
             "source_table": target.source_table,
             "serving_table": target.serving_table,
@@ -845,6 +861,7 @@ def run_archive(
         return summary
     finally:
         session.shutdown()
+        serving_session.shutdown()
 
 
 def main() -> int:
@@ -869,8 +886,8 @@ def main() -> int:
         choices=("test", "production", "prod"),
         default="test",
         help=(
-            "Select v2_landing_test/serving_test or the production pair. "
-            "The default is deliberately test-safe."
+            "Select landing_test/serving_test or the production pair "
+            "(wt_landing/wt_serving). The default is deliberately test-safe."
         ),
     )
     parser.add_argument(
@@ -891,7 +908,10 @@ def main() -> int:
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI; defaults to configured WT_SDK_DB_URI.",
+        help=(
+            "Shared database URI override for both landing and serving; "
+            "defaults to the per-table databases (GPFS landing, S3 serving)."
+        ),
     )
     parser.add_argument(
         "--execute",

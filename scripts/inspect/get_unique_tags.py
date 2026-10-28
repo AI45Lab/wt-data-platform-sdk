@@ -2,28 +2,28 @@
 Get all unique tag values from a table.
 
 Usage:
-    python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
-    python scripts/inspect/get_unique_tags.py --table wind_tunnel_landing
+    python scripts/inspect/get_unique_tags.py --table wt_serving
+    python scripts/inspect/get_unique_tags.py --table wt_landing
 """
 import argparse
 import sys
 from collections import Counter
 
 import dldb
-from wt_sdk.config import default_config
+from wt_sdk.config import db_uri_for_table, storage_options_for
 
 
 def main():
     parser = argparse.ArgumentParser(description="Get unique tags from a table")
     parser.add_argument("--table", type=str, required=True,
-                       help="Table name (e.g., wind_tunnel_serving, wind_tunnel_landing)")
+                       help="Table name (e.g., wt_serving, wt_landing)")
     parser.add_argument("--limit", type=int, default=50000,
                        help="Max records to scan (default: 50000)")
 
     args = parser.parse_args()
 
-    db_name = default_config.tables.db_uri
     table_name = args.table
+    db_name = db_uri_for_table(table_name)
 
     print(f"Database: {db_name}")
     print(f"Table: {table_name}")
@@ -32,10 +32,11 @@ def main():
 
     # Initialize DLDB session
     try:
-        session = dldb.connect(
-            db_name,
-            storage_options=default_config.s3.to_storage_options()
-        )
+        connect_kwargs = {}
+        storage_options = storage_options_for(db_name)
+        if storage_options is not None:
+            connect_kwargs["storage_options"] = storage_options
+        session = dldb.connect(db_name, **connect_kwargs)
     except Exception as e:
         print(f"Error connecting to database: {e}")
         return 1

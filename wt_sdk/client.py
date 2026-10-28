@@ -67,12 +67,24 @@ class WTGatewayClient:
         self._dldb_model = self.config.resolved_dldb_model()
         self._dldb_metrics_log_path = self.config.resolved_dldb_metrics_log_path()
 
-        # Pass db_name as first positional argument, then other config as kwargs
-        dldb_config = self.config.to_dldb_config()
-        self.session = dldb.connect(
-            self.config.tables.db_uri,
-            **dldb_config
+        # Storage split (2026.10): landing (GPFS hot layer) and serving
+        # (S3 delivery layer) live in separate databases, so the client keeps
+        # one dldb session per role and routes every call by table name via
+        # session_for(). When both roles resolve to the same database
+        # (disposable/test setups) only one connection is made and shared.
+        tables_cfg = self.config.tables
+        self._landing_session = dldb.connect(
+            tables_cfg.landing_db_uri,
+            **self.config.to_dldb_config(tables_cfg.landing_db_uri),
         )
+        if tables_cfg.serving_db_uri == tables_cfg.landing_db_uri:
+            self._serving_session = self._landing_session
+        else:
+            self._serving_session = dldb.connect(
+                tables_cfg.serving_db_uri,
+                **self.config.to_dldb_config(tables_cfg.serving_db_uri),
+            )
+        self._last_session = self._landing_session
         self.landing_uri = self.config.tables.landing_uri()
         self.serving_uri = self.config.tables.serving_uri()
 
@@ -92,7 +104,7 @@ class WTGatewayClient:
         return extract_dldb_timing_from_df(df)
 
     def _extract_dldb_last_call(self) -> Optional[Dict[str, Any]]:
-        return extract_dldb_last_call(self.session)
+        return extract_dldb_last_call(self._last_session)
 
     def _log_dldb_timing(
         self,
@@ -151,7 +163,7 @@ class WTGatewayClient:
         extra: Optional[Dict[str, Any]] = None,
     ) -> pd.DataFrame:
         try:
-            df = self.session.filter(
+            df = self._session_for_table(table_name).filter(
                 table_name,
                 query=query,
                 limit=limit,
@@ -191,7 +203,7 @@ class WTGatewayClient:
         return df
 
     def _count_rows(self, table_name: str, partition: Optional[str] = None) -> int:
-        count = self.session.count_rows(table_name, partition)
+        count = self._session_for_table(table_name).count_rows(table_name, partition)
         self._log_dldb_timing(
             "count_rows",
             self._extract_dldb_last_call(),
@@ -205,7 +217,7 @@ class WTGatewayClient:
     def _get_partition_key_for_table(self, table_name: str, fallback: str) -> str:
         """Return the partition key recorded in dldb metadata, if available."""
         try:
-            schema_table = getattr(self.session, "schema_table", None)
+            schema_table = getattr(self._session_for_table(table_name), "schema_table", None)
             record = schema_table.get(table_name) if schema_table is not None else None
             if record is not None and record.partition_column:
                 return record.partition_column
@@ -221,7 +233,7 @@ class WTGatewayClient:
             "partitions": LANDING_PARTITIONS if fallback_key == self.LANDING_PARTITION_KEY else None,
         }
         try:
-            schema_table = getattr(self.session, "schema_table", None)
+            schema_table = getattr(self._session_for_table(table_name), "schema_table", None)
             record = schema_table.get(table_name) if schema_table is not None else None
             if record is None:
                 return metadata
@@ -242,13 +254,16 @@ class WTGatewayClient:
         dldb session should invalidate that table before the next SDK call so
         dldb 1.1.7 resolves it again from the exact information-schema record.
         """
-        tables = getattr(self.session, "tables", None)
+        if table_name is None:
+            for session in (self._landing_session, self._serving_session):
+                tables = getattr(session, "tables", None)
+                if tables is not None:
+                    tables.clear()
+            return
+        tables = getattr(self._session_for_table(table_name), "tables", None)
         if tables is None:
             return
-        if table_name is None:
-            tables.clear()
-        else:
-            tables.pop(table_name, None)
+        tables.pop(table_name, None)
 
     def _extract_partition_values_from_query(self, query: str, partition_key: str) -> Optional[List[str]]:
         """Extract simple equality/IN filters for the partition key from SQL text."""
@@ -333,7 +348,7 @@ class WTGatewayClient:
 
     def _list_existing_partitions_for_table(self, table_name: str) -> List[Union[str, int]]:
         """List existing dldb logical partitions/buckets for a table."""
-        table = self.session._get_table(table_name)
+        table = self._session_for_table(table_name)._get_table(table_name)
         if table is None or not hasattr(table, "list_partitions"):
             return []
         return sorted(table.list_partitions())
@@ -477,6 +492,38 @@ class WTGatewayClient:
         )
         return f"({filter_query}) AND {self.LANDING_PARTITION_KEY} IN ({shard_literals})"
 
+    def session_for(self, table_name: str):
+        """Return the dldb session owning ``table_name`` (landing vs serving DB).
+
+        Since the 2026.10 storage split the two table roles live in different
+        databases (GPFS vs S3). Routing is by configured table name first,
+        then by the canonical landing/serving table names of both profiles —
+        the test and production tables of one role share that role's database.
+        Unknown names raise instead of guessing a database.
+        """
+        return self._session_for_table(table_name)
+
+    def _session_for_table(self, table_name: str):
+        tables_cfg = self.config.tables
+        if (
+            table_name == tables_cfg.landing_table
+            or table_name in (DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE)
+        ):
+            session = self._landing_session
+        elif (
+            table_name == tables_cfg.serving_table
+            or table_name in (DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE)
+        ):
+            session = self._serving_session
+        else:
+            raise ValueError(
+                f"Table {table_name!r} belongs to neither the landing nor the "
+                f"serving database of this client "
+                f"(landing={tables_cfg.landing_table!r}, serving={tables_cfg.serving_table!r})"
+            )
+        self._last_session = session
+        return session
+
     def _get_table_info(self, table: str) -> Dict[str, Any]:
         """Return metadata and record converters for landing or serving."""
         if table == "landing":
@@ -544,7 +591,7 @@ class WTGatewayClient:
 
         # Convert Arrow table to DataFrame (preserves Arrow schema) and pass to DLDB
         df = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
-        self.session.add(info["table_name"], df)
+        self._session_for_table(info["table_name"]).add(info["table_name"], df)
         self._log_dldb_timing(
             "add",
             self._extract_dldb_last_call(),
@@ -829,7 +876,7 @@ class WTGatewayClient:
         # Only pass the flag when opting into partial mode so the default
         # path stays compatible with dldb versions that lack the parameter.
         upsert_kwargs = {} if insert_missing else {"insert_missing": False}
-        self.session.upsert(
+        self._session_for_table(info["table_name"]).upsert(
             info["table_name"],
             columns=columns,
             datas=dataframe,
@@ -1022,9 +1069,9 @@ class WTGatewayClient:
                 partitions = [p for p in partitions if p in existing]
             if partitions:
                 for partition in partitions:
-                    self.session.delete(info["table_name"], filter_query, partition=partition)
+                    self._session_for_table(info["table_name"]).delete(info["table_name"], filter_query, partition=partition)
             else:
-                self.session.delete(info["table_name"], filter_query)
+                self._session_for_table(info["table_name"]).delete(info["table_name"], filter_query)
             self._log_dldb_timing(
                 "delete",
                 self._extract_dldb_last_call(),
@@ -1239,7 +1286,7 @@ class WTGatewayClient:
             if resolved_partitions and len(resolved_partitions) == 1:
                 update_partition = resolved_partitions[0]
 
-        result = self.session.update(
+        result = self._session_for_table(info["table_name"]).update(
             info["table_name"],
             effective_filter_query,
             effective_updates,
@@ -1933,7 +1980,7 @@ class WTGatewayClient:
             try:
                 existing_indexes = {
                     index["name"] if isinstance(index, dict) else index.name
-                    for index in self.session.list_indices(table_name, partition=partition)
+                    for index in self._session_for_table(table_name).list_indices(table_name, partition=partition)
                 }
             except Exception as exc:
                 existing_indexes = set()
@@ -1947,7 +1994,7 @@ class WTGatewayClient:
                     if index_name in existing_indexes:
                         continue
                     try:
-                        self.session.create_scalar_index(
+                        self._session_for_table(table_name).create_scalar_index(
                             table_name,
                             column,
                             partition=partition,
@@ -1984,10 +2031,10 @@ class WTGatewayClient:
                         logger.warning(f"Failed to create index during maintenance: {error}")
 
             if optimize:
-                if not hasattr(self.session, "optimize"):
+                if not hasattr(self._session_for_table(table_name), "optimize"):
                     raise RuntimeError("Installed dldb does not expose session.optimize(...)")
                 try:
-                    self.session.optimize(
+                    self._session_for_table(table_name).optimize(
                         table_name,
                         partition=partition,
                         cleanup_older_than=cleanup_older_than,
@@ -2030,7 +2077,7 @@ class WTGatewayClient:
         index_type: str = "BTREE"
     ) -> None:
         info = self._get_table_info(table)
-        self.session.create_scalar_index(info["table_name"], column, index_type=index_type)
+        self._session_for_table(info["table_name"]).create_scalar_index(info["table_name"], column, index_type=index_type)
         self._log_dldb_timing(
             "create_scalar_index",
             self._extract_dldb_last_call(),
@@ -2048,9 +2095,17 @@ class WTGatewayClient:
             except Exception:
                 logger.debug("Error closing env config manager", exc_info=True)
             self._env_manager = None
-        summary = self.session.shutdown()
-        if isinstance(summary, dict):
-            self._log_dldb_metrics_summary(summary)
+        summary: Optional[Dict[str, Any]] = None
+        # One dldb session per table role; the same object when both roles
+        # share a database, in which case shutdown runs only once.
+        sessions = [self._landing_session]
+        if self._serving_session is not self._landing_session:
+            sessions.append(self._serving_session)
+        for session in sessions:
+            result = session.shutdown()
+            if isinstance(result, dict):
+                summary = result
+                self._log_dldb_metrics_summary(result)
         logger.info("WTGatewayClient closed")
         return summary
 

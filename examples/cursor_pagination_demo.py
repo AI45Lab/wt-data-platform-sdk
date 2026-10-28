@@ -2,7 +2,7 @@ import json
 import time
 from wt_sdk import WTGatewayClient
 from wt_sdk.models import LandingRecord
-from wt_sdk.config import GatewayConfig, TableConfig
+from wt_sdk.config import GatewayConfig, TableConfig, TEST_LANDING_TABLE
 
 
 TEST_DATASET_TYPE = "CURSOR_TEST"
@@ -51,7 +51,7 @@ def run_pagination_demo():
 
     print("\n[1] Initializing WTGatewayClient...")
     # Create custom config to use the test landing table
-    test_config = GatewayConfig(tables=TableConfig(landing_table="v2_landing_test"))
+    test_config = GatewayConfig(tables=TableConfig(landing_table=TEST_LANDING_TABLE))
     client = WTGatewayClient(test_config)
     print(f"    Client initialized")
     print(f"    Using table: {test_config.tables.landing_table}")
@@ -59,7 +59,7 @@ def run_pagination_demo():
     # Cleanup
     print("\n[2] Cleaning up any existing test data...")
     try:
-        deleted = client.session.delete(test_config.tables.landing_table, f"dataset_type = '{TEST_DATASET_TYPE}'")
+        deleted = client.session_for(test_config.tables.landing_table).delete(test_config.tables.landing_table, f"dataset_type = '{TEST_DATASET_TYPE}'")
         print(f"    Deleted {deleted} existing records")
     except Exception as e:
         print(f"    ℹ No existing data to clean up")
@@ -213,7 +213,7 @@ def run_pagination_demo():
 
     # Cleanup
     print("\n[Cleanup] Deleting test data...")
-    deleted = client.session.delete(test_config.tables.landing_table, f"dataset_type = '{TEST_DATASET_TYPE}'")
+    deleted = client.session_for(test_config.tables.landing_table).delete(test_config.tables.landing_table, f"dataset_type = '{TEST_DATASET_TYPE}'")
     print(f"    Deleted {deleted} test records")
 
     client.close()

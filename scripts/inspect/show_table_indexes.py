@@ -8,25 +8,32 @@ Displays:
 - Which indexes are missing
 
 Usage:
-    python scripts/inspect/show_table_indexes.py wind_tunnel_serving
-    python scripts/inspect/show_table_indexes.py wind_tunnel_landing
-    python scripts/inspect/show_table_indexes.py v2_landing_test
+    python scripts/inspect/show_table_indexes.py wt_serving
+    python scripts/inspect/show_table_indexes.py wt_landing
+    python scripts/inspect/show_table_indexes.py landing_test
 """
 import argparse
 import sys
 from typing import List, Set
 
 import dldb
-from wt_sdk.config import default_config
+from wt_sdk.config import (
+    DEFAULT_LANDING_TABLE,
+    DEFAULT_SERVING_TABLE,
+    TEST_LANDING_TABLE,
+    TEST_SERVING_TABLE,
+    db_uri_for_table,
+    storage_options_for,
+)
 from wt_sdk.core.schemas import SERVING_SCALAR_INDEXES, LANDING_SCALAR_INDEXES
 
 
 # Index definitions per table
 TABLE_INDEXES = {
-    "wind_tunnel_landing": LANDING_SCALAR_INDEXES,
-    "wind_tunnel_serving": SERVING_SCALAR_INDEXES,
-    "v2_landing_test": LANDING_SCALAR_INDEXES,
-    "serving_test": SERVING_SCALAR_INDEXES,
+    DEFAULT_LANDING_TABLE: LANDING_SCALAR_INDEXES,
+    DEFAULT_SERVING_TABLE: SERVING_SCALAR_INDEXES,
+    TEST_LANDING_TABLE: LANDING_SCALAR_INDEXES,
+    TEST_SERVING_TABLE: SERVING_SCALAR_INDEXES,
 }
 
 
@@ -56,13 +63,14 @@ def get_existing_indexes(session, table_name: str, partition) -> Set[str]:
 
 def show_index_status(table_name: str, db_uri: str = None) -> None:
     """Show index status for all partitions of a table."""
-    db_uri = db_uri or default_config.tables.db_uri
+    db_uri = db_uri or db_uri_for_table(table_name)
 
     print(f"Connecting to {db_uri}...")
-    session = dldb.connect(
-        db_uri,
-        storage_options=default_config.s3.to_storage_options()
-    )
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
 
     # Check if table exists
     if not session.table_exists(table_name):
@@ -130,12 +138,12 @@ def main():
     )
     parser.add_argument(
         "table_name",
-        help="Logical table name (e.g., wind_tunnel_serving, wind_tunnel_landing)"
+        help="Logical table name (e.g., wt_serving, wt_landing)"
     )
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI (default: s3://wind-tunnel-dldb)"
+        help="Database URI (default: resolved from the table name)"
     )
 
     args = parser.parse_args()

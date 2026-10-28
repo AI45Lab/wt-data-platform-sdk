@@ -36,8 +36,11 @@ SDK 会在创建客户端时读取进程环境变量。已有应用代码可以�
 
 ```bash
 # .env
-WT_SDK_DB_URI=s3://your-dldb-bucket
-WT_SDK_ENV_CONFIG_DB_URI=s3://your-env-config-bucket
+# 可选：landing/env-config 使用本地（GPFS）路径，serving 使用 S3。
+# 不设置时使用平台存储拆分后的内置默认值。
+WT_SDK_LANDING_DB_URI=/mnt/shared-storage-user/adpc-share/wt-data-platform/landing
+WT_SDK_SERVING_DB_URI=s3://wt-data-platform
+WT_SDK_ENV_CONFIG_DB_URI=/mnt/shared-storage-user/adpc-share/wt-data-platform/env-config
 WT_SDK_S3_ENDPOINT=http://your-s3-endpoint:8060
 WT_SDK_S3_ALLOW_HTTP=true
 AWS_ACCESS_KEY_ID=replace-with-your-access-key
@@ -58,8 +61,9 @@ python your_service.py
 在 CI、systemd、Kubernetes 或其他部署系统中，可以直接注入相同的环境变量：
 
 ```bash
-export WT_SDK_DB_URI=s3://your-dldb-bucket
-export WT_SDK_ENV_CONFIG_DB_URI=s3://your-env-config-bucket
+export WT_SDK_LANDING_DB_URI=/mnt/shared-storage-user/adpc-share/wt-data-platform/landing
+export WT_SDK_SERVING_DB_URI=s3://wt-data-platform
+export WT_SDK_ENV_CONFIG_DB_URI=/mnt/shared-storage-user/adpc-share/wt-data-platform/env-config
 export WT_SDK_S3_ENDPOINT=http://your-s3-endpoint:8060
 export WT_SDK_S3_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=replace-with-your-access-key
@@ -84,8 +88,8 @@ services:
 
 | Profile | Landing 表 | Serving 表 | ETL checkpoint 表（仅运行 ETL 时使用） |
 | --- | --- | --- | --- |
-| `test` 或未配置 | `v2_landing_test` | `serving_test` | `etl_checkpoints_test` |
-| `production` 或 `prod` | `wind_tunnel_landing` | `wind_tunnel_serving` | `wind_tunnel_etl_checkpoints` |
+| `test` 或未配置 | `landing_test` | `serving_test` | `etl_checkpoints_test` |
+| `production` 或 `prod` | `wt_landing` | `wt_serving` | `wind_tunnel_etl_checkpoints` |
 
 未配置 `WT_SDK_PROFILE` 时会安全地默认使用 `test`；访问生产表必须显式配置
 `production` 或 `prod`。
@@ -97,7 +101,7 @@ ETL 时，才必须配置 `WT_SDK_ETL_STATE_DB_URI=s3://wind-tunnel-etl`，或�
 使用 ETL 状态库时，同一个 profile 才会选择上表中的 checkpoint 表。
 
 `EnvConfigManager` 使用独立的 `WT_SDK_ENV_CONFIG_DB_URI` 数据库访问
-`evaluation_env_config`，不受 `WT_SDK_PROFILE` 影响。上面的 endpoint 和 AWS
+`wt_env_config`，不受 `WT_SDK_PROFILE` 影响。上面的 endpoint 和 AWS
 凭证由两个数据库共用。显式传给 `EnvConfigManager` 的 `db_uri=` 具有更高优先级。
 环境配置读取默认使用 `checkout_latest=True`，因此长期运行的进程可以看到启动后由
 其他进程提交的新配置。
@@ -384,7 +388,7 @@ with WTGatewayClient() as client:
 ```python
 with WTGatewayClient() as client:
     summary = client.maintain_table_indexes(
-        "wind_tunnel_landing",
+        "wt_landing",
         partitions=["evaluation-run-001"],
     )
 ```
@@ -428,8 +432,8 @@ env 表的 `sub_job_ids` 中。SDK 会把仅含 job_id 的 landing 过滤条件�
 在一个 `WTGatewayClient` 生命周期内，dldb 1.1.7 会根据精确的
 information-schema 记录解析逻辑表，并复用逻辑表 wrapper 及已打开的物理
 bucket；SDK 不再自行构造或 pin dldb wrapper。这不会缓存查询结果，也不会改变
-`checkout_latest`。如果代码通过 `client.session` 创建、删除或替换逻辑表，应在
-下一次 SDK 操作前调用 `client.invalidate_table_cache(table_name)`。
+`checkout_latest`。如果代码通过 `client.session_for(table_name)` 创建、删除或替换
+逻辑表，应在下一次 SDK 操作前调用 `client.invalidate_table_cache(table_name)`。
 
 ## 客户端接口
 
@@ -493,7 +497,7 @@ dataset type 和普通 SQL 条件仍可作为过滤器。设置 `stream=True` �
 
 ### 环境配置
 
-环境配置位于独立的 `evaluation_env_config` 表中，由
+环境配置位于独立的 `wt_env_config` 表中，由
 `WT_SDK_ENV_CONFIG_DB_URI` 选择数据库。读取接口默认使用
 `checkout_latest=True`，因此长期运行的 gateway 进程可以看到 launcher 在它启动后
 写入的新配置。
@@ -558,9 +562,10 @@ pytest -q
 
 ### 真实 DLDB/S3 集成测试
 
-集成测试会向现有 `v2_landing_test` 和 `serving_test` 写入少量使用唯一范围的数据，
+集成测试会向 `landing_test` 和 `serving_test` 写入少量使用唯一范围的数据，
 并在 `finally` 中清理和验证。测试显式使用这两张测试表，不受
-`WT_SDK_PROFILE` 影响；数据库由 `WT_SDK_DB_URI` 选择。两张表都必须使用当前
+`WT_SDK_PROFILE` 影响；每个角色使用各自的数据库（landing 在 GPFS，
+serving 在 S3 `s3://wt-data-platform`）。两张表都必须使用当前
 schema：landing 为 `HASH(sub_job_id)`，serving 为 `HASH(job_id)`。
 
 ```bash
@@ -591,13 +596,13 @@ python scripts/ops/table_manager.py list
 python scripts/ops/table_manager.py list --db-uri s3://my-dldb-bucket
 
 # 查看 schema、分区元数据和标量索引
-python scripts/ops/table_manager.py show-schema wind_tunnel_landing
+python scripts/ops/table_manager.py show-schema wt_landing
 
 # 列出一个逻辑表背后的 dldb/Lance 物理表
-python scripts/ops/table_manager.py show-physical v2_landing_test
+python scripts/ops/table_manager.py show-physical landing_test
 
 # 查看独立的环境配置表
-python scripts/ops/table_manager.py show-schema evaluation_env_config \
+python scripts/ops/table_manager.py show-schema wt_env_config \
   --db-uri "$WT_SDK_ENV_CONFIG_DB_URI"
 
 # 环境配置表初始化具有破坏性；请先预览或显式确认
@@ -605,11 +610,11 @@ python scripts/ops/init_evaluation_env_table.py --dry-run
 python scripts/ops/init_evaluation_env_table.py --confirm-recreate
 
 # 交互式删除：输入完整表名，然后输入 DROP
-python scripts/ops/table_manager.py drop v2_landing_test
+python scripts/ops/table_manager.py drop landing_test
 
 # 非交互式删除：再次传入完全相同的目标表名
-python scripts/ops/table_manager.py drop v2_landing_test \
-  --force --confirm-table v2_landing_test
+python scripts/ops/table_manager.py drop landing_test \
+  --force --confirm-table landing_test
 
 # 删除可丢弃测试表中的一个 HASH bucket
 python scripts/ops/table_manager.py drop serving_test --partition 42
@@ -630,78 +635,78 @@ SDK 的 HASH bucket pruning。带过滤条件的查询和带过滤条件的 `--c
 
 ```bash
 # 统计行数
-python scripts/inspect/query_data.py --table wind_tunnel_landing --count
+python scripts/inspect/query_data.py --table wt_landing --count
 
 # 按精确 job_id 统计，走 HASH bucket pruning
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id = 'job-001'" --count
 
 # 列出所有不同 job_id 以及 distinct 数量
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --distinct job_id
 
 # 只统计某个 job 里有多少不同 session，不打印全部 session_id
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id = 'job-001'" \
   --distinct session_id \
   --count
 
 # 列出不同的 job/session 组合，并 dump 到本地 JSON 文件
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id LIKE '%panjia%'" \
   --distinct "job_id,session_id" \
   --output ./artifacts/panjia_distinct_sessions.json
 
 # 查询独立的环境配置表；指定这个表名时脚本会自动使用 WT_SDK_ENV_CONFIG_DB_URI
-python scripts/inspect/query_data.py --table evaluation_env_config \
+python scripts/inspect/query_data.py --table wt_env_config \
   --query "job_id = 'job-001'" \
   --columns "id,job_id,env_id,env_name,group_id,finished" \
   --limit 20
 
 # 统计某个 job 的环境配置数量
-python scripts/inspect/query_data.py --table evaluation_env_config \
+python scripts/inspect/query_data.py --table wt_env_config \
   --query "job_id = 'job-001'" --count
 
 # 将环境配置 dump 到本地 JSON 文件
-python scripts/inspect/query_data.py --table evaluation_env_config \
+python scripts/inspect/query_data.py --table wt_env_config \
   --query "job_id = 'job-001'" \
   --output ./artifacts/job_001_env_configs.json
 
 # 查询指定列
-python scripts/inspect/query_data.py --table v2_landing_test \
+python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --columns "id,session_id,step_id,is_terminal"
 
 # 按 SQL 条件统计行数
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id LIKE '%panjia%' AND is_trainable = true" --count
 
 # 解码并查看 JSON payload 列，同时关闭显示截断
-python scripts/inspect/query_data.py --table v2_landing_test --limit 1 \
+python scripts/inspect/query_data.py --table landing_test --limit 1 \
   --show-nested --no-truncate
 
 # dump 一条 sample 到本地 JSON 文件，并展开 JSON payload 列
-python scripts/inspect/query_data.py --table v2_landing_test \
+python scripts/inspect/query_data.py --table landing_test \
   --query "job_id = 'job-001'" --limit 1 \
   --output ./artifacts/landing_job_001_sample.json
 
 # 将符合条件的生产数据 dump 到本地 JSON 文件
-python scripts/inspect/query_data.py --table wind_tunnel_landing \
+python scripts/inspect/query_data.py --table wt_landing \
   --query "job_id LIKE '%panjia%' AND is_trainable = true" \
   --columns "id,job_id,session_id,step_id,source_updated_at" \
   --output ./artifacts/panjia_trainable_rows.json
 
 # 按分区对比预期标量索引和现有标量索引
-python scripts/inspect/show_table_indexes.py v2_landing_test
+python scripts/inspect/show_table_indexes.py landing_test
 
 # 扫描逻辑表中的重复 ID
-python scripts/inspect/scan_duplicate_id.py --table v2_landing_test --max-output 100
+python scripts/inspect/scan_duplicate_id.py --table landing_test --max-output 100
 
 # 旧 schema 数据的 payload 解码失败诊断工具
-python scripts/inspect/scan_landing_nested_decode.py --table v2_landing_test
+python scripts/inspect/scan_landing_nested_decode.py --table landing_test
 
 # 查看 serving 标签和 ETL 生成的搜索文本
-python scripts/inspect/get_unique_tags.py --table wind_tunnel_serving
-python scripts/inspect/check_search_text.py --table wind_tunnel_serving
+python scripts/inspect/get_unique_tags.py --table wt_serving
+python scripts/inspect/check_search_text.py --table wt_serving
 ```
 
 ### 数据清理与索引
@@ -712,19 +717,19 @@ python scripts/inspect/check_search_text.py --table wind_tunnel_serving
 
 ```bash
 # 删除前预览匹配的 landing 数据
-python scripts/ops/cleanup_data.py --table v2_landing_test \
+python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'" --dry-run
 
 # 删除匹配的测试数据
-python scripts/ops/cleanup_data.py --table v2_landing_test \
+python scripts/ops/cleanup_data.py --table landing_test \
   --query "job_id = 'job-001'"
 
 # 预览 env config 脏数据；该表会自动使用 WT_SDK_ENV_CONFIG_DB_URI
-python scripts/ops/cleanup_data.py --table evaluation_env_config \
+python scripts/ops/cleanup_data.py --table wt_env_config \
   --query "job_id = 'gateway'" --dry-run
 
 # 预览确认后删除 env config 脏数据
-python scripts/ops/cleanup_data.py --table evaluation_env_config \
+python scripts/ops/cleanup_data.py --table wt_env_config \
   --query "job_id = 'gateway'"
 
 # 预览并修改 test profile 中符合条件的 landing 行
@@ -739,11 +744,11 @@ python scripts/ops/update_table_rows.py --profile prod --table serving \
 
 # 创建缺失索引并 optimize 所有已有 landing bucket
 python scripts/ops/maintain_table_indexes.py \
-  --table wind_tunnel_landing --all-partitions
+  --table wt_landing --all-partitions
 
 # 创建缺失索引并 optimize 所有已有 serving bucket
 python scripts/ops/maintain_table_indexes.py \
-  --table wind_tunnel_serving --all-partitions
+  --table wt_serving --all-partitions
 ```
 
 `update_table_rows.py` 只会访问 `--profile` 选中的四张 active

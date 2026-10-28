@@ -26,13 +26,13 @@ class FakeCleanupSession:
         self.shutdown_called = False
 
     def table_exists(self, table_name):
-        return table_name == "evaluation_env_config"
+        return table_name == "wt_env_config"
 
     def list_tables(self):
-        return ["evaluation_env_config"]
+        return ["wt_env_config"]
 
     def count_rows(self, table_name):
-        assert table_name == "evaluation_env_config"
+        assert table_name == "wt_env_config"
         return 2
 
     def filter(self, table_name, query, limit=None, checkout_latest=False):
@@ -115,12 +115,12 @@ class FakeGatewayCleanupClient:
 def test_resolve_db_uri_uses_env_config_database(monkeypatch):
     monkeypatch.setenv("WT_SDK_ENV_CONFIG_DB_URI", "s3://env-config-db")
 
-    assert cleanup_data._resolve_db_uri("evaluation_env_config", None) == "s3://env-config-db"
-    assert cleanup_data._resolve_db_uri("env_config_test", None) == "s3://env-config-db"
-    assert cleanup_data._resolve_db_uri("v2_landing_test", "s3://override") == "s3://override"
-    assert cleanup_data._uses_latest_snapshot_by_default("evaluation_env_config") is True
-    assert cleanup_data._uses_latest_snapshot_by_default("env_config_test") is True
-    assert cleanup_data._uses_latest_snapshot_by_default("v2_landing_test") is False
+    assert cleanup_data._resolve_db_uri("wt_env_config", None) == "s3://env-config-db"
+    assert cleanup_data._resolve_db_uri("env_test", None) == "s3://env-config-db"
+    assert cleanup_data._resolve_db_uri("landing_test", "s3://override") == "s3://override"
+    assert cleanup_data._uses_latest_snapshot_by_default("wt_env_config") is True
+    assert cleanup_data._uses_latest_snapshot_by_default("env_test") is True
+    assert cleanup_data._uses_latest_snapshot_by_default("landing_test") is False
 
 
 def test_cleanup_env_config_dry_run_uses_env_db_and_latest(monkeypatch):
@@ -139,7 +139,7 @@ def test_cleanup_env_config_dry_run_uses_env_db_and_latest(monkeypatch):
         [
             "cleanup_data.py",
             "--table",
-            "evaluation_env_config",
+            "wt_env_config",
             "--query",
             "job_id = 'gateway'",
             "--dry-run",
@@ -167,7 +167,7 @@ def test_cleanup_active_table_dry_run_uses_gateway_fast_path(monkeypatch, capsys
         [
             "cleanup_data.py",
             "--table",
-            "wind_tunnel_serving",
+            "wt_serving",
             "--query",
             "job_id = 'job-1'",
             "--dry-run",

@@ -66,21 +66,21 @@ def test_write_json_output_creates_parent_directories(tmp_path):
 def test_resolve_db_uri_uses_env_config_database(monkeypatch):
     monkeypatch.setenv("WT_SDK_ENV_CONFIG_DB_URI", "s3://env-config-db")
 
-    assert query_data._resolve_db_uri("evaluation_env_config", None) == "s3://env-config-db"
-    assert query_data._resolve_db_uri("env_config_test", None) == "s3://env-config-db"
-    assert query_data._uses_latest_snapshot_by_default("evaluation_env_config") is True
-    assert query_data._uses_latest_snapshot_by_default("env_config_test") is True
+    assert query_data._resolve_db_uri("wt_env_config", None) == "s3://env-config-db"
+    assert query_data._resolve_db_uri("env_test", None) == "s3://env-config-db"
+    assert query_data._uses_latest_snapshot_by_default("wt_env_config") is True
+    assert query_data._uses_latest_snapshot_by_default("env_test") is True
 
 
 def test_resolve_db_uri_respects_explicit_database(monkeypatch):
     monkeypatch.setenv("WT_SDK_ENV_CONFIG_DB_URI", "s3://env-config-db")
 
     assert (
-        query_data._resolve_db_uri("evaluation_env_config", "s3://override-db")
+        query_data._resolve_db_uri("wt_env_config", "s3://override-db")
         == "s3://override-db"
     )
-    assert query_data._resolve_db_uri("v2_landing_test", "s3://override-db") == "s3://override-db"
-    assert query_data._uses_latest_snapshot_by_default("v2_landing_test") is False
+    assert query_data._resolve_db_uri("landing_test", "s3://override-db") == "s3://override-db"
+    assert query_data._uses_latest_snapshot_by_default("landing_test") is False
 
 
 def test_parse_column_list_rejects_empty_and_wildcard():

@@ -9,14 +9,20 @@ from wt_sdk.dldb_timing import (
 )
 
 
-DEFAULT_DB_URI = "s3://wind-tunnel-dldb"
-DEFAULT_ENV_CONFIG_DB_URI = "s3://wind-tunnel-env-config"
-DEFAULT_LANDING_TABLE = "wind_tunnel_landing"
-DEFAULT_SERVING_TABLE = "wind_tunnel_serving"
-DEFAULT_ENV_CONFIG_TABLE = "evaluation_env_config"
-TEST_LANDING_TABLE = "v2_landing_test"
+# 2026.10 storage split: env-config + landing are the hot layer on GPFS
+# (worker-local mount, no storage_options), serving is the cold/delivery
+# layer on S3.
+WT_GPFS_ROOT = "/mnt/shared-storage-user/adpc-share/wt-data-platform"
+DEFAULT_LANDING_DB_URI = f"{WT_GPFS_ROOT}/landing"
+DEFAULT_SERVING_DB_URI = "s3://wt-data-platform"
+DEFAULT_ENV_CONFIG_DB_URI = f"{WT_GPFS_ROOT}/env-config"
+
+DEFAULT_LANDING_TABLE = "wt_landing"
+DEFAULT_SERVING_TABLE = "wt_serving"
+DEFAULT_ENV_CONFIG_TABLE = "wt_env_config"
+TEST_LANDING_TABLE = "landing_test"
 TEST_SERVING_TABLE = "serving_test"
-TEST_ENV_CONFIG_TABLE = "env_config_test"
+TEST_ENV_CONFIG_TABLE = "env_test"
 
 
 def _env(*names: str) -> Optional[str]:
@@ -34,6 +40,30 @@ def _resolve_table_profile(profile: Optional[str]) -> str:
     if value not in aliases:
         raise ValueError("WT_SDK_PROFILE must be one of: production, prod, test")
     return aliases[value]
+
+
+def is_remote_uri(db_uri: str) -> bool:
+    """True when the db URI is object storage (s3://, gs://, ...), False for
+    local filesystem paths such as the GPFS hot-layer directories."""
+    return "://" in db_uri
+
+
+def db_uri_for_table(table_name: str) -> str:
+    """Return the database hosting a canonical landing/serving table name."""
+    if table_name in (DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE):
+        return DEFAULT_LANDING_DB_URI
+    if table_name in (DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE):
+        return DEFAULT_SERVING_DB_URI
+    raise ValueError(
+        f"Unknown trajectory table {table_name!r}; cannot resolve its database"
+    )
+
+
+def storage_options_for(db_uri: str, s3: Optional["S3Config"] = None) -> Optional[Dict[str, Any]]:
+    """S3 storage options for remote URIs; None for local (GPFS) paths."""
+    if not is_remote_uri(db_uri):
+        return None
+    return (s3 or S3Config()).to_storage_options()
 
 
 def resolve_env_config_db_uri(explicit_db_uri: Optional[str] = None) -> str:
@@ -94,8 +124,20 @@ class S3Config:
 
 @dataclass
 class TableConfig:
-    """Logical table configuration with a test-safe default profile."""
+    """Logical table configuration with a test-safe default profile.
 
+    Landing and serving live in separate databases since the 2026.10 storage
+    split (GPFS vs S3). Resolution order per role: explicit per-role value,
+    then the shared ``db_uri`` argument (both roles, for disposable/test
+    databases), then the per-role environment variable, then the role default.
+    The legacy ``WT_SDK_DB_URI`` variable is intentionally NOT consulted:
+    upgrading to this SDK generation means the new stack; pre-cutover tools
+    pin the legacy S3 URIs explicitly.
+    """
+
+    landing_db_uri: Optional[str] = None
+    serving_db_uri: Optional[str] = None
+    # Shared explicit override for both roles (e.g. TableConfig(db_uri="memory://t")).
     db_uri: Optional[str] = None
     landing_table: Optional[str] = None
     serving_table: Optional[str] = None
@@ -103,7 +145,14 @@ class TableConfig:
 
     def __post_init__(self):
         self.profile = _resolve_table_profile(self.profile)
-        self.db_uri = self.db_uri or _env("WT_SDK_DB_URI") or DEFAULT_DB_URI
+        self.landing_db_uri = (
+            self.landing_db_uri or self.db_uri
+            or _env("WT_SDK_LANDING_DB_URI") or DEFAULT_LANDING_DB_URI
+        )
+        self.serving_db_uri = (
+            self.serving_db_uri or self.db_uri
+            or _env("WT_SDK_SERVING_DB_URI") or DEFAULT_SERVING_DB_URI
+        )
 
         if self.profile == "test":
             default_landing = TEST_LANDING_TABLE
@@ -115,11 +164,25 @@ class TableConfig:
         self.landing_table = self.landing_table or _env("WT_SDK_LANDING_TABLE") or default_landing
         self.serving_table = self.serving_table or _env("WT_SDK_SERVING_TABLE") or default_serving
 
+    def db_uri_for(self, table_role: str) -> str:
+        if table_role == "landing":
+            return self.landing_db_uri
+        if table_role == "serving":
+            return self.serving_db_uri
+        raise ValueError(f"Unknown table role: {table_role!r}")
+
+    def table_name_for(self, table_role: str) -> str:
+        if table_role == "landing":
+            return self.landing_table
+        if table_role == "serving":
+            return self.serving_table
+        raise ValueError(f"Unknown table role: {table_role!r}")
+
     def landing_uri(self) -> str:
-        return f"{self.db_uri}/{self.landing_table}.lance"
+        return f"{self.landing_db_uri}/{self.landing_table}.lance"
 
     def serving_uri(self) -> str:
-        return f"{self.db_uri}/{self.serving_table}.lance"
+        return f"{self.serving_db_uri}/{self.serving_table}.lance"
 
 
 @dataclass
@@ -149,15 +212,22 @@ class GatewayConfig:
     def resolved_dldb_metrics_log_path(self) -> Optional[str]:
         return resolve_dldb_metrics_log_path(self.dldb_metrics_log_path)
 
-    def to_dldb_config(self) -> Dict[str, Any]:
+    def to_dldb_config(self, db_uri: Optional[str] = None) -> Dict[str, Any]:
+        """dldb connect kwargs for one database.
+
+        ``storage_options`` applies only to object-store URIs; local
+        filesystem databases (the GPFS hot layer) must not receive S3
+        credentials/options. Without ``db_uri`` the legacy behavior of
+        always including S3 options is kept for callers that never saw
+        a URI (e.g. tests).
+        """
         config = {
             "use_memory_queue": self.use_memory_queue,
             "flush_every": self.flush_every,
             "model": self.resolved_dldb_model(),
-            "storage_options": self.s3.to_storage_options(),
         }
-        # Only forwarded when explicitly set; dldb<1.1.4 rejects this kwarg and
-        # dldb>=1.1.4 treats "unset" as the model-specific default (15s for debug).
+        if db_uri is None or is_remote_uri(db_uri):
+            config["storage_options"] = self.s3.to_storage_options()
         if self.dldb_heartbeat_interval_s is not None:
             config["heartbeat_interval_s"] = self.dldb_heartbeat_interval_s
         return config

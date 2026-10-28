@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Create missing indexes and fully optimize a profile-selected env-config table.
 
-The target is ``env_config_test`` for the test profile and
-``evaluation_env_config`` for production, in the database selected by
-``WT_SDK_ENV_CONFIG_DB_URI``. Since the 2026.10 job-splitting change these
-tables are HASH(job_id)-partitioned, so indexes are created and optimized
-per materialized bucket; legacy unpartitioned tables keep the single-table
-code path.
+The target is ``env_test`` for the test profile and ``wt_env_config`` for
+production, in the database selected by ``WT_SDK_ENV_CONFIG_DB_URI``.
+Since the 2026.10 job-splitting change these tables are HASH(job_id)-partitioned,
+so indexes are created and optimized per materialized bucket; legacy
+unpartitioned tables keep the single-table code path.
 
 Examples:
   python scripts/ops/maintain_env_config_indexes.py --dry-run
@@ -24,10 +23,10 @@ from typing import Any, List, Optional, Tuple
 import dldb
 
 from wt_sdk.config import (
-    S3Config,
     TEST_ENV_CONFIG_TABLE,
     resolve_env_config_db_uri,
     resolve_env_config_table_name,
+    storage_options_for,
 )
 from wt_sdk.core.evaluation_env_schema import (
     EVALUATION_ENV_SCHEMA,
@@ -233,18 +232,12 @@ def main() -> int:
         "--profile",
         choices=("test", "prod", "production"),
         default="test",
-        help=(
-            "Select env_config_test for test or evaluation_env_config for "
-            "production. Defaults to test."
-        ),
+        help="Select env_test for test or wt_env_config for production. Defaults to test.",
     )
     parser.add_argument(
         "--db-uri",
         default=None,
-        help=(
-            "Database URI (default: WT_SDK_ENV_CONFIG_DB_URI, then "
-            "s3://wind-tunnel-env-config)."
-        ),
+        help="Database URI (default: WT_SDK_ENV_CONFIG_DB_URI, then the GPFS env-config path).",
     )
     parser.add_argument(
         "--dry-run",
@@ -306,9 +299,10 @@ def main() -> int:
     print(f"Table: {table_name}")
     print(f"Table URI: {db_uri}/{table_name}.lance")
 
-    connect_kwargs: dict[str, Any] = {
-        "storage_options": S3Config().to_storage_options(),
-    }
+    connect_kwargs: dict[str, Any] = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
     if args.dldb_model != "none":
         connect_kwargs["model"] = args.dldb_model
         if args.dldb_heartbeat_interval_s is not None:

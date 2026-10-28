@@ -10,26 +10,33 @@ This script:
 Safe to run periodically - it won't recreate existing indexes.
 
 Usage:
-    python scripts/ops/add_missing_indexes.py wind_tunnel_serving
-    python scripts/ops/add_missing_indexes.py wind_tunnel_landing
-    python scripts/ops/add_missing_indexes.py v2_landing_test
-    python scripts/ops/add_missing_indexes.py wind_tunnel_serving --dry-run
+    python scripts/ops/add_missing_indexes.py wt_serving
+    python scripts/ops/add_missing_indexes.py wt_landing
+    python scripts/ops/add_missing_indexes.py landing_test
+    python scripts/ops/add_missing_indexes.py wt_serving --dry-run
 """
 import argparse
 import sys
 from typing import List, Set
 
 import dldb
-from wt_sdk.config import default_config
+from wt_sdk.config import (
+    DEFAULT_LANDING_TABLE,
+    DEFAULT_SERVING_TABLE,
+    TEST_LANDING_TABLE,
+    TEST_SERVING_TABLE,
+    db_uri_for_table,
+    storage_options_for,
+)
 from wt_sdk.core.schemas import SERVING_SCALAR_INDEXES, LANDING_SCALAR_INDEXES
 
 
 # Index definitions per table
 TABLE_INDEXES = {
-    "wind_tunnel_landing": LANDING_SCALAR_INDEXES,
-    "wind_tunnel_serving": SERVING_SCALAR_INDEXES,
-    "v2_landing_test": LANDING_SCALAR_INDEXES,
-    "serving_test": SERVING_SCALAR_INDEXES,
+    DEFAULT_LANDING_TABLE: LANDING_SCALAR_INDEXES,
+    DEFAULT_SERVING_TABLE: SERVING_SCALAR_INDEXES,
+    TEST_LANDING_TABLE: LANDING_SCALAR_INDEXES,
+    TEST_SERVING_TABLE: SERVING_SCALAR_INDEXES,
 }
 
 
@@ -79,13 +86,14 @@ def add_missing_indexes(table_name: str, db_uri: str = None, dry_run: bool = Fal
     Returns:
         Number of indexes created
     """
-    db_uri = db_uri or default_config.tables.db_uri
+    db_uri = db_uri or db_uri_for_table(table_name)
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
 
     print(f"Connecting to {db_uri}...")
-    session = dldb.connect(
-        db_uri,
-        storage_options=default_config.s3.to_storage_options()
-    )
+    session = dldb.connect(db_uri, **connect_kwargs)
 
     # Check if table exists
     if not session.table_exists(table_name):
@@ -168,23 +176,23 @@ def main():
         epilog="""
 Examples:
   # Show what would be done without making changes
-  python scripts/ops/add_missing_indexes.py wind_tunnel_serving --dry-run
+  python scripts/ops/add_missing_indexes.py wt_serving --dry-run
 
   # Add missing indexes to all partitions
-  python scripts/ops/add_missing_indexes.py wind_tunnel_serving
+  python scripts/ops/add_missing_indexes.py wt_serving
 
   # Add missing indexes to landing table
-  python scripts/ops/add_missing_indexes.py wind_tunnel_landing
+  python scripts/ops/add_missing_indexes.py wt_landing
         """
     )
     parser.add_argument(
         "table_name",
-        help="Logical table name (e.g., wind_tunnel_serving, wind_tunnel_landing)"
+        help="Logical table name (e.g., wt_serving, wt_landing)"
     )
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI (default: s3://wind-tunnel-dldb)"
+        help="Database URI (default: resolved from the table name)"
     )
     parser.add_argument(
         "--dry-run",

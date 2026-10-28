@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Align the env-config table with wind_tunnel_landing by job_id.
+"""Align the env-config table with wt_landing by job_id.
 
 Keeps only env rows whose job_id exists in the landing table and deletes
 everything else from the env table. The landing table is opened READ-ONLY:
 this script never issues a write call against it -- landing data is used
 solely to build the set of valid job_ids.
 
-Env table selection follows --profile (evaluation_env_config for production,
-env_config_test for test). The landing reference is always read from
-WT_SDK_DB_URI (default s3://wind-tunnel-dldb) table wind_tunnel_landing.
+Env table selection follows --profile (wt_env_config for production, env_test
+for test) in the env-config database resolved by wt_sdk. The landing reference
+is always read from the landing database, table wt_landing.
 
 Notes:
-  - Reading the landing job_id column opens all 128 HASH buckets, including
-    the slow partition_77 (~35s). Export WT_SDK_S3_REQUEST_TIMEOUT=120 first.
+  - Reading the landing job_id column opens every HASH bucket and may take a
+    while. When targeting a remote (S3) database, export
+    WT_SDK_S3_REQUEST_TIMEOUT=120 first.
   - Lance deletes are logical: deleted rows stay recoverable in old table
     versions until cleanup_old_versions runs. In addition, this script always
     dumps every to-be-deleted row to a local JSONL backup before deleting.
@@ -39,11 +40,21 @@ import dldb
 import pandas as pd
 
 from wt_sdk.config import (
+    DEFAULT_LANDING_DB_URI,
     DEFAULT_LANDING_TABLE,
-    S3Config,
     resolve_env_config_db_uri,
     resolve_env_config_table_name,
+    storage_options_for,
 )
+
+
+def _connect(db_uri: str):
+    """Open a dldb session with storage options only for remote (S3) URIs."""
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    return dldb.connect(db_uri, **connect_kwargs)
 
 
 MATCH_ALL = "id IS NOT NULL"  # id is non-nullable in both schemas; SDK's own match-all
@@ -56,7 +67,7 @@ def sql_literal(value: str) -> str:
 
 def read_landing_job_ids(session, table_name: str) -> set:
     print(f"[1/4] Reading job_id column from landing table {table_name!r} (read-only)...", flush=True)
-    print("      (opens all HASH buckets incl. slow partition_77; expect >=1 min)", flush=True)
+    print("      (opens all HASH buckets; expect a slow full-table read)", flush=True)
     frame = session.filter(table_name, MATCH_ALL, columns=["job_id"])
     job_ids = set(frame["job_id"].dropna().astype(str).unique())
     print(f"      landing distinct job_ids: {len(job_ids)}", flush=True)
@@ -115,13 +126,13 @@ def main() -> int:
         "--profile",
         choices=("test", "prod", "production"),
         default="production",
-        help="env table to clean: evaluation_env_config (default) or env_config_test.",
+        help="env table to clean: wt_env_config (default) or env_test.",
     )
     parser.add_argument("--db-uri", default=None, help="Env-config DB URI override.")
     parser.add_argument(
         "--landing-db-uri",
         default=None,
-        help="Landing DB URI (default: WT_SDK_DB_URI, then s3://wind-tunnel-dldb).",
+        help=f"Landing DB URI (default: {DEFAULT_LANDING_DB_URI}).",
     )
     parser.add_argument(
         "--landing-table",
@@ -153,25 +164,21 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    env_db_uri = resolve_env_config_db_uri(args.db_uri)
+    # New-generation stack: env_test / wt_env_config in the env-config
+    # database, landing reference wt_landing in the landing database.
+    env_db_uri = args.db_uri or resolve_env_config_db_uri()
     env_table = resolve_env_config_table_name(profile=args.profile)
-    landing_db_uri = args.landing_db_uri
-    if landing_db_uri is None:
-        from wt_sdk.config import TableConfig
-
-        landing_db_uri = TableConfig().db_uri
+    landing_db_uri = args.landing_db_uri or DEFAULT_LANDING_DB_URI
 
     print(f"Env DB:      {env_db_uri}")
     print(f"Env table:   {env_table}")
     print(f"Landing DB:  {landing_db_uri} (READ-ONLY reference)")
     print(f"Landing table: {args.landing_table}", flush=True)
 
-    # One storage-options dict serves both buckets; WT_SDK_S3_REQUEST_TIMEOUT
-    # is picked up automatically to survive the slow partition_77 open.
-    storage_options = S3Config().to_storage_options()
-
-    env_session = dldb.connect(env_db_uri, storage_options=storage_options)
-    landing_session = dldb.connect(landing_db_uri, storage_options=storage_options)
+    # Each session gets storage options only when its database is remote
+    # (S3); the GPFS hot-layer paths must not receive S3 credentials.
+    env_session = _connect(env_db_uri)
+    landing_session = _connect(landing_db_uri)
     try:
         # Landing side: filter() only. This script must never call a write API
         # on landing_session.

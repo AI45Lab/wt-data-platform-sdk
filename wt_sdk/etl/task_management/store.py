@@ -11,7 +11,7 @@ import pandas as pd
 import pyarrow as pa
 
 import wt_sdk._time as sdk_time
-from wt_sdk.config import S3Config
+from wt_sdk.config import S3Config, is_remote_uri
 from wt_sdk.etl.checkpoint import resolve_etl_state_db_uri
 from wt_sdk.etl.exceptions import CheckpointError
 
@@ -41,10 +41,11 @@ class DldbTaskStore:
         if not normalized_table:
             raise ValueError("task table_name is required")
         self.table_name = normalized_table
-        self.session = dldb.connect(
-            self.db_uri,
-            storage_options=(s3 or S3Config()).to_storage_options(),
-        )
+        connect_kwargs = {}
+        if is_remote_uri(self.db_uri):
+            # Local filesystem state databases (e.g. GPFS) take no S3 options.
+            connect_kwargs["storage_options"] = (s3 or S3Config()).to_storage_options()
+        self.session = dldb.connect(self.db_uri, **connect_kwargs)
 
     def initialize(self) -> bool:
         """Create the task table if absent; never replace an existing table."""

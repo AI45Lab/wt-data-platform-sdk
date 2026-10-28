@@ -6,57 +6,57 @@ Trajectory tables use WTGatewayClient so exact job_id filters can prune HASH
 buckets. Use --with-total-count only when the full table size is needed.
 
 Usage:
-  # Query from default database (s3://wind-tunnel-dldb)
-  python scripts/inspect/query_data.py --table v2_landing_test
+  # Query from the default database resolved from the table name
+  python scripts/inspect/query_data.py --table landing_test
 
   # Show only filtered row count
-  python scripts/inspect/query_data.py --table v2_landing_test --count
+  python scripts/inspect/query_data.py --table landing_test --count
 
   # Query with filter
-  python scripts/inspect/query_data.py --table v2_landing_test --query "dataset_type = 'TEST'"
+  python scripts/inspect/query_data.py --table landing_test --query "dataset_type = 'TEST'"
 
   # Query from custom database
   python scripts/inspect/query_data.py --db-uri s3://my-bucket --table my_table --query "reward > 0.5"
 
   # Query the separate test environment-config table by name
-  python scripts/inspect/query_data.py --table env_config_test --limit 5
+  python scripts/inspect/query_data.py --table env_test --limit 5
 
   # Query with filter and limit
-  python scripts/inspect/query_data.py --table v2_landing_test --query "reward > 0.9" --limit 2
+  python scripts/inspect/query_data.py --table landing_test --query "reward > 0.9" --limit 2
 
   # Select specific columns
-  python scripts/inspect/query_data.py --table v2_landing_test --columns "id,dataset_type,agent_model,reward"
+  python scripts/inspect/query_data.py --table landing_test --columns "id,dataset_type,agent_model,reward"
 
   # List distinct values and their count
-  python scripts/inspect/query_data.py --table wind_tunnel_landing --distinct job_id
+  python scripts/inspect/query_data.py --table wt_landing --distinct job_id
 
   # List distinct values after filtering
-  python scripts/inspect/query_data.py --table wind_tunnel_landing --query "job_id = 'job-001'" --distinct session_id
+  python scripts/inspect/query_data.py --table wt_landing --query "job_id = 'job-001'" --distinct session_id
 
   # Show full content (no truncation)
-  python scripts/inspect/query_data.py --table v2_landing_test --query "dataset_type = 'TEST'" --limit 1 --no-truncate
+  python scripts/inspect/query_data.py --table landing_test --query "dataset_type = 'TEST'" --limit 1 --no-truncate
 
   # Show full nested structures (DataFrame format)
-  python scripts/inspect/query_data.py --table v2_landing_test --query "dataset_type = 'TEST'" --limit 1 --show-nested
+  python scripts/inspect/query_data.py --table landing_test --query "dataset_type = 'TEST'" --limit 1 --show-nested
 
   # Write nested results as pretty JSON instead of printing them
-  python scripts/inspect/query_data.py --table v2_landing_test --limit 1 --output ./artifacts/sample.json
+  python scripts/inspect/query_data.py --table landing_test --limit 1 --output ./artifacts/sample.json
 
 Examples:
   # Get chat training data
-  python scripts/inspect/query_data.py --table wind_tunnel_landing --query "dataset_type = 'SFT'"
+  python scripts/inspect/query_data.py --table wt_landing --query "dataset_type = 'SFT'"
 
   # Get high reward sessions
-  python scripts/inspect/query_data.py --table wind_tunnel_landing --query "reward >= 0.9" --columns "id,session_id,reward,agent_model"
+  python scripts/inspect/query_data.py --table wt_landing --query "reward >= 0.9" --columns "id,session_id,reward,agent_model"
 
   # Get completed sessions
-  python scripts/inspect/query_data.py --table wind_tunnel_landing --query "is_session_completed = true"
+  python scripts/inspect/query_data.py --table wt_landing --query "is_session_completed = true"
 
   # Count test data
-  python scripts/inspect/query_data.py --table v2_landing_test --count
+  python scripts/inspect/query_data.py --table landing_test --count
 
   # Filter by meta_json JSON string (use LIKE for string matching)
-  python scripts/inspect/query_data.py --table wind_tunnel_landing --query "meta_json LIKE '%safety_image_ch%'" --count
+  python scripts/inspect/query_data.py --table wt_landing --query "meta_json LIKE '%safety_image_ch%'" --count
 """
 import argparse
 import base64
@@ -79,8 +79,10 @@ from wt_sdk.config import (
     TEST_SERVING_TABLE,
     GatewayConfig,
     TableConfig,
+    db_uri_for_table,
     default_config,
     resolve_env_config_db_uri,
+    storage_options_for,
 )
 
 
@@ -103,7 +105,7 @@ def _resolve_db_uri(table_name: str, explicit_db_uri: str | None) -> str:
         return explicit_db_uri
     if table_name in ENV_CONFIG_TABLE_NAMES:
         return resolve_env_config_db_uri()
-    return default_config.tables.db_uri
+    return db_uri_for_table(table_name)
 
 
 def _uses_latest_snapshot_by_default(table_name: str) -> bool:
@@ -128,14 +130,18 @@ def _build_gateway_client(table_name: str, db_uri: str) -> WTGatewayClient:
         if table_name in {DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE}
         else default_config.tables.serving_table
     )
+    tables_kwargs = {"landing_table": landing_table, "serving_table": serving_table}
+    if db_uri:
+        if table_name in {DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE}:
+            tables_kwargs["landing_db_uri"] = db_uri
+        elif table_name in {DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE}:
+            tables_kwargs["serving_db_uri"] = db_uri
+        else:
+            tables_kwargs["db_uri"] = db_uri
     return WTGatewayClient(
         GatewayConfig(
             s3=default_config.s3,
-            tables=TableConfig(
-                db_uri=db_uri,
-                landing_table=landing_table,
-                serving_table=serving_table,
-            ),
+            tables=TableConfig(**tables_kwargs),
             dldb_model=default_config.dldb_model,
             enable_dldb_timing_logs=default_config.enable_dldb_timing_logs,
             log_dldb_metrics_summary_on_close=default_config.log_dldb_metrics_summary_on_close,
@@ -460,7 +466,7 @@ def main():
 
     # Optional: database URI
     parser.add_argument("--db-uri", type=str, default=None,
-                       help="Database URI (default: s3://wind-tunnel-dldb)")
+                       help="Database URI (default: resolved from the table name)")
 
     # Query options
     parser.add_argument("--count", action="store_true",
@@ -654,10 +660,11 @@ def main():
     # Initialize DLDB session
     print(f"Connecting to {db_name}...")
     try:
-        session = dldb.connect(
-            db_name,
-            storage_options=default_config.s3.to_storage_options()
-        )
+        connect_kwargs = {}
+        storage_options = storage_options_for(db_name)
+        if storage_options is not None:
+            connect_kwargs["storage_options"] = storage_options
+        session = dldb.connect(db_name, **connect_kwargs)
     except Exception as e:
         print(f"Error connecting to database: {e}")
         return 1

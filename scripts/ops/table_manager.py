@@ -19,20 +19,29 @@ Physical table naming pattern for HASH partitions:
 
 Example:
     python scripts/ops/table_manager.py list
-    python scripts/ops/table_manager.py list --db-uri s3://wind-tunnel-dldb
-    python scripts/ops/table_manager.py drop v2_landing_test
-    python scripts/ops/table_manager.py drop evaluation_env_config --db-uri s3://wind-tunnel-env-config
-    python scripts/ops/table_manager.py drop v2_landing_test --partition SFT
-    python scripts/ops/table_manager.py show-physical v2_landing_test
-    python scripts/ops/table_manager.py show-schema wind_tunnel_landing
-    python scripts/ops/table_manager.py show-schema evaluation_env_config --db-uri s3://wind-tunnel-env-config
+    python scripts/ops/table_manager.py list --db-uri s3://my-bucket
+    python scripts/ops/table_manager.py drop landing_test
+    python scripts/ops/table_manager.py drop env_test --db-uri <env-config-db-uri>
+    python scripts/ops/table_manager.py drop landing_test --partition SFT
+    python scripts/ops/table_manager.py show-physical landing_test
+    python scripts/ops/table_manager.py show-schema wt_landing
+    python scripts/ops/table_manager.py show-schema wt_serving --db-uri s3://wt-data-platform
 """
 import argparse
 import sys
 from typing import List, Optional
 
 import dldb
-from wt_sdk.config import default_config
+from wt_sdk.config import DEFAULT_LANDING_DB_URI, storage_options_for
+
+
+def _connect(db_uri: str):
+    """Open a dldb session with storage options only for remote (S3) URIs."""
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    return dldb.connect(db_uri, **connect_kwargs)
 
 
 # Physical table naming patterns for partitioned tables
@@ -45,18 +54,15 @@ def list_tables(db_uri: str = None) -> List[str]:
     List all logical tables in the database using DLDB SDK.
 
     Args:
-        db_uri: Database URI (default: s3://wind-tunnel-dldb)
+        db_uri: Database URI (default: the GPFS landing database)
 
     Returns:
         List of table names
     """
-    db_uri = db_uri or default_config.tables.db_uri
+    db_uri = db_uri or DEFAULT_LANDING_DB_URI
 
     print(f"Connecting to {db_uri}...")
-    session = dldb.connect(
-        db_uri,
-        storage_options=default_config.s3.to_storage_options()
-    )
+    session = _connect(db_uri)
 
     tables = session.list_tables()
     session.shutdown()
@@ -109,20 +115,17 @@ def drop_table(
     Args:
         table_name: Logical table name to drop
         partition: Optional partition value to drop (drops entire table if None)
-        db_uri: Database URI (default: s3://wind-tunnel-dldb)
+        db_uri: Database URI (default: the GPFS landing database)
         force: Use non-interactive confirmation. Requires confirm_table to match.
         confirm_table: Exact logical table name required with force=True.
 
     Returns:
         True if successful
     """
-    db_uri = db_uri or default_config.tables.db_uri
+    db_uri = db_uri or DEFAULT_LANDING_DB_URI
 
     print(f"Connecting to {db_uri}...")
-    session = dldb.connect(
-        db_uri,
-        storage_options=default_config.s3.to_storage_options()
-    )
+    session = _connect(db_uri)
 
     # Check exact metadata rather than relying on dldb's cached table lookup.
     record = _get_exact_table_record(session, table_name)
@@ -161,20 +164,21 @@ def show_physical_tables(table_name: str, db_uri: str = None) -> List[str]:
 
     Args:
         table_name: Logical table name
-        db_uri: Database URI (default: s3://wind-tunnel-dldb)
+        db_uri: Database URI (default: the GPFS landing database)
 
     Returns:
         List of physical table names
     """
     import lancedb
 
-    db_uri = db_uri or default_config.tables.db_uri
+    db_uri = db_uri or DEFAULT_LANDING_DB_URI
 
     print(f"Connecting to {db_uri}...")
-    db = lancedb.connect(
-        db_uri,
-        storage_options=default_config.s3.to_storage_options()
-    )
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    db = lancedb.connect(db_uri, **connect_kwargs)
 
     # Get all physical tables
     # Use list_tables() instead of deprecated table_names()
@@ -253,18 +257,15 @@ def show_schema(table_name: str, db_uri: str = None) -> dict:
 
     Args:
         table_name: Logical table name
-        db_uri: Database URI (default: s3://wind-tunnel-dldb)
+        db_uri: Database URI (default: the GPFS landing database)
 
     Returns:
         Dict with schema and indexes info
     """
-    db_uri = db_uri or default_config.tables.db_uri
+    db_uri = db_uri or DEFAULT_LANDING_DB_URI
 
     print(f"Connecting to {db_uri}...")
-    session = dldb.connect(
-        db_uri,
-        storage_options=default_config.s3.to_storage_options()
-    )
+    session = _connect(db_uri)
 
     # Check if table exists
     if not session.table_exists(table_name):
@@ -370,20 +371,20 @@ Examples:
   python scripts/ops/table_manager.py list --db-uri s3://my-bucket
 
   # Drop a table (with confirmation)
-  python scripts/ops/table_manager.py drop v2_landing_test
+  python scripts/ops/table_manager.py drop landing_test
 
   # Drop a table non-interactively (table name must be repeated exactly)
-  python scripts/ops/table_manager.py drop v2_landing_test --force --confirm-table v2_landing_test
+  python scripts/ops/table_manager.py drop landing_test --force --confirm-table landing_test
 
   # Drop a specific partition
-  python scripts/ops/table_manager.py drop v2_landing_test --partition SFT
+  python scripts/ops/table_manager.py drop landing_test --partition SFT
 
   # Show physical tables for a logical table
-  python scripts/ops/table_manager.py show-physical v2_landing_test
+  python scripts/ops/table_manager.py show-physical landing_test
 
   # Show schema and indexes for a table
-  python scripts/ops/table_manager.py show-schema wind_tunnel_landing
-  python scripts/ops/table_manager.py show-schema wind_tunnel_serving
+  python scripts/ops/table_manager.py show-schema wt_landing
+  python scripts/ops/table_manager.py show-schema wt_serving
         """
     )
 
@@ -402,7 +403,7 @@ Examples:
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI (default: s3://wind-tunnel-dldb)"
+        help=f"Database URI (default: {DEFAULT_LANDING_DB_URI})"
     )
 
     parser.add_argument(

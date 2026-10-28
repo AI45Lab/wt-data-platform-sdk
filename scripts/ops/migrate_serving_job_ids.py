@@ -37,6 +37,7 @@ from wt_sdk.config import (
     TEST_SERVING_TABLE,
     GatewayConfig,
     TableConfig,
+    db_uri_for_table,
     default_config,
 )
 from wt_sdk.models import ServingRecord
@@ -93,7 +94,7 @@ def build_config(profile: str) -> GatewayConfig:
     canonical_profile = normalize_profile(profile)
     tables = TableConfig(
         profile=canonical_profile,
-        db_uri=default_config.tables.db_uri,
+        db_uri=db_uri_for_table(serving_table_for_profile(canonical_profile)),
         landing_table=landing_table_for_profile(canonical_profile),
         serving_table=serving_table_for_profile(canonical_profile),
     )

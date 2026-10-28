@@ -14,7 +14,7 @@ SPEC.loader.exec_module(export_script)
 
 
 class _FakeClient:
-    def __init__(self, batches, *, error=None, table="wind_tunnel_serving"):
+    def __init__(self, batches, *, error=None, table="wt_serving"):
         self.config = SimpleNamespace(tables=SimpleNamespace(serving_table=table))
         self.batches = batches
         self.error = error
@@ -71,15 +71,15 @@ def test_build_config_defaults_to_production_and_ignores_table_name_environment_
     config = export_script.build_config()
 
     assert config.tables.profile == "production"
-    assert config.tables.landing_table == "wind_tunnel_landing"
-    assert config.tables.serving_table == "wind_tunnel_serving"
+    assert config.tables.landing_table == "wt_landing"
+    assert config.tables.serving_table == "wt_serving"
 
 
 def test_build_config_allows_explicit_serving_test():
     config = export_script.build_config("serving_test")
 
     assert config.tables.profile == "test"
-    assert config.tables.landing_table == "v2_landing_test"
+    assert config.tables.landing_table == "landing_test"
     assert config.tables.serving_table == "serving_test"
 
 
@@ -128,7 +128,7 @@ def test_export_writes_jsonl_shards_manifest_and_success_marker(tmp_path):
     ]
 
     manifest = json.loads((result / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["table"] == "wind_tunnel_serving"
+    assert manifest["table"] == "wt_serving"
     assert manifest["filter"] == "dataset_type = 'RL'"
     assert manifest["columns"] == ["id", "meta_json"]
     assert manifest["format"] == "jsonl"

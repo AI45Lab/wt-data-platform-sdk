@@ -21,10 +21,10 @@ from typing import Any, Mapping
 import dldb
 
 from wt_sdk.config import (
-    S3Config,
     TEST_ENV_CONFIG_TABLE,
     resolve_env_config_db_uri,
     resolve_env_config_table_name,
+    storage_options_for,
 )
 from wt_sdk.core.evaluation_env_schema import SCALAR_INDEX_COLUMNS
 
@@ -207,18 +207,12 @@ def main() -> int:
         "--profile",
         choices=("test", "prod", "production"),
         default="test",
-        help=(
-            "Select env_config_test for test or evaluation_env_config for "
-            "production. Defaults to test."
-        ),
+        help="Select env_test for test or wt_env_config for production. Defaults to test.",
     )
     parser.add_argument(
         "--db-uri",
         default=None,
-        help=(
-            "Database URI (default: WT_SDK_ENV_CONFIG_DB_URI, then "
-            "s3://wind-tunnel-env-config)."
-        ),
+        help="Database URI (default: WT_SDK_ENV_CONFIG_DB_URI, then the GPFS env-config path).",
     )
     parser.add_argument(
         "--json",
@@ -229,10 +223,11 @@ def main() -> int:
 
     db_uri = resolve_env_config_db_uri(args.db_uri)
     table_name = resolve_env_config_table_name(profile=args.profile)
-    session = dldb.connect(
-        db_uri,
-        storage_options=S3Config().to_storage_options(),
-    )
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
     try:
         report = inspect_env_config_status(session, table_name=table_name)
         if args.json:

@@ -16,7 +16,7 @@ def test_dry_run_defaults_to_test_table_without_connecting(monkeypatch, capsys):
     assert result == 0
     output = capsys.readouterr().out
     assert "Profile: test" in output
-    assert "Target table: env_config_test" in output
+    assert "Target table: env_test" in output
 
 
 def test_production_dry_run_selects_existing_production_table(capsys):
@@ -28,4 +28,4 @@ def test_production_dry_run_selects_existing_production_table(capsys):
     assert result == 0
     output = capsys.readouterr().out
     assert "Profile: production" in output
-    assert "Target table: evaluation_env_config" in output
+    assert "Target table: wt_env_config" in output

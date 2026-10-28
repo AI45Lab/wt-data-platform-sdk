@@ -6,12 +6,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sys
+from datetime import datetime
 from typing import Any
 
 import dldb
 import pandas as pd
 
-from wt_sdk.config import DEFAULT_LANDING_TABLE, default_config
+from wt_sdk.config import DEFAULT_LANDING_TABLE, db_uri_for_table, storage_options_for
 from wt_sdk.core.schemas import (
     LANDING_PARTITION_COLUMN,
     LANDING_PARTITION_TYPE,
@@ -20,7 +21,9 @@ from wt_sdk.core.schemas import (
 )
 
 
-DEFAULT_ARCHIVE_TABLE = "archived_20260911_wind_tunnel_landing"
+DEFAULT_ARCHIVE_TABLE = (
+    f"archived_{datetime.now().strftime('%Y%m%d')}_{DEFAULT_LANDING_TABLE}"
+)
 DEFAULT_BATCH_SIZE = 5_000
 ID_QUERY = "id IS NOT NULL"
 MODULUS = 1 << 128
@@ -106,10 +109,12 @@ def _id_digest(session: Any, table_name: str, partition: int, batch_size: int):
 
 
 def verify(source_table: str, archive_table: str, batch_size: int) -> None:
-    session = dldb.connect(
-        default_config.tables.db_uri,
-        storage_options=default_config.s3.to_storage_options(),
-    )
+    db_uri = db_uri_for_table(source_table)
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
     try:
         source_record, source_schema = _validate_layout(session, source_table)
         archive_record, archive_schema = _validate_layout(session, archive_table)
@@ -121,7 +126,7 @@ def verify(source_table: str, archive_table: str, batch_size: int) -> None:
         source_partitions = _partitions(session, source_table)
         archive_partitions = _partitions(session, archive_table)
         all_partitions = sorted(source_partitions | archive_partitions)
-        print(f"Database: {default_config.tables.db_uri}")
+        print(f"Database: {db_uri}")
         print(f"Source: {source_table}")
         print(f"Archive: {archive_table}")
         print(f"Schema: identical ({len(source_schema)} fields)")

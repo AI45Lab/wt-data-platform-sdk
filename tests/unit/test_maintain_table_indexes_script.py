@@ -6,9 +6,9 @@ from scripts.ops.maintain_table_indexes import resolve_table_role
 @pytest.mark.parametrize(
     ("table_name", "expected_role"),
     [
-        ("wind_tunnel_landing", "landing"),
-        ("v2_landing_test", "landing"),
-        ("wind_tunnel_serving", "serving"),
+        ("wt_landing", "landing"),
+        ("landing_test", "landing"),
+        ("wt_serving", "serving"),
         ("serving_test", "serving"),
     ],
 )

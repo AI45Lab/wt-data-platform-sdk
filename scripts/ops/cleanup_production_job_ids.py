@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Delete matching job IDs from one environment's env, landing, and serving tables.
 
-The default command has a production scope:
+The default command has a production scope (new-generation stack):
 
-* ``evaluation_env_config`` in ``WT_SDK_ENV_CONFIG_DB_URI``;
-* ``wind_tunnel_landing`` in ``WT_SDK_DB_URI`` (or the SDK default);
-* ``wind_tunnel_serving`` in ``WT_SDK_DB_URI`` (or the SDK default).
+* ``wt_env_config`` in the env-config GPFS database;
+* ``wt_landing`` in the landing GPFS database and ``wt_serving`` in
+  ``s3://wt-data-platform``.
 
 For safe integration validation, ``--profile test`` targets the corresponding
-test tables instead.  No arbitrary table names are accepted.
+test tables (``env_test`` / ``landing_test`` / ``serving_test``).  No arbitrary
+table names are accepted.
 
 Job IDs can be supplied repeatedly with ``--job-id`` or one per line with
 ``--job-id-file``.  The default is a read-only preview.  A destructive run
@@ -56,6 +57,8 @@ from wt_sdk.env_config_client import EnvConfigManager
 
 PREVIEW_COLUMNS = ["id", "job_id", "env_id", "env_name", "session_id", "created_at"]
 MISSING_PARTITION_MARKERS = ("partition", "does not exist")
+# New-generation stack: wt_env_config / wt_landing / wt_serving
+# (test: env_test / landing_test / serving_test)
 PROFILE_TABLES = {
     "production": {
         "env": DEFAULT_ENV_CONFIG_TABLE,
@@ -138,11 +141,14 @@ def _normalize_profile(profile: str) -> str:
 
 
 def _build_client(profile: str) -> WTGatewayClient:
-    """Create a client pinned to the selected landing and serving tables."""
+    """Create a client targeting the selected landing and serving tables.
+
+    No database URI is pinned: TableConfig defaults route landing to the
+    GPFS landing database and serving to S3.
+    """
     profile = _normalize_profile(profile)
     profile_tables = PROFILE_TABLES[profile]
     tables = TableConfig(
-        db_uri=default_config.tables.db_uri,
         landing_table=profile_tables["landing"],
         serving_table=profile_tables["serving"],
         profile=profile,
@@ -330,7 +336,10 @@ def run(
         client = _build_client(profile)
     try:
         if env_manager is None:
-            env_manager = EnvConfigManager(profile=profile)
+            env_manager = EnvConfigManager(
+                table_name=profile_tables["env"],
+                profile=profile,
+            )
 
         table_results = [
             inspect_table(
@@ -464,7 +473,7 @@ def main() -> int:
         default="production",
         help=(
             "Environment to clean: production (default) or test. "
-            "Test uses env_config_test, v2_landing_test, and serving_test."
+            "Test uses env_test, landing_test, and serving_test."
         ),
     )
     mode = parser.add_mutually_exclusive_group()

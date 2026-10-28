@@ -1,8 +1,8 @@
 """
 Evaluation Environment Config Schema.
 
-Defines the shared schema for the production ``evaluation_env_config`` and
-test ``env_config_test`` tables stored in LanceDB.
+Defines the shared schema for the production ``wt_env_config`` and
+test ``env_test`` tables stored in LanceDB.
 
 Schema matches the original SQLite schema from evaluation platform:
 - id: Auto-increment ID

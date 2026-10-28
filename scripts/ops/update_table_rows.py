@@ -76,12 +76,14 @@ def profile_table_name(profile: str, table_role: str) -> str:
 def build_config(profile: str, db_uri: str | None = None) -> GatewayConfig:
     """Build a profile-pinned config that ignores explicit table-name env overrides."""
     canonical_profile = normalize_profile(profile)
-    tables = TableConfig(
-        profile=canonical_profile,
-        db_uri=db_uri or default_config.tables.db_uri,
-        landing_table=profile_table_name(canonical_profile, "landing"),
-        serving_table=profile_table_name(canonical_profile, "serving"),
-    )
+    tables_kwargs = {
+        "profile": canonical_profile,
+        "landing_table": profile_table_name(canonical_profile, "landing"),
+        "serving_table": profile_table_name(canonical_profile, "serving"),
+    }
+    if db_uri:
+        tables_kwargs["db_uri"] = db_uri
+    tables = TableConfig(**tables_kwargs)
     return GatewayConfig(
         s3=default_config.s3,
         tables=tables,
@@ -244,7 +246,7 @@ def update_and_verify(
                     if job_id is not None
                     else None
                 )
-                client.session.update(
+                client.session_for(table_name).update(
                     table_name,
                     update_predicate,
                     effective_updates,
@@ -276,7 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         required=True,
         choices=("test", "prod", "production"),
-        help="Select v2_landing_test/serving_test or the production pair.",
+        help="Select landing_test/serving_test or the production pair.",
     )
     parser.add_argument(
         "--table",
@@ -297,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI (default: configured WT_SDK_DB_URI).",
+        help="Database URI (default: the database hosting the selected profile's tables).",
     )
     parser.add_argument(
         "--dry-run",

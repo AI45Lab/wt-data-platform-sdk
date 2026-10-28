@@ -3,7 +3,7 @@
 [English](README.md)
 
 `export_serving_data.py` 是面向外部用户的只读数据导出命令，用于从 serving
-表导出数据。默认读取生产表 `wind_tunnel_serving`。
+表导出数据。默认读取生产表 `wt_serving`。
 
 `count_dataset.py` 按 `job_id` 中以 `#` 分隔的第一个字段统计 serving 行数。
 
@@ -31,7 +31,7 @@ conda activate wt-dldb-v1
 set -a && source .env && set +a
 ```
 
-脚本默认固定读取 `wind_tunnel_serving`，不会因为 `.env` 中的表名覆盖项而被静默
+脚本默认固定读取 `wt_serving`，不会因为 `.env` 中的表名覆盖项而被静默
 切换到其他表。
 
 ## 使用方法
@@ -53,7 +53,7 @@ python scripts/delivery/export_serving_data.py \
   --output-dir ./test-exports
 ```
 
-脚本只允许读取 `wind_tunnel_serving` 和 `serving_test`，不接受任意表名或 landing
+脚本只允许读取 `wt_serving` 和 `serving_test`，不接受任意表名或 landing
 表名。
 
 `--columns` 使用英文逗号分隔字段名。省略该参数时，脚本使用经过评审的默认对外

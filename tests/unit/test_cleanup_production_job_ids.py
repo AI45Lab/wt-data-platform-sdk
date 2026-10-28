@@ -16,11 +16,11 @@ SPEC.loader.exec_module(script)
 class FakeActiveClient:
     def __init__(self):
         self.rows = {
-            "wind_tunnel_landing": {
+            "wt_landing": {
                 "job-a": [{"id": "l-a", "job_id": "job-a"}],
                 "job-b": [],
             },
-            "wind_tunnel_serving": {
+            "wt_serving": {
                 "job-a": [],
                 "job-b": [{"id": "s-b", "job_id": "job-b"}],
             },
@@ -35,13 +35,13 @@ class FakeActiveClient:
     def delete_landing(self, predicate):
         self.deleted.append(("landing", predicate))
         job_id = predicate.removeprefix("job_id IN ('").removesuffix("')")
-        rows = self.rows["wind_tunnel_landing"].pop(job_id, [])
+        rows = self.rows["wt_landing"].pop(job_id, [])
         return len(rows)
 
     def delete_serving(self, predicate):
         self.deleted.append(("serving", predicate))
         job_id = predicate.removeprefix("job_id IN ('").removesuffix("')")
-        rows = self.rows["wind_tunnel_serving"].pop(job_id, [])
+        rows = self.rows["wt_serving"].pop(job_id, [])
         return len(rows)
 
     def close(self):
@@ -50,7 +50,7 @@ class FakeActiveClient:
 
 class FakeEnvManager:
     def __init__(self):
-        self.table_name = "evaluation_env_config"
+        self.table_name = "wt_env_config"
         self.rows = {
             "job-a": [{"id": 1, "job_id": "job-a"}],
             "job-b": [],
@@ -98,9 +98,9 @@ def test_run_deletes_matches_in_each_table_and_skips_empty_tables(capsys):
     assert ("landing", "job_id IN ('job-a')") in client.deleted
     assert ("serving", "job_id IN ('job-b')") in client.deleted
     output = capsys.readouterr().out
-    assert "[SKIP] evaluation_env_config: job-b has no matching rows" in output
-    assert "[VERIFY] wind_tunnel_landing: no requested job_id remains" in output
-    assert "[VERIFY] wind_tunnel_serving: no requested job_id remains" in output
+    assert "[SKIP] wt_env_config: job-b has no matching rows" in output
+    assert "[VERIFY] wt_landing: no requested job_id remains" in output
+    assert "[VERIFY] wt_serving: no requested job_id remains" in output
 
 
 def test_run_preview_does_not_delete(capsys):
@@ -121,9 +121,9 @@ def test_run_preview_does_not_delete(capsys):
 
 def test_test_profile_uses_test_table_names_and_landing_delete():
     assert script.PROFILE_TABLES["test"] == {
-        "env": "env_config_test",
-        "landing": "v2_landing_test",
+        "env": "env_test",
+        "landing": "landing_test",
         "serving": "serving_test",
     }
-    assert script._table_role("v2_landing_test", "test") == "landing"
+    assert script._table_role("landing_test", "test") == "landing"
     assert script._table_role("serving_test", "test") == "serving"

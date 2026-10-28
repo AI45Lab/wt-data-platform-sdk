@@ -9,7 +9,7 @@ import pandas as pd
 import pyarrow as pa
 
 import wt_sdk._time as sdk_time
-from wt_sdk.config import S3Config
+from wt_sdk.config import S3Config, is_remote_uri
 
 from .exceptions import CheckpointError
 from .models import Checkpoint, checkpoint_identity
@@ -129,10 +129,11 @@ class DldbCheckpointStore:
             raise ValueError("ETL checkpoint table_name is required")
         self.db_uri = db_uri.strip()
         self.table_name = table_name.strip()
-        self.session = dldb.connect(
-            self.db_uri,
-            storage_options=(s3 or S3Config()).to_storage_options(),
-        )
+        connect_kwargs = {}
+        if is_remote_uri(self.db_uri):
+            # Local filesystem state databases (e.g. GPFS) take no S3 options.
+            connect_kwargs["storage_options"] = (s3 or S3Config()).to_storage_options()
+        self.session = dldb.connect(self.db_uri, **connect_kwargs)
 
     def initialize(self) -> bool:
         """Create the table if absent; return True only when it was created."""

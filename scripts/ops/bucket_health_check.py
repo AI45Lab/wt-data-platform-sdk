@@ -11,10 +11,10 @@ unindexed ratio, then flags buckets that need maintenance:
   - worst index unindexed ratio > --max-unindexed-ratio (default 0.2)
 
 Examples:
-  python scripts/ops/bucket_health_check.py --table wind_tunnel_landing
+  python scripts/ops/bucket_health_check.py --table wt_landing
 
   # Print only flagged bucket ids (for the scheduled maintain wrapper):
-  python scripts/ops/bucket_health_check.py --table wind_tunnel_landing --print-partitions
+  python scripts/ops/bucket_health_check.py --table wt_landing --print-partitions
 """
 import argparse
 import json
@@ -28,7 +28,7 @@ from wt_sdk.config import (
     TEST_SERVING_TABLE,
     GatewayConfig,
     TableConfig,
-    default_config,
+    db_uri_for_table,
 )
 
 # dldb reconfigures the global loguru sink to stdout at import time, which would
@@ -59,7 +59,7 @@ def _worst_unindexed_ratio(coverage) -> float:
 
 
 def _bucket_report(client, table_name, partition):
-    status = client.session.partition_status(table_name, partition=partition)
+    status = client.session_for(table_name).partition_status(table_name, partition=partition)
     stats = getattr(status, "stats", None)
     fragment_stats = getattr(stats, "fragment_stats", None) if stats else None
     rows = getattr(stats, "num_rows", None) if stats else None
@@ -107,7 +107,7 @@ def main() -> int:
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI (default: configured WT_SDK_DB_URI).",
+        help="Database URI (default: the database hosting the selected table).",
     )
     parser.add_argument("--max-frags", type=int, default=200)
     parser.add_argument(
@@ -126,7 +126,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    tables = TableConfig(db_uri=args.db_uri or default_config.tables.db_uri)
+    # The selected table name resolves to its hosting database (GPFS landing
+    # vs S3 serving).
+    tables = TableConfig(db_uri=args.db_uri or db_uri_for_table(args.table))
     config = GatewayConfig(s3=default_config.s3, tables=tables)
 
     client = WTGatewayClient(config)

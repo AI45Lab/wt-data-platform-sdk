@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ALLOWED_SERVING_TABLES,
         default=DEFAULT_SERVING_TABLE,
         help=(
-            "Serving table to count. Defaults to wind_tunnel_serving; "
+            "Serving table to count. Defaults to wt_serving; "
             "use serving_test for integration validation."
         ),
     )

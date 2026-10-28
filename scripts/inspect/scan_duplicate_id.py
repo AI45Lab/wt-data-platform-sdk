@@ -6,9 +6,9 @@ This is a read-only diagnostic helper. It uses the dldb API and only fetches
 the id column from the logical table.
 
 Usage:
-    AWS_EC2_METADATA_DISABLED=true python scripts/inspect/scan_duplicate_id.py
-    AWS_EC2_METADATA_DISABLED=true python scripts/inspect/scan_duplicate_id.py --table v2_landing_test
-    AWS_EC2_METADATA_DISABLED=true python scripts/inspect/scan_duplicate_id.py --table wind_tunnel_landing --max-output 200
+    python scripts/inspect/scan_duplicate_id.py
+    python scripts/inspect/scan_duplicate_id.py --table landing_test
+    python scripts/inspect/scan_duplicate_id.py --table wt_landing --max-output 200
 """
 import argparse
 import sys
@@ -16,7 +16,15 @@ import sys
 import dldb
 import pandas as pd
 
-from wt_sdk.config import default_config
+from wt_sdk.config import TEST_LANDING_TABLE, db_uri_for_table, storage_options_for
+
+
+def default_db_uri(table_name: str) -> str:
+    """Database hosting a known landing/serving table, else the default db."""
+    try:
+        return db_uri_for_table(table_name)
+    except ValueError:
+        return db_uri_for_table(TEST_LANDING_TABLE)
 
 
 def scan_duplicate_ids(
@@ -26,7 +34,7 @@ def scan_duplicate_ids(
     max_output: int = 100,
 ) -> int:
     """Scan table id column and print duplicate id counts."""
-    db_uri = db_uri or default_config.tables.db_uri
+    db_uri = db_uri or default_db_uri(table_name)
 
     print(f"Database: {db_uri}")
     print(f"Table:    {table_name}")
@@ -34,10 +42,11 @@ def scan_duplicate_ids(
     print("=" * 80)
 
     print("Connecting...")
-    session = dldb.connect(
-        db_uri,
-        storage_options=default_config.s3.to_storage_options(),
-    )
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
 
     try:
         if not session.table_exists(table_name):
@@ -101,13 +110,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--table",
-        default="v2_landing_test",
-        help="Logical table name to scan (default: v2_landing_test)",
+        default=TEST_LANDING_TABLE,
+        help=f"Logical table name to scan (default: {TEST_LANDING_TABLE})",
     )
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI (default: from wt_sdk config)",
+        help=(
+            "Database URI (default: derived from --table for known "
+            "landing/serving names, else the landing database)"
+        ),
     )
     parser.add_argument(
         "--query",

@@ -18,16 +18,16 @@ data enters existing indexes:
 
 ```bash
 python scripts/ops/maintain_table_indexes.py \
-  --table wind_tunnel_landing --all-partitions
+  --table wt_landing --all-partitions
 python scripts/ops/maintain_table_indexes.py \
-  --table wind_tunnel_serving --all-partitions
+  --table wt_serving --all-partitions
 ```
 
 The separate environment-config tables have their own maintenance command and
-automatically resolve `WT_SDK_ENV_CONFIG_DB_URI` (default
-`s3://wind-tunnel-env-config`). They are now HASH(job_id)-partitioned with
+automatically resolve `WT_SDK_ENV_CONFIG_DB_URI` (default: the GPFS env-config
+path). They are HASH(job_id)-partitioned with
 per-bucket indexes, so the command iterates materialized buckets. The command
-defaults to `env_config_test`; production must be selected explicitly:
+defaults to `env_test`; production must be selected explicitly:
 
 ```bash
 python scripts/ops/maintain_env_config_indexes.py --dry-run
@@ -57,7 +57,7 @@ script. For local development:
 
 ```bash
 set -a && source .env && set +a
-python scripts/inspect/query_data.py --table v2_landing_test --count
+python scripts/inspect/query_data.py --table landing_test --count
 ```
 
 ### HASH Partition Fragment and Index Status
@@ -70,11 +70,11 @@ tables use `wt_sdk/core/evaluation_env_schema.py` and resolve
 
 ```bash
 python scripts/inspect/show_partition_status.py \
-  --table v2_landing_test --partition 34 --partition 94
+  --table landing_test --partition 34 --partition 94
 python scripts/inspect/show_partition_status.py \
-  --table wind_tunnel_landing --all-partitions
+  --table wt_landing --all-partitions
 python scripts/inspect/show_partition_status.py \
-  --table env_config_test --all-partitions
+  --table env_test --all-partitions
 ```
 
 Add `--show-all-indexes` to print the coverage of every existing index. Without
@@ -121,7 +121,7 @@ merge with it. `unmaterialized` is normally an unused bucket rather than a
 maintenance problem.
 
 External users can export production serving rows as sharded JSONL files with
-the stateless delivery command. It targets `wind_tunnel_serving` by default,
+the stateless delivery command. It targets `wt_serving` by default,
 writes 1,000 rows per file, and excludes the frontend-only `search_text` column
 unless it is explicitly requested. Pass `--table serving_test` for integration
 validation:
@@ -146,17 +146,17 @@ combinations.
 
 ```bash
 python scripts/inspect/query_data.py \
-  --table wind_tunnel_landing \
+  --table wt_landing \
   --query "job_id LIKE '%panjia%' AND is_trainable = true" \
   --columns "id,job_id,session_id,step_id" \
   --output ./artifacts/panjia_rows.json
 
 python scripts/inspect/query_data.py \
-  --table wind_tunnel_landing \
+  --table wt_landing \
   --distinct job_id
 
 python scripts/inspect/query_data.py \
-  --table wind_tunnel_landing \
+  --table wt_landing \
   --query "job_id = 'job-001'" \
   --distinct session_id \
   --count
@@ -240,40 +240,40 @@ snapshot:
 
 ```bash
 python scripts/inspect/query_data.py \
-  --table env_config_test \
+  --table env_test \
   --query "job_id = 'job-001'" \
   --columns "id,job_id,env_id,env_name,group_id,finished"
 
 python scripts/inspect/query_data.py \
-  --table evaluation_env_config \
+  --table wt_env_config \
   --query "job_id = 'job-001'" \
   --output ./artifacts/job_001_env_configs.json
 ```
 
 Production-changing commands require their own explicit confirmation flags.
 
-Use `cleanup_data.py` for filtered deletes. `env_config_test` and
-`evaluation_env_config`
-automatically use `WT_SDK_ENV_CONFIG_DB_URI`; landing and serving tables use
-`WT_SDK_DB_URI` unless `--db-uri` is supplied. For the four active
+Use `cleanup_data.py` for filtered deletes. Env-config tables automatically use
+`WT_SDK_ENV_CONFIG_DB_URI`; landing tables resolve to the GPFS landing database
+and serving tables to S3 `s3://wt-data-platform` from the table name, unless
+`--db-uri` is supplied. For the active
 landing/serving tables, exact `job_id = '...'` filters use SDK HASH bucket
 pruning and dry-runs read only lightweight preview/count columns:
 
 ```bash
 python scripts/ops/cleanup_data.py \
-  --table env_config_test \
+  --table env_test \
   --query "job_id = 'gateway'" \
   --dry-run
 
 python scripts/ops/cleanup_data.py \
-  --table v2_landing_test \
+  --table landing_test \
   --query "job_id = 'gateway'" \
   --dry-run
 ```
 
 To remove the same exact job IDs from all three tables in one environment, use
 `cleanup_production_job_ids.py`. It checks
-`evaluation_env_config`, `wind_tunnel_landing`, and `wind_tunnel_serving`
+`wt_env_config`, `wt_landing`, and `wt_serving`
 independently for the production profile; a table with no matching rows is
 logged and skipped. The default profile is production and the default mode is
 a read-only preview, while deletion requires both explicit flags:
@@ -291,9 +291,8 @@ python scripts/ops/cleanup_production_job_ids.py \
 
 The job-id file contains one exact value per line; blank lines and lines
 starting with `#` are ignored. For real validation against disposable test
-tables, pass `--profile test`; this selects `env_config_test`,
-`v2_landing_test`, and `serving_test` and never touches production or legacy
-tables:
+tables, pass `--profile test`; this selects `env_test`,
+`landing_test`, and `serving_test` and never touches production tables:
 
 ```bash
 python scripts/ops/cleanup_production_job_ids.py \
@@ -303,10 +302,10 @@ python scripts/ops/cleanup_production_job_ids.py \
 ```
 
 To remove stale production environment-config rows, use the dedicated
-anti-join command. It compares only `evaluation_env_config` with the current
-production `wind_tunnel_landing` job-id set; it does not read the historical
-`wind_tunnel_landing_legacy` table or any test table. Rows with a NULL/blank
-`job_id` are reported but never deleted. The default is a read-only preview:
+anti-join command. It compares only `wt_env_config` with the current
+production `wt_landing` job-id set; it does not read any test table. Rows with
+a NULL/blank `job_id` are reported but never deleted. The default is a
+read-only preview:
 
 ```bash
 python scripts/ops/cleanup_orphaned_production_env_configs.py --dry-run
@@ -330,8 +329,8 @@ non-blank job IDs while env rows exist; override that guard only after an
 independent check with `--allow-empty-landing`.
 
 Use `update_table_rows.py` for a filtered operational patch against one of the
-four active tables. The profile and role resolve the exact table; custom and
-legacy table names are intentionally unsupported:
+four active tables. The profile and role resolve the exact table; custom table
+names are intentionally unsupported:
 
 ```bash
 python scripts/ops/update_table_rows.py \

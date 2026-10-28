@@ -138,7 +138,8 @@ def migrate_partition(dry_run: bool = False, drop_backup: bool = False) -> None:
     """
     from wt_sdk.config import default_config
 
-    db_uri = default_config.tables.db_uri
+    # one-off migration; values frozen to the pre-split stack
+    db_uri = "s3://wind-tunnel-dldb"
     storage_options = default_config.s3.to_storage_options()
 
     logger.info(f"Connecting to {db_uri}...")

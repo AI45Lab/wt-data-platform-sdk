@@ -105,8 +105,9 @@ def _verify_archive(session) -> int:
 
 
 def rebuild_wind_tunnel_landing(*, dry_run: bool, confirm_rebuild: bool) -> None:
+    # one-off migration; values frozen to the pre-split stack
     session = dldb.connect(
-        default_config.tables.db_uri,
+        "s3://wind-tunnel-dldb",
         storage_options=default_config.s3.to_storage_options(),
     )
     try:

@@ -3,9 +3,13 @@ import time
 import uuid
 
 from wt_sdk import GatewayConfig, LandingRecord, TableConfig, WTGatewayClient
+from wt_sdk.config import TEST_LANDING_TABLE
 
 
-TEST_TABLE_CONFIG = GatewayConfig(tables=TableConfig(landing_table="v2_landing_test"))
+# New-generation stack: landing_test lives in the GPFS landing database.
+TEST_TABLE_CONFIG = GatewayConfig(
+    tables=TableConfig(profile="test", landing_table=TEST_LANDING_TABLE)
+)
 
 
 def _message(text: str) -> dict:

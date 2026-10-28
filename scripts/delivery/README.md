@@ -4,7 +4,7 @@
 
 `export_serving_data.py` is the read-only command delivered to external users
 for exporting rows from a serving table. It defaults to the production
-`wind_tunnel_serving` table.
+`wt_serving` table.
 
 `count_dataset.py` counts serving rows by the first `#`-delimited component of
 `job_id`.
@@ -32,7 +32,7 @@ environment setup instructions from the platform administrator before running
 the export.
 
 Load the SDK's normal S3 environment variables before running the command. The
-command pins the logical table to `wind_tunnel_serving` by default; an
+command pins the logical table to `wt_serving` by default; an
 environment-provided table-name override cannot silently redirect it.
 
 ```bash
@@ -58,7 +58,7 @@ python scripts/delivery/export_serving_data.py \
   --output-dir ./test-exports
 ```
 
-Only `wind_tunnel_serving` and `serving_test` are accepted; arbitrary and
+Only `wt_serving` and `serving_test` are accepted; arbitrary and
 landing table names are rejected.
 
 When `--columns` is omitted, the command uses the reviewed external-delivery

@@ -911,7 +911,7 @@ def test_get_tags_distribution_uses_non_empty_filter(monkeypatch):
 def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
-    fake_session.rows["v2_landing_test"] = [
+    fake_session.rows["landing_test"] = [
         {
             "dataset_type": "RL",
             "job_id": "job-123",
@@ -930,13 +930,13 @@ def test_get_by_id_defaults_to_serving_and_never_falls_back(monkeypatch):
     assert client.get_by_id("landing-only") is None
     assert fake_session.last_filter_kwargs["table_name"] == "serving_test"
 
-    record = client.get_by_id("landing-only", table="v2_landing_test")
+    record = client.get_by_id("landing-only", table="landing_test")
     assert record["id"] == "landing-only"
-    assert fake_session.last_filter_kwargs["table_name"] == "v2_landing_test"
+    assert fake_session.last_filter_kwargs["table_name"] == "landing_test"
 
     record_with_nulls = client.get_by_id(
         "landing-only",
-        table="v2_landing_test",
+        table="landing_test",
         exclude_none=False,
     )
     assert record_with_nulls["tags"] is None
@@ -947,18 +947,18 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
-    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="v2_landing_test")))
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
     client.ingest_landing(_make_landing_record())
 
     bucket = stable_hash("job-123") % 128
-    assert len(fake_session.rows["v2_landing_test"]) == 1
+    assert len(fake_session.rows["landing_test"]) == 1
 
     summary = client.maintain_table_indexes(
-        "v2_landing_test",
+        "landing_test",
         partitions=["job-123"],
     )
 
-    assert summary["table_name"] == "v2_landing_test"
+    assert summary["table_name"] == "landing_test"
     assert summary["table_role"] == "landing"
     assert summary["partitions"] == [bucket]
     assert [item["column"] for item in summary["indexes_created"]] == [
@@ -975,7 +975,7 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
     ]
     assert fake_session.optimized_partitions == [
         {
-            "table_name": "v2_landing_test",
+            "table_name": "landing_test",
             "partition": bucket,
             "kwargs": {
                 "cleanup_older_than": None,
@@ -991,7 +991,7 @@ def test_index_maintenance_uses_dldb_table_resolution(monkeypatch):
     fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
 
-    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="v2_landing_test")))
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
     calls = []
     original_list_indices = fake_session.list_indices
 
@@ -1002,13 +1002,13 @@ def test_index_maintenance_uses_dldb_table_resolution(monkeypatch):
     monkeypatch.setattr(fake_session, "list_indices", list_indices)
 
     client.maintain_table_indexes(
-        "v2_landing_test",
+        "landing_test",
         partitions=["job-123"],
         columns=["id"],
         optimize=False,
     )
 
-    assert calls[0] == ("list_indices", "v2_landing_test")
+    assert calls[0] == ("list_indices", "landing_test")
 
 
 def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatch):
@@ -1656,7 +1656,7 @@ def test_env_config_manager_logs_timing_and_returns_summary(monkeypatch):
     monkeypatch.setenv("WT_SDK_ENV_CONFIG_DB_URI", "s3://test-env-config")
 
     manager = EnvConfigManager(
-        table_name="evaluation_env_config",
+        table_name="wt_env_config",
         dldb_model="metrics",
         enable_dldb_timing_logs=True,
     )
@@ -1699,7 +1699,7 @@ def test_env_config_manager_allows_stale_snapshot_override(monkeypatch):
         lambda db_uri, **kwargs: fake_session,
     )
 
-    manager = EnvConfigManager(table_name="evaluation_env_config")
+    manager = EnvConfigManager(table_name="wt_env_config")
     manager.save_config(
         {
             "env_name": "CartPole-v1",

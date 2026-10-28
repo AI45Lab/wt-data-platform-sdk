@@ -28,6 +28,7 @@ from wt_sdk.config import (
     TEST_SERVING_TABLE,
     GatewayConfig,
     TableConfig,
+    db_uri_for_table,
     default_config,
 )
 from wt_sdk.models import LandingRecord
@@ -78,7 +79,7 @@ def build_config(profile: str, db_uri: str | None = None) -> GatewayConfig:
     canonical_profile = normalize_profile(profile)
     tables = TableConfig(
         profile=canonical_profile,
-        db_uri=db_uri or default_config.tables.db_uri,
+        db_uri=db_uri or db_uri_for_table(landing_table_for_profile(canonical_profile)),
         landing_table=landing_table_for_profile(canonical_profile),
         serving_table=serving_table_for_profile(canonical_profile),
     )
@@ -310,7 +311,7 @@ def main() -> int:
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI. Defaults to configured WT_SDK_DB_URI.",
+        help="Database URI. Defaults to the database hosting the selected landing table.",
     )
     parser.add_argument(
         "--batch-size",

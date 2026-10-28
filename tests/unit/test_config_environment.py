@@ -1,7 +1,13 @@
 from wt_sdk.config import (
     DEFAULT_ENV_CONFIG_TABLE,
     DEFAULT_ENV_CONFIG_DB_URI,
+    DEFAULT_LANDING_DB_URI,
+    DEFAULT_LANDING_TABLE,
+    DEFAULT_SERVING_DB_URI,
+    DEFAULT_SERVING_TABLE,
     TEST_ENV_CONFIG_TABLE,
+    TEST_LANDING_TABLE,
+    TEST_SERVING_TABLE,
     GatewayConfig,
     S3Config,
     TableConfig,
@@ -37,24 +43,58 @@ def test_table_config_defaults_to_test_without_etl_configuration(monkeypatch):
     monkeypatch.delenv("WT_SDK_ETL_STATE_DB_URI", raising=False)
     monkeypatch.delenv("WT_SDK_LANDING_TABLE", raising=False)
     monkeypatch.delenv("WT_SDK_SERVING_TABLE", raising=False)
+    monkeypatch.delenv("WT_SDK_LANDING_DB_URI", raising=False)
+    monkeypatch.delenv("WT_SDK_SERVING_DB_URI", raising=False)
 
     config = TableConfig()
 
     assert config.profile == "test"
-    assert config.landing_table == "v2_landing_test"
-    assert config.serving_table == "serving_test"
+    assert config.landing_table == TEST_LANDING_TABLE
+    assert config.serving_table == TEST_SERVING_TABLE
+    assert config.landing_db_uri == DEFAULT_LANDING_DB_URI
+    assert config.serving_db_uri == DEFAULT_SERVING_DB_URI
 
 
 def test_gateway_config_switches_to_test_profile_from_environment(monkeypatch):
     monkeypatch.setenv("WT_SDK_PROFILE", "test")
-    monkeypatch.setenv("WT_SDK_DB_URI", "s3://test-dldb")
+    monkeypatch.delenv("WT_SDK_LANDING_DB_URI", raising=False)
+    monkeypatch.delenv("WT_SDK_SERVING_DB_URI", raising=False)
 
     config = GatewayConfig()
 
-    assert config.tables.db_uri == "s3://test-dldb"
     assert config.tables.profile == "test"
-    assert config.tables.landing_table == "v2_landing_test"
-    assert config.tables.serving_table == "serving_test"
+    assert config.tables.landing_table == TEST_LANDING_TABLE
+    assert config.tables.serving_table == TEST_SERVING_TABLE
+
+
+def test_legacy_shared_db_uri_env_is_not_consulted(monkeypatch):
+    monkeypatch.setenv("WT_SDK_DB_URI", "s3://legacy-dldb")
+    monkeypatch.delenv("WT_SDK_LANDING_DB_URI", raising=False)
+    monkeypatch.delenv("WT_SDK_SERVING_DB_URI", raising=False)
+
+    config = TableConfig()
+
+    assert config.landing_db_uri == DEFAULT_LANDING_DB_URI
+    assert config.serving_db_uri == DEFAULT_SERVING_DB_URI
+
+
+def test_per_role_db_uri_env_variables_and_precedence(monkeypatch):
+    monkeypatch.delenv("WT_SDK_DB_URI", raising=False)
+    monkeypatch.setenv("WT_SDK_LANDING_DB_URI", "s3://landing-db")
+    monkeypatch.setenv("WT_SDK_SERVING_DB_URI", "s3://serving-db")
+
+    from_env = TableConfig()
+    assert from_env.landing_db_uri == "s3://landing-db"
+    assert from_env.serving_db_uri == "s3://serving-db"
+
+    # Explicit values and the shared db_uri argument win over the environment.
+    explicit = TableConfig(landing_db_uri="s3://explicit-landing")
+    assert explicit.landing_db_uri == "s3://explicit-landing"
+    assert explicit.serving_db_uri == "s3://serving-db"
+
+    shared = TableConfig(db_uri="memory://shared")
+    assert shared.landing_db_uri == "memory://shared"
+    assert shared.serving_db_uri == "memory://shared"
 
 
 def test_production_profile_resolution_does_not_require_etl_state_uri(monkeypatch):
@@ -66,8 +106,8 @@ def test_production_profile_resolution_does_not_require_etl_state_uri(monkeypatc
     config = TableConfig()
 
     assert config.profile == "production"
-    assert config.landing_table == "wind_tunnel_landing"
-    assert config.serving_table == "wind_tunnel_serving"
+    assert config.landing_table == DEFAULT_LANDING_TABLE
+    assert config.serving_table == DEFAULT_SERVING_TABLE
 
 
 def test_explicit_table_config_overrides_environment_profile(monkeypatch):

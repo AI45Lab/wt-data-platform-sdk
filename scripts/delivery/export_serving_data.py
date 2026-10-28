@@ -339,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ALLOWED_SERVING_TABLES,
         default=DEFAULT_SERVING_TABLE,
         help=(
-            "Serving table to export. Defaults to wind_tunnel_serving; "
+            "Serving table to export. Defaults to wt_serving; "
             "use serving_test for integration validation."
         ),
     )

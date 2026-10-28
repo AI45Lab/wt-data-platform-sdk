@@ -112,7 +112,7 @@ def test_inspect_reports_missing_index_and_unindexed_tail():
 
 
 def test_main_selects_production_table_and_closes_session(monkeypatch, capsys):
-    session = FakeSession(table_name="evaluation_env_config")
+    session = FakeSession(table_name="wt_env_config")
     monkeypatch.setattr(script.dldb, "connect", lambda *args, **kwargs: session)
     monkeypatch.setattr(
         "sys.argv",
@@ -123,7 +123,7 @@ def test_main_selects_production_table_and_closes_session(monkeypatch, capsys):
 
     assert result == 0
     assert session.shutdown_called is True
-    assert '"table_name": "evaluation_env_config"' in capsys.readouterr().out
+    assert '"table_name": "wt_env_config"' in capsys.readouterr().out
 
 
 def test_inspect_rejects_partitioned_table():

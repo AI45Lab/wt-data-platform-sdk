@@ -1,18 +1,17 @@
 """
-Initialize a profile-selected environment-config table.
+Initialize a profile-selected environment-config table (new-generation stack).
 
-This script creates ``env_config_test`` for the test profile or
-``evaluation_env_config`` for production in DLDB/LanceDB.
-
-The table is created in the separate environment-config database.
+This script creates ``env_test`` for the test profile or ``wt_env_config``
+for production, in the environment-config database (GPFS by default,
+``WT_SDK_ENV_CONFIG_DB_URI`` override).
 """
 import argparse
 
 import dldb
 from wt_sdk.config import (
-    S3Config,
     resolve_env_config_db_uri,
     resolve_env_config_table_name,
+    storage_options_for,
 )
 from wt_sdk.core.evaluation_env_schema import (
     EVALUATION_ENV_PARTITIONS,
@@ -45,11 +44,12 @@ def init_evaluation_env_table(
 
     print(f"Connecting to {db_uri}...")
 
-    # Use DLDB wrapper SDK with separate bucket for env configs
-    session = dldb.connect(
-        db_uri,
-        storage_options=S3Config().to_storage_options()
-    )
+    # Use DLDB wrapper SDK with the (GPFS or S3) env-config database
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
 
     # Check if table already exists and try to drop it
     # We try to drop directly first since the table existence check is unreliable
@@ -112,7 +112,7 @@ def main() -> int:
         choices=("test", "prod", "production"),
         default="test",
         help=(
-            "Select env_config_test for test or evaluation_env_config for "
+            "Select env_test for test or wt_env_config for "
             "production. Defaults to test."
         ),
     )

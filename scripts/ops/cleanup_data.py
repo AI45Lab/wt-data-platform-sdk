@@ -5,36 +5,36 @@ Allows deletion of data from any table with configurable filters.
 Uses DLDB SDK to properly handle logical tables and their physical partitions.
 
 Usage:
-  # Cleanup from default database (s3://wind-tunnel-dldb)
-  python scripts/ops/cleanup_data.py --table v2_landing_test --query "dataset_type = 'TEST'"
+  # Cleanup from the default database resolved from the table name
+  python scripts/ops/cleanup_data.py --table landing_test --query "dataset_type = 'TEST'"
 
   # Preview what would be deleted (dry run)
-  python scripts/ops/cleanup_data.py --table v2_landing_test --query "dataset_type = 'TEST'" --dry-run
+  python scripts/ops/cleanup_data.py --table landing_test --query "dataset_type = 'TEST'" --dry-run
 
   # Delete from custom database
   python scripts/ops/cleanup_data.py --db-uri s3://my-bucket --table my_table --query "dataset_type = 'SFT'"
 
   # Delete from the separate test environment-config table by name
-  python scripts/ops/cleanup_data.py --table env_config_test --query "job_id = 'gateway'" --dry-run
+  python scripts/ops/cleanup_data.py --table env_test --query "job_id = 'gateway'" --dry-run
 
   # Delete all data from a table (requires --force flag)
-  python scripts/ops/cleanup_data.py --table v2_landing_test --force
+  python scripts/ops/cleanup_data.py --table landing_test --force
 
-  # Use legacy --uri format (backward compatible)
-  python scripts/ops/cleanup_data.py --uri s3://wind-tunnel-dldb/wind_tunnel_landing.lance --query "dataset_type = 'SFT'"
+  # Use full-table --uri format
+  python scripts/ops/cleanup_data.py --uri s3://wt-data-platform/wt_serving.lance --query "dataset_type = 'SFT'"
 
 Examples:
   # 1. Check current data
   python scripts/ops/table_manager.py list
 
   # 2. Preview what to delete
-  python scripts/ops/cleanup_data.py --table v2_landing_test --query "session_id = 'test_session_0'" --dry-run
+  python scripts/ops/cleanup_data.py --table landing_test --query "session_id = 'test_session_0'" --dry-run
 
   # 3. Confirm and delete
-  python scripts/ops/cleanup_data.py --table v2_landing_test --query "session_id = 'test_session_0'"
+  python scripts/ops/cleanup_data.py --table landing_test --query "session_id = 'test_session_0'"
 
   # 4. Verify deletion
-  python scripts/inspect/query_data.py --table v2_landing_test --count
+  python scripts/inspect/query_data.py --table landing_test --count
 """
 import argparse
 import sys
@@ -51,8 +51,10 @@ from wt_sdk.config import (
     TEST_SERVING_TABLE,
     GatewayConfig,
     TableConfig,
+    db_uri_for_table,
     default_config,
     resolve_env_config_db_uri,
+    storage_options_for,
 )
 
 
@@ -69,7 +71,7 @@ def _resolve_db_uri(table_name: str, explicit_db_uri: str | None) -> str:
         return explicit_db_uri
     if table_name in ENV_CONFIG_TABLE_NAMES:
         return resolve_env_config_db_uri()
-    return default_config.tables.db_uri
+    return db_uri_for_table(table_name)
 
 
 def _uses_latest_snapshot_by_default(table_name: str) -> bool:
@@ -231,13 +233,13 @@ def main():
     # Mutually exclusive: either --uri OR --table (with optional --db-uri)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--uri", type=str,
-                       help="Full table URI (legacy format, e.g., s3://wind-tunnel-dldb/table.lance)")
+                       help="Full table URI (e.g., s3://wt-data-platform/wt_serving.lance)")
     group.add_argument("--table", type=str,
                        help="Table name (use with default or custom --db-uri)")
 
     # Optional: database URI (used with --table)
     parser.add_argument("--db-uri", type=str, default=None,
-                       help="Database URI (default: s3://wind-tunnel-dldb)")
+                       help="Database URI (default: resolved from the table name)")
 
     # Filter options
     parser.add_argument("--query", type=str, default=None,
@@ -286,10 +288,11 @@ def main():
     # Initialize DLDB session
     print(f"Connecting to {db_name}...")
     try:
-        session = dldb.connect(
-            db_name,
-            storage_options=default_config.s3.to_storage_options()
-        )
+        connect_kwargs = {}
+        storage_options = storage_options_for(db_name)
+        if storage_options is not None:
+            connect_kwargs["storage_options"] = storage_options
+        session = dldb.connect(db_name, **connect_kwargs)
     except Exception as e:
         print(f"Error connecting to database: {e}")
         return 1

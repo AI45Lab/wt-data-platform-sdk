@@ -10,15 +10,23 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from typing import Any, Iterable
 
 from wt_sdk.client import WTGatewayClient
-from wt_sdk.config import DEFAULT_LANDING_TABLE, GatewayConfig, TableConfig, default_config
+from wt_sdk.config import (
+    DEFAULT_LANDING_TABLE,
+    GatewayConfig,
+    TableConfig,
+    default_config,
+)
 from wt_sdk.core.schemas import LANDING_SCHEMA
 from wt_sdk.utils import dataframe_to_landing_records
 
 
-DEFAULT_ARCHIVE_TABLE = "archived_20260911_wind_tunnel_landing"
+DEFAULT_ARCHIVE_TABLE = (
+    f"archived_{datetime.now().strftime('%Y%m%d')}_{DEFAULT_LANDING_TABLE}"
+)
 DEFAULT_BATCH_SIZE = 1_000
 
 
@@ -158,11 +166,12 @@ def _read_job_ids(args: argparse.Namespace) -> list[str]:
 
 
 def _client_for_table(table_name: str) -> WTGatewayClient:
+    # No database URI is pinned: TableConfig defaults route the landing role
+    # (used for both source and archive tables here) to the GPFS landing db.
     return WTGatewayClient(
         GatewayConfig(
             s3=default_config.s3,
             tables=TableConfig(
-                db_uri=default_config.tables.db_uri,
                 landing_table=table_name,
                 profile="production",
             ),

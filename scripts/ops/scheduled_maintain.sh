@@ -6,7 +6,7 @@
 #   0 4 * * * /home/heshan/wt-data-platform-sdk/scripts/ops/scheduled_maintain.sh \
 #     >> /home/heshan/wt-data-platform-sdk/maintain_logs/cron.log 2>&1
 #
-# Usage: scheduled_maintain.sh [table ...]   (default: wind_tunnel_landing)
+# Usage: scheduled_maintain.sh [table ...]   (default: wt_landing)
 set -u
 
 REPO_DIR="${REPO_DIR:-$HOME/wt-data-platform-sdk}"
@@ -24,7 +24,7 @@ HEALTH_CHECK="$REPO_DIR/scripts/ops/bucket_health_check.py"
 MAINTAIN="$REPO_DIR/scripts/ops/maintain_table_indexes.py"
 
 if [ $# -eq 0 ]; then
-    set -- wind_tunnel_landing
+    set -- wt_landing
 fi
 
 mkdir -p "$LOG_DIR"
@@ -105,8 +105,9 @@ for table in "$@"; do
     fi
 done
 
-# Env-config table maintenance (unpartitioned SimpleTable; runs serially after
-# the landing loop). Override the profile with ENV_CONFIG_PROFILE=test.
+# Env-config table maintenance (HASH(job_id)-partitioned table on the GPFS
+# env-config database; runs serially after the landing loop). Override the
+# profile with ENV_CONFIG_PROFILE=test.
 ENV_CONFIG_MAINTAIN="$REPO_DIR/scripts/ops/maintain_env_config_indexes.py"
 ENV_CONFIG_PROFILE="${ENV_CONFIG_PROFILE:-production}"
 ts=$(date +%Y%m%d_%H%M%S)

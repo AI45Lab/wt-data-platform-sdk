@@ -21,6 +21,12 @@ from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping, Sequence
 
 from wt_sdk import GatewayConfig, TableConfig, WTGatewayClient
+from wt_sdk.config import (
+    DEFAULT_ENV_CONFIG_TABLE,
+    DEFAULT_LANDING_TABLE,
+    TEST_ENV_CONFIG_TABLE,
+    TEST_LANDING_TABLE,
+)
 from wt_sdk.env_config_client import EnvConfigManager
 
 
@@ -301,8 +307,27 @@ def main() -> int:
         print("At least one non-empty --job-id is required", file=sys.stderr)
         return 2
 
-    table_config = TableConfig(profile=args.profile)
-    env_manager = EnvConfigManager(profile=args.profile)
+    # New-generation stack: no database URIs are pinned. TableConfig defaults
+    # route landing to the GPFS landing database; EnvConfigManager resolves
+    # the env-config database on its own.
+    if args.profile == "test":
+        table_config = TableConfig(
+            profile=args.profile,
+            landing_table=TEST_LANDING_TABLE,
+        )
+        env_manager = EnvConfigManager(
+            table_name=TEST_ENV_CONFIG_TABLE,
+            profile=args.profile,
+        )
+    else:
+        table_config = TableConfig(
+            profile=args.profile,
+            landing_table=DEFAULT_LANDING_TABLE,
+        )
+        env_manager = EnvConfigManager(
+            table_name=DEFAULT_ENV_CONFIG_TABLE,
+            profile=args.profile,
+        )
     try:
         landing_client = WTGatewayClient(GatewayConfig(tables=table_config))
         try:

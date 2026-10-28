@@ -3,10 +3,10 @@
 
 Examples:
   python scripts/ops/maintain_table_indexes.py \
-    --table wind_tunnel_landing --all-partitions
+    --table wt_landing --all-partitions
 
   python scripts/ops/maintain_table_indexes.py \
-    --table wind_tunnel_serving --all-partitions
+    --table wt_serving --all-partitions
 
   python scripts/ops/maintain_table_indexes.py \
     --table serving_test --partition job-123
@@ -27,6 +27,7 @@ from wt_sdk.config import (
     TEST_SERVING_TABLE,
     GatewayConfig,
     TableConfig,
+    db_uri_for_table,
     default_config,
 )
 
@@ -72,7 +73,7 @@ def main() -> int:
     parser.add_argument(
         "--db-uri",
         default=None,
-        help="Database URI (default: configured WT_SDK_DB_URI).",
+        help="Database URI (default: resolved from the selected table).",
     )
     parser.add_argument(
         "--partition",
@@ -145,7 +146,7 @@ def main() -> int:
     resolve_table_role(args.table)
 
     tables = TableConfig(
-        db_uri=args.db_uri or default_config.tables.db_uri,
+        db_uri=args.db_uri or db_uri_for_table(args.table),
     )
     config = GatewayConfig(
         s3=default_config.s3,

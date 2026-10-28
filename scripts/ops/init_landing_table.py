@@ -4,7 +4,7 @@ Initialize landing table for Wind Tunnel data with DLDB partition support.
 import argparse
 
 import dldb
-from wt_sdk.config import default_config
+from wt_sdk.config import DEFAULT_LANDING_TABLE, db_uri_for_table, storage_options_for
 from wt_sdk.core.schemas import (
     LANDING_PARTITIONS,
     LANDING_PARTITION_COLUMN,
@@ -14,7 +14,7 @@ from wt_sdk.core.schemas import (
 )
 
 
-TABLE_NAME = "wind_tunnel_landing"
+TABLE_NAME = DEFAULT_LANDING_TABLE
 PARTITION_COLUMN = LANDING_PARTITION_COLUMN
 
 
@@ -35,11 +35,13 @@ def init_landing_table(dry_run: bool = False):
         print("[DRY RUN] No table was created.")
         return
 
-    print(f"Connecting to {default_config.tables.db_uri}...")
-    session = dldb.connect(
-        default_config.tables.db_uri,
-        storage_options=default_config.s3.to_storage_options()
-    )
+    db_uri = db_uri_for_table(TABLE_NAME)
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    print(f"Connecting to {db_uri}...")
+    session = dldb.connect(db_uri, **connect_kwargs)
     try:
         session.create_table(
             TABLE_NAME,

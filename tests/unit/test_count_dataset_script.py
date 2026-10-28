@@ -15,7 +15,7 @@ SPEC.loader.exec_module(count_script)
 
 
 class _FakeClient:
-    def __init__(self, batches, *, table="wind_tunnel_serving"):
+    def __init__(self, batches, *, table="wt_serving"):
         self.config = SimpleNamespace(tables=SimpleNamespace(serving_table=table))
         self.batches = batches
         self.calls = []
@@ -29,12 +29,12 @@ def test_parser_defaults_and_supported_tables():
     parser = count_script.build_parser()
 
     defaults = parser.parse_args([])
-    assert defaults.table == "wind_tunnel_serving"
+    assert defaults.table == "wt_serving"
     assert defaults.filter_query == "id IS NOT NULL"
     assert parser.parse_args(["--table", "serving_test"]).table == "serving_test"
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--table", "wind_tunnel_landing"])
+        parser.parse_args(["--table", "wt_landing"])
     with pytest.raises(SystemExit):
         parser.parse_args(["--batch-size", "10"])
 
@@ -47,10 +47,10 @@ def test_build_config_pins_production_and_allows_explicit_test(monkeypatch):
     test = count_script.build_config("serving_test")
 
     assert production.tables.profile == "production"
-    assert production.tables.landing_table == "wind_tunnel_landing"
-    assert production.tables.serving_table == "wind_tunnel_serving"
+    assert production.tables.landing_table == "wt_landing"
+    assert production.tables.serving_table == "wt_serving"
     assert test.tables.profile == "test"
-    assert test.tables.landing_table == "v2_landing_test"
+    assert test.tables.landing_table == "landing_test"
     assert test.tables.serving_table == "serving_test"
 
 
@@ -113,7 +113,7 @@ def test_count_reads_one_fixed_manifest_in_batches_and_aggregates_locally():
 
 def test_count_rejects_unknown_table_empty_filter_and_invalid_batch_size():
     with pytest.raises(ValueError, match="must be one of"):
-        count_script.count_datasets(_FakeClient([], table="wind_tunnel_landing"))
+        count_script.count_datasets(_FakeClient([], table="wt_landing"))
     with pytest.raises(ValueError, match="filter_query must be non-empty"):
         count_script.count_datasets(_FakeClient([]), filter_query="  ")
     for value in (True, 0, -1):

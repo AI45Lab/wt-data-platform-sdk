@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Delete exact job IDs from production landing, one job at a time.
 
-This script only touches ``wind_tunnel_landing`` and processes each job_id
+This script only touches ``wt_landing`` and processes each job_id
 independently.  It reuses the optimized landing-table path from
 ``scripts/ops/cleanup_data.py`` so a large table is never materialized in one
 operation.
@@ -32,7 +32,7 @@ OPS_DIR = Path(__file__).resolve().parents[1]
 if str(OPS_DIR) not in sys.path:
     sys.path.insert(0, str(OPS_DIR))
 from cleanup_data import _cleanup_trajectory_table
-from wt_sdk.config import DEFAULT_LANDING_TABLE, default_config
+from wt_sdk.config import DEFAULT_LANDING_TABLE, db_uri_for_table
 
 
 def normalize_job_ids(values: Iterable[str]) -> list[str]:
@@ -84,8 +84,9 @@ def run(
 ) -> int:
     job_ids = normalize_job_ids(job_ids)
     errors: list[str] = []
+    landing_db_uri = db_uri_for_table(DEFAULT_LANDING_TABLE)
     print(f"Landing table: {DEFAULT_LANDING_TABLE}")
-    print(f"Database: {default_config.tables.db_uri}")
+    print(f"Database: {landing_db_uri}")
     print(f"Job IDs: {len(job_ids)}")
     print(
         "Mode: execute (one job_id at a time)"
@@ -99,7 +100,7 @@ def run(
         print(f"\n[{index}/{len(job_ids)}] job_id={job_id}")
         try:
             result = _cleanup_trajectory_table(
-                db_name=default_config.tables.db_uri,
+                db_name=landing_db_uri,
                 table_name=DEFAULT_LANDING_TABLE,
                 query=predicate,
                 dry_run=not execute,
@@ -129,7 +130,7 @@ def run(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Preview/delete exact job IDs from production wind_tunnel_landing, "
+            "Preview/delete exact job IDs from production wt_landing, "
             "processing one job_id at a time."
         )
     )

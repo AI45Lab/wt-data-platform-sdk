@@ -29,7 +29,7 @@ from wt_sdk.etl.task_management.worker import (
 class FakeEnvManager:
     """Mirror EnvConfigManager._filter_table for discovery-path tests."""
 
-    def __init__(self, rows, table_name="env_config_test"):
+    def __init__(self, rows, table_name="env_test"):
         self.session = FakeEnvSession(rows)
         self.table_name = table_name
 

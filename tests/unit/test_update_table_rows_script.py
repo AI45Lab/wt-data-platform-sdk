@@ -13,10 +13,10 @@ from scripts.ops.update_table_rows import (
 
 
 def test_profile_table_name_resolves_only_active_tables():
-    assert profile_table_name("test", "landing") == "v2_landing_test"
+    assert profile_table_name("test", "landing") == "landing_test"
     assert profile_table_name("test", "serving") == "serving_test"
-    assert profile_table_name("prod", "landing") == "wind_tunnel_landing"
-    assert profile_table_name("production", "serving") == "wind_tunnel_serving"
+    assert profile_table_name("prod", "landing") == "wt_landing"
+    assert profile_table_name("production", "serving") == "wt_serving"
 
     with pytest.raises(ValueError, match="table role"):
         profile_table_name("test", "legacy")
@@ -32,8 +32,10 @@ def test_build_config_pins_profile_tables_despite_environment_overrides(monkeypa
 
     assert config.tables.profile == "production"
     assert config.tables.db_uri == "memory://test"
-    assert config.tables.landing_table == "wind_tunnel_landing"
-    assert config.tables.serving_table == "wind_tunnel_serving"
+    assert config.tables.landing_db_uri == "memory://test"
+    assert config.tables.serving_db_uri == "memory://test"
+    assert config.tables.landing_table == "wt_landing"
+    assert config.tables.serving_table == "wt_serving"
 
 
 def test_parse_updates_validates_columns_and_serializes_json_documents():
@@ -105,6 +107,9 @@ class _FakeClient:
     def query_data(self, **kwargs):
         return list(self.verified_rows)
 
+    def session_for(self, table_name):
+        return self.session
+
     def _resolve_explicit_partition_for_table(self, table_name, job_id, fallback_key):
         assert table_name == "serving_test"
         assert fallback_key == "job_id"
@@ -117,7 +122,7 @@ def test_update_and_verify_uses_landing_api_and_preserves_source_filter():
     verified = update_and_verify(
         client,
         "landing",
-        "v2_landing_test",
+        "landing_test",
         [{"id": "record-1", "job_id": "job-1"}],
         {"is_session_completed": True},
         "is_session_completed = false",

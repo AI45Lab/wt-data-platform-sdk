@@ -4,14 +4,14 @@
 This script implements the non-destructive half of the periodic landing archive
 workflow:
 
-1. Create ``archived_YYYYMMDD_wind_tunnel_landing`` with the same schema and
-   HASH partition metadata as ``wind_tunnel_landing``.
+1. Create ``archived_YYYYMMDD_wt_landing`` with the same schema and
+   HASH partition metadata as ``wt_landing``.
 2. Copy all existing HASH buckets into the archive table in bounded batches.
 3. Verify schema, partition metadata, per-bucket counts, total row count, and
    that the source table did not change while the copy was running.
 
 The source table must be quiescent. Stop writers and ETL before running the
-real copy. The script never modifies ``wind_tunnel_landing``.
+real copy. The script never modifies ``wt_landing``.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from wt_sdk.config import DEFAULT_LANDING_TABLE, default_config
+from wt_sdk.config import DEFAULT_LANDING_TABLE, db_uri_for_table, storage_options_for
 from wt_sdk.core.schemas import (
     LANDING_PARTITION_COLUMN,
     LANDING_PARTITION_TYPE,
@@ -181,15 +181,17 @@ def create_archive_and_copy(
     if archive_table.startswith(source_table):
         raise ValueError(
             "Archive table name must not start with the source table name; "
-            "use archived_YYYYMMDD_wind_tunnel_landing to avoid dldb prefix confusion."
+            "use archived_YYYYMMDD_wt_landing to avoid dldb prefix confusion."
         )
     if batch_size <= 0:
         raise ValueError("batch_size must be greater than zero")
 
-    session = dldb.connect(
-        default_config.tables.db_uri,
-        storage_options=default_config.s3.to_storage_options(),
-    )
+    db_uri = db_uri_for_table(source_table)
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
     try:
         if not session.table_exists(source_table):
             raise ValueError(f"Source table '{source_table}' does not exist")
@@ -210,7 +212,7 @@ def create_archive_and_copy(
         print("=" * 80)
         print("Production landing archive copy plan")
         print("=" * 80)
-        print(f"Database:           {default_config.tables.db_uri}")
+        print(f"Database:           {db_uri}")
         print(f"Source table:       {source_table}")
         print(f"Archive table:      {archive_table}")
         print(f"Schema fields:      {len(source_schema)}")
@@ -325,7 +327,7 @@ def create_archive_and_copy(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Create archived_YYYYMMDD_wind_tunnel_landing and copy production landing data.",
+        description="Create archived_YYYYMMDD_wt_landing and copy production landing data.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--source-table", default=DEFAULT_LANDING_TABLE)

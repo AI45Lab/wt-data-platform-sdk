@@ -6,7 +6,15 @@ from typing import Dict, Iterable, List
 
 import dldb
 
-from wt_sdk.config import default_config
+from wt_sdk.config import TEST_LANDING_TABLE, db_uri_for_table, storage_options_for
+
+
+def default_db_uri(table_name: str) -> str:
+    """Database hosting a known landing/serving table, else the default db."""
+    try:
+        return db_uri_for_table(table_name)
+    except ValueError:
+        return db_uri_for_table(TEST_LANDING_TABLE)
 
 
 IDENTITY_COLUMNS = ["id", "job_id", "session_id", "created_at"]
@@ -57,7 +65,11 @@ def _batches(rows: List[Dict], size: int) -> Iterable[List[Dict]]:
 
 
 def scan_table(table_name: str, db_uri: str, batch_size: int, max_output: int) -> int:
-    session = dldb.connect(db_uri, storage_options=default_config.s3.to_storage_options())
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
     try:
         record = session.schema_table.get(table_name)
         if record is None:
@@ -122,14 +134,25 @@ def scan_table(table_name: str, db_uri: str, batch_size: int, max_output: int) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scan a HASH landing table for nested decode failures")
-    parser.add_argument("--table", default="v2_landing_test", help="HASH landing table to scan")
-    parser.add_argument("--db-uri", default=None, help="Database URI (default: WT_SDK_DB_URI)")
+    parser.add_argument(
+        "--table",
+        default=TEST_LANDING_TABLE,
+        help=f"HASH landing table to scan (default: {TEST_LANDING_TABLE})",
+    )
+    parser.add_argument(
+        "--db-uri",
+        default=None,
+        help=(
+            "Database URI (default: derived from --table for known "
+            "landing/serving names, else the landing database)"
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=64, help="IDs per narrowing probe")
     parser.add_argument("--max-output", type=int, default=100, help="Maximum candidates to print per failure")
     args = parser.parse_args()
     return scan_table(
         args.table,
-        args.db_uri or default_config.tables.db_uri,
+        args.db_uri or default_db_uri(args.table),
         args.batch_size,
         args.max_output,
     )

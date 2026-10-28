@@ -135,7 +135,7 @@ def test_legacy_unpartitioned_table_keeps_whole_table_path():
 
 
 def test_production_table_can_be_selected_explicitly():
-    production_table = "evaluation_env_config"
+    production_table = "wt_env_config"
     session = FakeSession([], table_name=production_table)
     summary = script.maintain_env_config_indexes(
         session,

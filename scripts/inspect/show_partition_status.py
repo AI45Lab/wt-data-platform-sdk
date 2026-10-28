@@ -9,16 +9,16 @@ automatically.
 
 Examples:
   python scripts/inspect/show_partition_status.py \
-    --table v2_landing_test --partition 34 --partition 94
+    --table landing_test --partition 34 --partition 94
 
   python scripts/inspect/show_partition_status.py \
-    --table wind_tunnel_landing --all-partitions
+    --table wt_landing --all-partitions
 
   python scripts/inspect/show_partition_status.py \
-    --table wind_tunnel_serving --partition 15 --show-all-indexes
+    --table wt_serving --partition 15 --show-all-indexes
 
   python scripts/inspect/show_partition_status.py \
-    --table env_config_test --all-partitions
+    --table env_test --all-partitions
 """
 
 import argparse
@@ -35,8 +35,9 @@ from wt_sdk.config import (
     TEST_ENV_CONFIG_TABLE,
     TEST_LANDING_TABLE,
     TEST_SERVING_TABLE,
-    default_config,
+    db_uri_for_table,
     resolve_env_config_db_uri,
+    storage_options_for,
 )
 from wt_sdk.core.evaluation_env_schema import (
     SCALAR_INDEX_COLUMNS as ENV_SCALAR_INDEXES,
@@ -363,10 +364,11 @@ def inspect_table(
     show_all_indexes: bool,
 ) -> int:
     expected_indexes = expected_indexes_for_table(table_name)
-    session = dldb.connect(
-        db_uri,
-        storage_options=default_config.s3.to_storage_options(),
-    )
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    session = dldb.connect(db_uri, **connect_kwargs)
     try:
         if not callable(getattr(session, "partition_status", None)):
             raise RuntimeError(
@@ -424,7 +426,7 @@ def main() -> int:
         "--db-uri",
         default=None,
         help=(
-            "Database URI (default: configured WT_SDK_DB_URI for landing/"
+            "Database URI (default: resolved from the table name for landing/"
             "serving tables, WT_SDK_ENV_CONFIG_DB_URI for env-config tables)."
         ),
     )
@@ -454,7 +456,7 @@ def main() -> int:
         elif args.table in ENV_CONFIG_TABLES:
             db_uri = resolve_env_config_db_uri(None)
         else:
-            db_uri = default_config.tables.db_uri
+            db_uri = db_uri_for_table(args.table)
         return inspect_table(
             args.table,
             db_uri,

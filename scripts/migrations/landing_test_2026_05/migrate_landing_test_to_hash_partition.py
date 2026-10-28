@@ -188,9 +188,11 @@ def migrate(
     keep_staging: bool = False,
     drop_invalid_job_id: bool = False,
 ) -> None:
-    logger.info(f"Connecting to {default_config.tables.db_uri}...")
+    # one-off migration; values frozen to the pre-split stack
+    db_uri = "s3://wind-tunnel-dldb"
+    logger.info(f"Connecting to {db_uri}...")
     session = dldb.connect(
-        default_config.tables.db_uri,
+        db_uri,
         storage_options=default_config.s3.to_storage_options(),
     )
 

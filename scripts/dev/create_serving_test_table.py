@@ -1,9 +1,9 @@
 """
 Initialize serving_test table for testing Wind Tunnel data platform.
-This creates a test table in s3://wind-tunnel-dldb for testing purposes.
+This creates the test serving table in s3://wt-data-platform.
 """
 import dldb
-from wt_sdk.config import default_config
+from wt_sdk.config import TEST_SERVING_TABLE, db_uri_for_table, storage_options_for
 from wt_sdk.core.schemas import (
     SERVING_PARTITIONS,
     SERVING_PARTITION_COLUMN,
@@ -13,18 +13,20 @@ from wt_sdk.core.schemas import (
 )
 
 
-TABLE_NAME = "serving_test"
+TABLE_NAME = TEST_SERVING_TABLE
 PARTITION_COLUMN = SERVING_PARTITION_COLUMN
 
 
 def init_serving_test_table():
     """Initialize serving_test table with DLDB wrapper SDK."""
-    print(f"Connecting to {default_config.tables.db_uri}...")
+    db_uri = db_uri_for_table(TABLE_NAME)
+    connect_kwargs = {}
+    storage_options = storage_options_for(db_uri)
+    if storage_options is not None:
+        connect_kwargs["storage_options"] = storage_options
+    print(f"Connecting to {db_uri}...")
 
-    session = dldb.connect(
-        default_config.tables.db_uri,
-        storage_options=default_config.s3.to_storage_options()
-    )
+    session = dldb.connect(db_uri, **connect_kwargs)
 
     # 1. Create table with partition support
     print(f"\nCreating table '{TABLE_NAME}' with partition_column='{PARTITION_COLUMN}'...")

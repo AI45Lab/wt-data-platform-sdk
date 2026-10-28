@@ -36,8 +36,8 @@ def _status(*, rows, fragments, small_fragments, coverage):
 
 
 def test_expected_indexes_use_role_specific_sdk_definitions():
-    landing = expected_indexes_for_table("v2_landing_test")
-    serving = expected_indexes_for_table("wind_tunnel_serving")
+    landing = expected_indexes_for_table("landing_test")
+    serving = expected_indexes_for_table("wt_serving")
 
     assert landing["id_idx"] == "BTREE"
     assert landing["is_trainable_idx"] == "BITMAP"
@@ -109,8 +109,8 @@ def test_expected_indexes_reject_unknown_table():
 
 
 def test_env_config_tables_use_their_own_btree_index_set():
-    test_env = expected_indexes_for_table("env_config_test")
-    prod_env = expected_indexes_for_table("evaluation_env_config")
+    test_env = expected_indexes_for_table("env_test")
+    prod_env = expected_indexes_for_table("wt_env_config")
 
     assert test_env == prod_env == {
         "env_name_idx": "BTREE",
@@ -154,19 +154,19 @@ def test_main_resolves_env_config_db_uri_for_env_tables(monkeypatch):
     monkeypatch.setattr(
         script,
         "resolve_env_config_db_uri",
-        lambda explicit: "s3://wind-tunnel-env-config",
+        lambda explicit: "/mnt/shared-storage-user/adpc-share/wt-data-platform/env-config",
     )
     monkeypatch.setattr(
         "sys.argv",
         [
             "show_partition_status.py",
             "--table",
-            "env_config_test",
+            "env_test",
             "--partition",
             "3",
         ],
     )
 
     assert script.main() == 0
-    assert captured["db_uri"] == "s3://wind-tunnel-env-config"
-    assert captured["record_table"] == "env_config_test"
+    assert captured["db_uri"] == "/mnt/shared-storage-user/adpc-share/wt-data-platform/env-config"
+    assert captured["record_table"] == "env_test"

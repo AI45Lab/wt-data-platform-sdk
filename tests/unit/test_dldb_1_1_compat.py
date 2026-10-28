@@ -13,7 +13,7 @@ def test_legacy_unpartitioned_metadata_reopens_as_simple_table(tmp_path):
     session = dldb.connect(db_uri)
     try:
         session.create_table(
-            "evaluation_env_config",
+            "env_config_fixture",
             schema=pa.schema(
                 [
                     pa.field("id", pa.int64(), nullable=False),
@@ -22,7 +22,7 @@ def test_legacy_unpartitioned_metadata_reopens_as_simple_table(tmp_path):
             ),
         )
         session.add(
-            "evaluation_env_config",
+            "env_config_fixture",
             pd.DataFrame([{"id": 1, "job_id": "prod-job"}]),
         )
 
@@ -30,20 +30,20 @@ def test_legacy_unpartitioned_metadata_reopens_as_simple_table(tmp_path):
         # column. dldb-v1.1.7 must treat the empty column as authoritative and
         # reopen the physical table as an unpartitioned SimpleTable.
         session.schema_table.table.update(
-            where="table_name = 'evaluation_env_config'",
+            where="table_name = 'env_config_fixture'",
             values={"partition_type": "VALUE", "partition_column": ""},
         )
         session.schema_table.reload()
-        session.tables.pop("evaluation_env_config", None)
+        session.tables.pop("env_config_fixture", None)
 
         frame = session.filter(
-            "evaluation_env_config",
+            "env_config_fixture",
             query="job_id = 'prod-job'",
             checkout_latest=True,
         )
 
         assert frame.to_dict("records") == [{"id": 1, "job_id": "prod-job"}]
-        assert isinstance(session.tables["evaluation_env_config"], SimpleTable)
+        assert isinstance(session.tables["env_config_fixture"], SimpleTable)
     finally:
         session.shutdown()
 
