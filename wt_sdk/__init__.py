@@ -43,6 +43,7 @@ from wt_sdk.config import (
 )
 from wt_sdk.client import WTGatewayClient
 from wt_sdk.env_config_client import EnvConfigManager
+from wt_sdk.sharding import landing_bucket_for, plan_shards
 from wt_sdk.models import (
     # Common models
     ImageUrl,
@@ -77,6 +78,9 @@ __all__ = [
     # Clients
     "WTGatewayClient",
     "EnvConfigManager",
+    # Sharding
+    "plan_shards",
+    "landing_bucket_for",
     # Common models
     "ImageUrl",
     "InputAudio",
