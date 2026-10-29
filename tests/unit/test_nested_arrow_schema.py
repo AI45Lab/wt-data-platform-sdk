@@ -292,6 +292,9 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("is_trainable", "BITMAP"),
         ("is_session_completed", "BITMAP"),
         ("group_id", "BTREE"),
+        ("role", "BITMAP"),
+        ("harness", "BITMAP"),
+        ("weight_version", "BTREE"),
     ]
     assert SERVING_SCALAR_INDEXES == [
         ("id", "BTREE"),
@@ -310,4 +313,7 @@ def test_schema_index_definitions_match_landing_and_serving_access_patterns():
         ("env_name", "BTREE"),
         ("tags", "LABEL_LIST"),
         ("group_id", "BTREE"),
+        ("role", "BITMAP"),
+        ("harness", "BITMAP"),
+        ("weight_version", "BTREE"),
     ]

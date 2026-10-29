@@ -154,6 +154,9 @@ LANDING_SCALAR_INDEXES = [
     ("is_trainable", "BITMAP"),
     ("is_session_completed", "BITMAP"),
     ("group_id", "BTREE"),
+    ("role", "BITMAP"),
+    ("harness", "BITMAP"),
+    ("weight_version", "BTREE"),
 ]
 
 # Scalar indexes for serving table
@@ -174,6 +177,9 @@ SERVING_SCALAR_INDEXES = [
     ("env_name", "BTREE"),
     ("tags", "LABEL_LIST"),
     ("group_id", "BTREE"),
+    ("role", "BITMAP"),
+    ("harness", "BITMAP"),
+    ("weight_version", "BTREE"),
 ]
 
 # search_text 使用包含匹配（LIKE '%keyword%'），普通 BTREE 无法有效加速。
