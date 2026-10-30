@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wt-data-platform-sdk"
-version = "0.7.4"
+version = "0.7.5"
 description = "Wind Tunnel Data Platform SDK"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -23,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "dldb @ git+https://github.com/DeepLink-org/Persisting.git@dldb-v1.1.9#subdirectory=persisting/dldb",
+    "dldb @ git+https://github.com/DeepLink-org/Persisting.git@dldb-v1.1.11#subdirectory=persisting/dldb",
     "pydantic>=2.5.0",
     "loguru>=0.7.2",
     "pandas>=2.3.3",
