@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Create missing indexes and fully optimize a profile-selected env-config table.
+"""Create missing indexes and fully optimize an env-config table.
 
-The target is ``env_test`` for the test profile and ``wt_env_config`` for
-production, in the database selected by ``WT_SDK_ENV_CONFIG_DB_URI``.
-Since the 2026.10 job-splitting change these tables are HASH(job_id)-partitioned,
-so indexes are created and optimized per materialized bucket; legacy
-unpartitioned tables keep the single-table code path.
+The target is selected by ``WT_SDK_PROFILE`` (default: test), unless an explicit
+``--table`` or ``--profile`` is supplied. ``env_test`` is the test table and
+``wt_env_config`` is the production table, in the database selected by
+``WT_SDK_ENV_CONFIG_DB_URI``. Since the 2026.10 job-splitting change these
+tables are HASH(job_id)-partitioned, so indexes are created and optimized per
+materialized bucket; legacy unpartitioned tables keep the single-table path.
 
 Examples:
   python scripts/ops/maintain_env_config_indexes.py --dry-run
   python scripts/ops/maintain_env_config_indexes.py
-  python scripts/ops/maintain_env_config_indexes.py --profile production --dry-run
+  python scripts/ops/maintain_env_config_indexes.py --table wt_env_config --dry-run
   python scripts/ops/maintain_env_config_indexes.py --no-optimize
 """
 
@@ -23,6 +24,7 @@ from typing import Any, List, Optional, Tuple
 import dldb
 
 from wt_sdk.config import (
+    DEFAULT_ENV_CONFIG_TABLE,
     TEST_ENV_CONFIG_TABLE,
     resolve_env_config_db_uri,
     resolve_env_config_table_name,
@@ -228,11 +230,21 @@ def main() -> int:
             "fragments, refresh indexes, and clean old versions"
         )
     )
-    parser.add_argument(
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument(
+        "--table",
+        choices=(TEST_ENV_CONFIG_TABLE, DEFAULT_ENV_CONFIG_TABLE),
+        default=None,
+        help="Explicit table name; overrides WT_SDK_PROFILE.",
+    )
+    target.add_argument(
         "--profile",
         choices=("test", "prod", "production"),
-        default="test",
-        help="Select env_test for test or wt_env_config for production. Defaults to test.",
+        default=None,
+        help=(
+            "Select env_test for test or wt_env_config for production. "
+            "Defaults to WT_SDK_PROFILE, then test."
+        ),
     )
     parser.add_argument(
         "--db-uri",
@@ -294,7 +306,7 @@ def main() -> int:
         parser.error("both maintenance actions cannot be disabled")
 
     db_uri = resolve_env_config_db_uri(args.db_uri)
-    table_name = resolve_env_config_table_name(profile=args.profile)
+    table_name = resolve_env_config_table_name(args.table, profile=args.profile)
     print(f"Environment-config database: {db_uri}")
     print(f"Table: {table_name}")
     print(f"Table URI: {db_uri}/{table_name}.lance")

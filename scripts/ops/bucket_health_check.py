@@ -29,6 +29,7 @@ from wt_sdk.config import (
     GatewayConfig,
     TableConfig,
     db_uri_for_table,
+    default_config,
 )
 
 # dldb reconfigures the global loguru sink to stdout at import time, which would

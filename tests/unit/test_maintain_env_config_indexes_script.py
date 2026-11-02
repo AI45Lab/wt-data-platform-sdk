@@ -71,6 +71,9 @@ class FakeSession:
             for name in self.existing_indexes
         ]
 
+    def shutdown(self):
+        pass
+
 
 def test_maintain_creates_missing_job_index_per_hash_bucket():
     session = FakeSession(
@@ -144,6 +147,37 @@ def test_production_table_can_be_selected_explicitly():
     )
 
     assert summary["table_name"] == production_table
+
+
+def test_cli_uses_shared_profile_for_env_table(monkeypatch):
+    monkeypatch.setenv("WT_SDK_PROFILE", "production")
+    session = FakeSession([], table_name=script.DEFAULT_ENV_CONFIG_TABLE)
+    monkeypatch.setattr(script.dldb, "connect", lambda *args, **kwargs: session)
+    monkeypatch.setattr(
+        script.sys,
+        "argv",
+        ["maintain_env_config_indexes.py", "--dry-run"],
+    )
+
+    assert script.main() == 0
+
+
+def test_cli_explicit_table_overrides_shared_profile(monkeypatch):
+    monkeypatch.setenv("WT_SDK_PROFILE", "test")
+    session = FakeSession([], table_name=script.DEFAULT_ENV_CONFIG_TABLE)
+    monkeypatch.setattr(script.dldb, "connect", lambda *args, **kwargs: session)
+    monkeypatch.setattr(
+        script.sys,
+        "argv",
+        [
+            "maintain_env_config_indexes.py",
+            "--table",
+            "wt_env_config",
+            "--dry-run",
+        ],
+    )
+
+    assert script.main() == 0
 
 
 def test_schema_mismatch_stops_before_index_mutation():

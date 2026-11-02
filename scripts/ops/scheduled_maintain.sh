@@ -106,15 +106,15 @@ for table in "$@"; do
 done
 
 # Env-config table maintenance (HASH(job_id)-partitioned table on the GPFS
-# env-config database; runs serially after the landing loop). Override the
-# profile with ENV_CONFIG_PROFILE=test.
+# env-config database; runs serially after the landing loop). Like the landing
+# default above, scheduled maintenance always targets production explicitly,
+# independently of WT_SDK_PROFILE in .env.
 ENV_CONFIG_MAINTAIN="$REPO_DIR/scripts/ops/maintain_env_config_indexes.py"
-ENV_CONFIG_PROFILE="${ENV_CONFIG_PROFILE:-production}"
 ts=$(date +%Y%m%d_%H%M%S)
-env_log_file="$LOG_DIR/maintain_env_config_${ENV_CONFIG_PROFILE}_${ts}.log"
-echo "=== $(date -Is) env-config maintain profile=$ENV_CONFIG_PROFILE ===" | tee -a "$env_log_file"
+env_log_file="$LOG_DIR/maintain_env_config_production_${ts}.log"
+echo "=== $(date -Is) env-config maintain table=wt_env_config ===" | tee -a "$env_log_file"
 "$PYTHON_BIN" "$ENV_CONFIG_MAINTAIN" \
-    --profile "$ENV_CONFIG_PROFILE" \
+    --table wt_env_config \
     --cleanup-older-than-hours 24 \
     >>"$env_log_file" 2>&1
 env_status=$?

@@ -26,14 +26,16 @@ python scripts/ops/maintain_table_indexes.py \
 The separate environment-config tables have their own maintenance command and
 automatically resolve `WT_SDK_ENV_CONFIG_DB_URI` (default: the GPFS env-config
 path). They are HASH(job_id)-partitioned with
-per-bucket indexes, so the command iterates materialized buckets. The command
-defaults to `env_test`; production must be selected explicitly:
+per-bucket indexes, so the command iterates materialized buckets. Like the SDK's
+landing and serving tables, the default env table is selected by
+`WT_SDK_PROFILE` (falling back to test). An explicit table name overrides the
+profile for operational commands:
 
 ```bash
 python scripts/ops/maintain_env_config_indexes.py --dry-run
 python scripts/ops/maintain_env_config_indexes.py
 python scripts/ops/maintain_env_config_indexes.py \
-  --profile production --dry-run
+  --table wt_env_config --dry-run
 ```
 
 It creates missing indexes configured in
