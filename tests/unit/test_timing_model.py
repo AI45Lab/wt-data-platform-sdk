@@ -972,6 +972,9 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
         "is_trainable",
         "is_session_completed",
         "group_id",
+        "role",
+        "harness",
+        "weight_version",
     ]
     assert fake_session.optimized_partitions == [
         {
@@ -1046,6 +1049,9 @@ def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatc
         ("env_name", "BTREE"),
         ("tags", "LABEL_LIST"),
         ("group_id", "BTREE"),
+        ("role", "BITMAP"),
+        ("harness", "BITMAP"),
+        ("weight_version", "BTREE"),
     ]
     assert fake_session.optimized_partitions == [
         {
