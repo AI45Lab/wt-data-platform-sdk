@@ -17,6 +17,7 @@ names determine whether landing or serving index definitions are used.
 import argparse
 import json
 import sys
+from datetime import timedelta
 
 from wt_sdk.client import WTGatewayClient
 from wt_sdk.config import (
@@ -100,6 +101,18 @@ def main() -> int:
         help="Only create missing indexes; do not optimize buckets.",
     )
     parser.add_argument(
+        "--cleanup-older-than-hours",
+        type=float,
+        default=24.0,
+        metavar="HOURS",
+        help=(
+            "Lance old-version retention window passed to optimize() "
+            "cleanup_old_versions. 0 deletes every superseded version "
+            "immediately; dldb's own fallback default (168h/7d) is only used "
+            "when this is unset, which does not happen through this CLI."
+        ),
+    )
+    parser.add_argument(
         "--dldb-model",
         choices=["none", "metrics", "debug"],
         default="debug",
@@ -166,6 +179,7 @@ def main() -> int:
             columns=columns,
             create_missing=not args.no_create_missing,
             optimize=not args.no_optimize,
+            cleanup_older_than=timedelta(hours=args.cleanup_older_than_hours),
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True, default=str))
         return 1 if summary.get("errors") else 0

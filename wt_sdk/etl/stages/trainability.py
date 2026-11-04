@@ -13,7 +13,7 @@ from ..exceptions import StageTransformError
 from ..policy import TrainabilityPolicy
 from ..stage import ETLStage, Record, Session, SessionPatch, StageContext
 
-MIN_SIDE_CHAIN_LENGTH = 20
+MIN_SIDE_CHAIN_LENGTH = 3
 
 _STREAM_FLAG_KEYS = ("stream", "streaming")
 _FINISH_REASON_KEYS = ("finish_reason", "finishReason")

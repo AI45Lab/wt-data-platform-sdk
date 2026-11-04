@@ -33,8 +33,9 @@ class FakeSession:
         self.created.append((column, index_type))
         self.existing_indexes.append(f"{column}_idx")
 
-    def optimize(self, table_name):
+    def optimize(self, table_name, cleanup_older_than=None):
         self.optimize_calls.append(table_name)
+        self.cleanup_older_than = cleanup_older_than
 
     def list_index_coverage(self, table_name):
         assert table_name == self.table_name

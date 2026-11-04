@@ -10,7 +10,15 @@
 set -u
 
 REPO_DIR="${REPO_DIR:-$HOME/wt-data-platform-sdk}"
-PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/wt-dldb-v1/bin/python}"
+# Prefer a wt-dldb-v1 env in the invoking user's home, fall back to the
+# original /root location (big-worker-hs2).
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if [ -x "$HOME/miniconda3/envs/wt-dldb-v1/bin/python" ]; then
+        PYTHON_BIN="$HOME/miniconda3/envs/wt-dldb-v1/bin/python"
+    else
+        PYTHON_BIN="/root/miniconda3/envs/wt-dldb-v1/bin/python"
+    fi
+fi
 LOG_DIR="${LOG_DIR:-$REPO_DIR/maintain_logs}"
 HEALTH_CHECK="$REPO_DIR/scripts/ops/bucket_health_check.py"
 MAINTAIN="$REPO_DIR/scripts/ops/maintain_table_indexes.py"
@@ -28,6 +36,15 @@ if [ -f "$REPO_DIR/.env" ]; then
     . "$REPO_DIR/.env"
     set +a
 fi
+
+# Nightly maintenance tolerates slow S3: huge version-dir LISTs on XSKY can
+# exceed lance's per-request default (observed 120s failures on 2026-10-25).
+# Only this job gets the raised timeout; interactive writers keep defaults.
+export WT_SDK_S3_REQUEST_TIMEOUT="${WT_SDK_S3_REQUEST_TIMEOUT:-300}"
+
+# Always import wt_sdk from THIS repo, not whatever the python env's editable
+# install points at (hosts may share the env with other services).
+export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 for table in "$@"; do
     ts=$(date +%Y%m%d_%H%M%S)
@@ -57,6 +74,7 @@ for table in "$@"; do
         --table "$table" \
         "${partition_args[@]}" \
         --dldb-model debug \
+        --cleanup-older-than-hours 24 \
         >>"$log_file" 2>&1 &
     maintain_pid=$!
 
@@ -86,3 +104,17 @@ for table in "$@"; do
         echo "=== $(date -Is) maintain for $table exited with $status, log: $log_file ===" | tee -a "$log_file"
     fi
 done
+
+# Env-config table maintenance (unpartitioned SimpleTable; runs serially after
+# the landing loop). Override the profile with ENV_CONFIG_PROFILE=test.
+ENV_CONFIG_MAINTAIN="$REPO_DIR/scripts/ops/maintain_env_config_indexes.py"
+ENV_CONFIG_PROFILE="${ENV_CONFIG_PROFILE:-production}"
+ts=$(date +%Y%m%d_%H%M%S)
+env_log_file="$LOG_DIR/maintain_env_config_${ENV_CONFIG_PROFILE}_${ts}.log"
+echo "=== $(date -Is) env-config maintain profile=$ENV_CONFIG_PROFILE ===" | tee -a "$env_log_file"
+"$PYTHON_BIN" "$ENV_CONFIG_MAINTAIN" \
+    --profile "$ENV_CONFIG_PROFILE" \
+    --cleanup-older-than-hours 24 \
+    >>"$env_log_file" 2>&1
+env_status=$?
+echo "=== $(date -Is) env-config maintain exited with $env_status, log: $env_log_file ===" | tee -a "$env_log_file"

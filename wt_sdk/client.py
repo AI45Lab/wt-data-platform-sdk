@@ -631,6 +631,46 @@ class WTGatewayClient:
         columns.add("source_updated_at")
         return [field.name for field in schema if field.name in columns]
 
+    def _group_partial_upsert_by_partition(
+        self,
+        dataframe: pd.DataFrame,
+        table_name: str,
+    ) -> Optional[List[tuple]]:
+        """Group a partial-upsert frame by HASH bucket for dldb partition routing.
+
+        dldb >= 1.1.11 opens HASH buckets by physical table name (skipping the
+        per-call bucket-root LIST) only when the caller passes ``partition=``;
+        one call covers exactly one bucket.  Rows are bucketed with the same
+        ``stable_hash`` dldb uses, so routing matches dldb's own assertion in
+        ``_groups_for_write``.  Returns ``None`` to fall back to the plain
+        unpartitioned call when HASH metadata is unavailable (older dldb,
+        non-HASH tables, or a frame without the partition column).
+        """
+        metadata = self._get_partition_metadata_for_table(table_name, self.LANDING_PARTITION_KEY)
+        if str(metadata.get("partition_type") or "").upper() != "HASH":
+            return None
+        partitions_count = metadata.get("partitions")
+        if not isinstance(partitions_count, int) or partitions_count <= 0:
+            return None
+        partition_column = metadata.get("partition_column")
+        if partition_column not in dataframe.columns:
+            return None
+        try:
+            from dldb.utils import stable_hash
+        except Exception as exc:
+            logger.warning(
+                f"Cannot import dldb.utils.stable_hash for partial upsert "
+                f"partitioning, falling back to unpartitioned upsert: {exc}"
+            )
+            return None
+        buckets = dataframe[partition_column].map(
+            lambda value: stable_hash(value) % partitions_count
+        )
+        return [
+            (int(bucket), group)
+            for bucket, group in dataframe.groupby(buckets, sort=False)
+        ]
+
     def _upsert_batch(
         self,
         table: str,
@@ -704,12 +744,31 @@ class WTGatewayClient:
         # Only pass the flag when opting into partial mode so the default
         # path stays compatible with dldb versions that lack the parameter.
         upsert_kwargs = {} if insert_missing else {"insert_missing": False}
-        self.session.upsert(
-            info["table_name"],
-            columns=columns,
-            datas=dataframe,
-            **upsert_kwargs,
+        # Partial landing upserts route per HASH bucket with partition= so
+        # dldb >= 1.1.11 opens buckets by name instead of LISTing the bucket
+        # root on every call.  Falls back to one plain call when bucketing is
+        # unavailable.
+        groups = (
+            self._group_partial_upsert_by_partition(dataframe, info["table_name"])
+            if not insert_missing and table == "landing"
+            else None
         )
+        if groups is None:
+            self.session.upsert(
+                info["table_name"],
+                columns=columns,
+                datas=dataframe,
+                **upsert_kwargs,
+            )
+        else:
+            for partition, group_dataframe in groups:
+                self.session.upsert(
+                    info["table_name"],
+                    columns=columns,
+                    datas=group_dataframe,
+                    partition=partition,
+                    **upsert_kwargs,
+                )
         self._log_dldb_timing(
             "upsert",
             self._extract_dldb_last_call(),
@@ -719,6 +778,11 @@ class WTGatewayClient:
                 "api": f"upsert_{table}_batch",
                 "match_columns": columns,
                 "insert_missing": insert_missing,
+                **(
+                    {"upsert_partitions": [partition for partition, _ in groups]}
+                    if groups is not None
+                    else {}
+                ),
             },
         )
         logger.info(
