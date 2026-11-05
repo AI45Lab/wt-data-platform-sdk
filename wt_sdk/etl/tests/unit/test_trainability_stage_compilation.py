@@ -139,8 +139,8 @@ def _row(row_id: str, step_id: int, messages: list, **updates: object) -> dict:
 def _tail_step_id() -> int:
     """The step_id of the main chain's final record.
 
-    Main-chain records occupy steps 0..9 and 11..(MIN_SIDE_CHAIN_LENGTH);
-    the single side-chain record takes step 10 in between. The tail therefore
+    Main-chain records occupy step 0 and steps 2..MIN_SIDE_CHAIN_LENGTH;
+    the single side-chain record takes step 1 in between. The tail therefore
     carries the session's maximum step_id and the completion marker.
     """
 
@@ -153,7 +153,7 @@ def _completed_session() -> list[dict]:
         "role": "assistant",
         "content": [{"type": "text", "text": "answer"}],
     }
-    side_step_id = 10
+    side_step_id = 1
     rows: list[dict] = []
     turns: list[dict] = []
     for index in range(MIN_SIDE_CHAIN_LENGTH):

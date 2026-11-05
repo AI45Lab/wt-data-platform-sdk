@@ -26,6 +26,10 @@ _HARNESS_CURRENT_DATE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _NORMALIZED_CURRENT_DATE = "<normalized-current-date>"
+# Claude Code's ``x-anthropic-billing-header`` system line carries a per-request
+# ``cch=<value>;`` field, so otherwise identical system prompts never match.
+# The field and its leading inline whitespace are removed before fingerprinting.
+_HARNESS_CCH_PATTERN = re.compile(r"[ \t]*\bcch=[^;\s]*;?")
 
 
 class UpdateIsTrainableStage(ETLStage):
@@ -37,9 +41,10 @@ class UpdateIsTrainableStage(ETLStage):
     ``step_id`` is trainable. Otherwise, the remaining rows are grouped into
     append-only chains with canonical message-prefix matching: equivalent user
     text represented as either a string or one text content block is normalized
-    before matching, and the date in Claude Code's harness-managed
-    ``currentDate`` reminder is replaced by a stable placeholder. Each chain
-    tail contains the complete messages of one
+    before matching, the date in Claude Code's harness-managed ``currentDate``
+    reminder is replaced by a stable placeholder, and every per-request
+    ``cch=<value>`` field (from Claude Code's billing header) is removed. Each
+    chain tail contains the complete messages of one
     structurally separated trajectory. A later strict prefix of an active chain
     tail is treated as a retry reset, so the abandoned longer row is not a
     trainable tail. Identical message snapshots are separate occurrences rather
@@ -47,13 +52,13 @@ class UpdateIsTrainableStage(ETLStage):
     ``MIN_SIDE_CHAIN_LENGTH`` records are treated as short side branches or
     subagents and are not trainable; a single-chain session is never a side
     chain. Filtering error rows does not prevent the remaining rows from being
-    processed. Apart from masking the harness-managed date, this stage assigns
-    no semantic meaning to message contents and copies the completion record's
-    non-null ``reward`` to every selected row.
+    processed. Apart from masking the harness-managed date and ``cch`` values,
+    this stage assigns no semantic meaning to message contents and copies the
+    completion record's non-null ``reward`` to every selected row.
     """
 
     name = "update_is_trainable"
-    version = "8"
+    version = "9"
     required_fields = (
         "id",
         "step_id",
@@ -519,7 +524,7 @@ def _fingerprint_messages(messages: Sequence[Any]) -> list[str]:
 
 
 def _normalize_message(message: Any) -> Any:
-    """Canonicalize matching-only message shapes and volatile harness dates."""
+    """Canonicalize matching-only message shapes and volatile harness text."""
 
     if not isinstance(message, Mapping) or message.get("role") not in ("user", "system"):
         return message
@@ -529,10 +534,10 @@ def _normalize_message(message: Any) -> Any:
     if isinstance(content, str):
         if message.get("role") == "user":
             normalized["content"] = [
-                {"type": "text", "text": _normalize_current_date(content)}
+                {"type": "text", "text": _normalize_volatile_harness_text(content)}
             ]
         else:
-            normalized["content"] = _normalize_current_date(content)
+            normalized["content"] = _normalize_volatile_harness_text(content)
     elif isinstance(content, list):
         normalized["content"] = [_normalize_content_item(item) for item in content]
     return normalized
@@ -545,13 +550,14 @@ def _normalize_content_item(item: Any) -> Any:
     if not isinstance(text, str):
         return item
     normalized_item = dict(item)
-    normalized_item["text"] = _normalize_current_date(text)
+    normalized_item["text"] = _normalize_volatile_harness_text(text)
     return normalized_item
 
 
-def _normalize_current_date(text: str) -> str:
-    """Mask the only volatile value in Claude Code's currentDate reminder."""
+def _normalize_volatile_harness_text(text: str) -> str:
+    """Drop ``cch=<value>`` fields and mask the currentDate reminder's date."""
 
+    text = _HARNESS_CCH_PATTERN.sub("", text)
     return _HARNESS_CURRENT_DATE_PATTERN.sub(
         lambda match: (
             f"{match.group('prefix')}{_NORMALIZED_CURRENT_DATE}"
