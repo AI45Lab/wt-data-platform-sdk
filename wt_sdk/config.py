@@ -196,6 +196,9 @@ class GatewayConfig:
     enable_dldb_timing_logs: bool = False
     log_dldb_metrics_summary_on_close: bool = True
     dldb_metrics_log_path: Optional[str] = None
+    # Opt-in for read/export services that never access the GPFS landing DB.
+    # The default preserves eager landing + serving connections for existing users.
+    serving_only: bool = False
 
     def __post_init__(self):
         if self.s3 is None:

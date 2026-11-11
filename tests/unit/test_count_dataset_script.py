@@ -49,9 +49,11 @@ def test_build_config_pins_production_and_allows_explicit_test(monkeypatch):
     assert production.tables.profile == "production"
     assert production.tables.landing_table == "wt_landing"
     assert production.tables.serving_table == "wt_serving"
+    assert production.serving_only is True
     assert test.tables.profile == "test"
     assert test.tables.landing_table == "landing_test"
     assert test.tables.serving_table == "serving_test"
+    assert test.serving_only is True
 
 
 def test_dataset_comes_from_first_job_id_component_not_contains_matching():

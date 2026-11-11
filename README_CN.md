@@ -82,6 +82,29 @@ services:
       - .env
 ```
 
+### 仅访问 Serving 的客户端
+
+只读 gateway、交付导出等从不访问 landing 的服务，可以显式启用单 serving
+连接模式：
+
+```python
+from wt_sdk import GatewayConfig, TableConfig, WTGatewayClient
+
+config = GatewayConfig(
+    tables=TableConfig(profile="production"),
+    serving_only=True,
+)
+client = WTGatewayClient(config)
+```
+
+该模式只连接 `WT_SDK_SERVING_DB_URI`（或显式/默认 serving URI），因此进程只需要
+S3 访问能力，不需要挂载 GPFS，也不会连接 landing。此时访问任何 landing 表都会
+抛出 `RuntimeError`，不会静默建立回退连接。交付导出和 dataset 计数脚本已自动启用
+此模式。
+
+默认仍为 `serving_only=False`：现有客户端会继续在初始化时同时连接 landing 和
+serving；两个角色使用同一个 database URI 时，也仍按原逻辑共享一个 session。
+
 ### 表环境
 
 `WT_SDK_PROFILE` 用于选择默认逻辑表。显式传入的 `GatewayConfig` 配置以及 `search(table="...")` 等方法参数具有更高优先级。

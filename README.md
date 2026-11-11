@@ -82,6 +82,31 @@ services:
       - .env
 ```
 
+### Serving-only clients
+
+Read-only gateways and delivery exporters that never access landing can opt in to
+a single serving connection:
+
+```python
+from wt_sdk import GatewayConfig, TableConfig, WTGatewayClient
+
+config = GatewayConfig(
+    tables=TableConfig(profile="production"),
+    serving_only=True,
+)
+client = WTGatewayClient(config)
+```
+
+This mode connects only to `WT_SDK_SERVING_DB_URI` (or its explicit/default
+value), so the process needs S3 access but no GPFS mount or landing connection.
+Any attempt to access a landing table raises `RuntimeError` instead of opening
+a fallback connection. The delivery export and dataset-count scripts enable
+this mode automatically.
+
+The default is `serving_only=False`: existing clients still eagerly connect to
+both landing and serving, including the existing shared-session behavior when
+both roles use the same database URI.
+
 ### Table Profiles
 
 `WT_SDK_PROFILE` selects default logical tables. Explicit `GatewayConfig`

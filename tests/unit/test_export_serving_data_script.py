@@ -73,6 +73,7 @@ def test_build_config_defaults_to_production_and_ignores_table_name_environment_
     assert config.tables.profile == "production"
     assert config.tables.landing_table == "wt_landing"
     assert config.tables.serving_table == "wt_serving"
+    assert config.serving_only is True
 
 
 def test_build_config_allows_explicit_serving_test():
@@ -81,6 +82,7 @@ def test_build_config_allows_explicit_serving_test():
     assert config.tables.profile == "test"
     assert config.tables.landing_table == "landing_test"
     assert config.tables.serving_table == "serving_test"
+    assert config.serving_only is True
 
 
 def test_export_writes_jsonl_shards_manifest_and_success_marker(tmp_path):

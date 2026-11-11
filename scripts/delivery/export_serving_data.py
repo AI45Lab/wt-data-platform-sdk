@@ -100,7 +100,8 @@ def build_config(serving_table: str = DEFAULT_SERVING_TABLE) -> GatewayConfig:
             profile="test" if is_test else "production",
             landing_table=TEST_LANDING_TABLE if is_test else DEFAULT_LANDING_TABLE,
             serving_table=serving_table,
-        )
+        ),
+        serving_only=True,
     )
 
 

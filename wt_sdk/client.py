@@ -72,19 +72,29 @@ class WTGatewayClient:
         # one dldb session per role and routes every call by table name via
         # session_for(). When both roles resolve to the same database
         # (disposable/test setups) only one connection is made and shared.
+        # Serving-only clients skip the landing connection entirely.
         tables_cfg = self.config.tables
-        self._landing_session = dldb.connect(
-            tables_cfg.landing_db_uri,
-            **self.config.to_dldb_config(tables_cfg.landing_db_uri),
-        )
-        if tables_cfg.serving_db_uri == tables_cfg.landing_db_uri:
-            self._serving_session = self._landing_session
-        else:
+        if self.config.serving_only:
+            self._landing_session = None
             self._serving_session = dldb.connect(
                 tables_cfg.serving_db_uri,
                 **self.config.to_dldb_config(tables_cfg.serving_db_uri),
             )
-        self._last_session = self._landing_session
+        else:
+            self._landing_session = dldb.connect(
+                tables_cfg.landing_db_uri,
+                **self.config.to_dldb_config(tables_cfg.landing_db_uri),
+            )
+            if tables_cfg.serving_db_uri == tables_cfg.landing_db_uri:
+                self._serving_session = self._landing_session
+            else:
+                self._serving_session = dldb.connect(
+                    tables_cfg.serving_db_uri,
+                    **self.config.to_dldb_config(tables_cfg.serving_db_uri),
+                )
+        self._last_session = (
+            self._serving_session if self.config.serving_only else self._landing_session
+        )
         self.landing_uri = self.config.tables.landing_uri()
         self.serving_uri = self.config.tables.serving_uri()
 
@@ -256,6 +266,8 @@ class WTGatewayClient:
         """
         if table_name is None:
             for session in (self._landing_session, self._serving_session):
+                if session is None:
+                    continue
                 tables = getattr(session, "tables", None)
                 if tables is not None:
                     tables.clear()
@@ -509,6 +521,11 @@ class WTGatewayClient:
             table_name == tables_cfg.landing_table
             or table_name in (DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE)
         ):
+            if self.config.serving_only:
+                raise RuntimeError(
+                    f"Cannot access landing table {table_name!r}: "
+                    "this client was configured with serving_only=True"
+                )
             session = self._landing_session
         elif (
             table_name == tables_cfg.serving_table
@@ -2195,7 +2212,9 @@ class WTGatewayClient:
         summary: Optional[Dict[str, Any]] = None
         # One dldb session per table role; the same object when both roles
         # share a database, in which case shutdown runs only once.
-        sessions = [self._landing_session]
+        sessions = []
+        if self._landing_session is not None:
+            sessions.append(self._landing_session)
         if self._serving_session is not self._landing_session:
             sessions.append(self._serving_session)
         for session in sessions:
