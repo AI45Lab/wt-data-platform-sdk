@@ -20,7 +20,7 @@ from wt_sdk import (
     TableConfig,
     WTGatewayClient,
 )
-from wt_sdk.core.schemas import JSON_STRING_TYPE as JSON_TYPE
+from wt_sdk.core.schemas import JSON_STRING_TYPE as JSON_TYPE, SERVING_SCHEMA
 
 class FakeSession:
     def __init__(self, *, attach_df_timing: bool, shutdown_result: Optional[Dict[str, Any]] = None):
@@ -1479,20 +1479,134 @@ def test_landing_partial_upsert_rejects_heterogeneous_field_sets(monkeypatch):
         client.upsert_landing_batch(records, insert_missing=False)
 
 
-def test_serving_upsert_rejects_partial_mode(monkeypatch):
+def test_serving_partial_upsert_patches_only_provided_columns(monkeypatch):
     fake_session = FakeSession(attach_df_timing=False)
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    monkeypatch.setattr(sdk_time, "now_ms", lambda: 1_900_000_000_789)
     client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+    fake_session.rows["serving_test"] = [
+        {
+            "dataset_type": "RL",
+            "id": "serving-1",
+            "job_id": "job-123",
+            "sub_job_id": "job-123#original",
+            "created_at": 100,
+            "dt": "1970-01-01",
+            "source_updated_at": 1_700_000_000_000,
+            "serving_updated_at": 1_800_000_000_000,
+            "analysis": '{"score":0.1}',
+            "training_results": '{"status":"old"}',
+            "response": '{"content":"wide response"}',
+            "messages": '{"content":"wide messages"}',
+        }
+    ]
     record = ServingRecord(
         dataset_type="RL",
         id="serving-1",
-        created_at=100,
+        created_at=999,
+        dt="2099-01-01",
+        source_updated_at=123,
+        serving_updated_at=456,
         job_id="job-123",
-        response='{"content":"first"}',
+        sub_job_id="job-123#placeholder",
+        analysis='{"score":0.9}',
+        training_results='{"status":"complete"}',
     )
 
-    with pytest.raises(ValueError, match="only supported for landing"):
-        client._upsert_batch("serving", [record], match_columns=None, insert_missing=False)
+    client.upsert_serving(record, insert_missing=False)
+
+    kwargs = fake_session.last_upsert_kwargs
+    assert kwargs["insert_missing"] is False
+    assert set(kwargs["datas"].columns) == {
+        "dataset_type",
+        "id",
+        "job_id",
+        "analysis",
+        "training_results",
+        "serving_updated_at",
+    }
+    stored = fake_session.rows["serving_test"][0]
+    assert stored["analysis"] == '{"score":0.9}'
+    assert stored["training_results"] == '{"status":"complete"}'
+    assert stored["response"] == '{"content":"wide response"}'
+    assert stored["messages"] == '{"content":"wide messages"}'
+    assert stored["created_at"] == 100
+    assert stored["dt"] == "1970-01-01"
+    assert stored["source_updated_at"] == 1_700_000_000_000
+    assert stored["sub_job_id"] == "job-123#original"
+    assert stored["serving_updated_at"] == 1_900_000_000_789
+    assert record.created_at == 999
+    assert record.source_updated_at == 123
+    assert record.serving_updated_at == 456
+    assert record.sub_job_id == "job-123#placeholder"
+
+
+def test_serving_partial_upsert_batch_ignores_missing_keys(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    monkeypatch.setattr(sdk_time, "now_ms", lambda: 1_900_000_000_790)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+    fake_session.rows["serving_test"] = [
+        {
+            "dataset_type": "RL",
+            "id": f"serving-{index}",
+            "job_id": "job-123",
+            "analysis": '{"score":0.1}',
+            "training_results": '{"status":"old"}',
+            "response": '{"content":"wide"}',
+        }
+        for index in range(2)
+    ]
+    records = [
+        ServingRecord(
+            dataset_type="RL",
+            id=record_id,
+            created_at=100,
+            job_id="job-123",
+            analysis='{"score":0.9}',
+            training_results=None,
+            serving_updated_at=456,
+        )
+        for record_id in ("serving-0", "serving-1", "serving-missing")
+    ]
+
+    client.upsert_serving_batch(records, insert_missing=False)
+
+    stored = fake_session.rows["serving_test"]
+    assert len(stored) == 2
+    assert {row["id"] for row in stored} == {"serving-0", "serving-1"}
+    assert {row["analysis"] for row in stored} == {'{"score":0.9}'}
+    assert all(row["training_results"] is None for row in stored)
+    assert {row["serving_updated_at"] for row in stored} == {1_900_000_000_790}
+    assert all(row["response"] == '{"content":"wide"}' for row in stored)
+    assert [record.serving_updated_at for record in records] == [456, 456, 456]
+
+
+def test_serving_partial_upsert_rejects_heterogeneous_field_sets(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+    records = [
+        ServingRecord(
+            dataset_type="RL",
+            id="serving-1",
+            created_at=100,
+            job_id="job-123",
+            analysis='{"score":0.9}',
+        ),
+        ServingRecord(
+            dataset_type="RL",
+            id="serving-2",
+            created_at=100,
+            job_id="job-123",
+            training_results='{"status":"complete"}',
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="partial serving upsert.*same set of fields"):
+        client.upsert_serving_batch(records, insert_missing=False)
+
+    assert fake_session.last_upsert_kwargs is None
 
 
 def test_landing_full_upsert_default_keeps_legacy_contract(monkeypatch):
@@ -1540,6 +1654,8 @@ def test_serving_upsert_uses_composite_match_key_and_refreshes_publish_time(monk
 
     assert fake_session.last_upsert_kwargs["table_name"] == "serving_test"
     assert fake_session.last_upsert_kwargs["columns"] == ["job_id", "id"]
+    assert fake_session.last_upsert_kwargs["insert_missing"] is None
+    assert list(fake_session.last_upsert_kwargs["datas"].columns) == SERVING_SCHEMA.names
     assert (
         fake_session.last_upsert_kwargs["datas"]["response"].dtype.pyarrow_dtype
         == JSON_TYPE

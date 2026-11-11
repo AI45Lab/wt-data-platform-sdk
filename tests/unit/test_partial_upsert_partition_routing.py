@@ -1,14 +1,14 @@
-"""Partial landing upserts must route per HASH bucket (dldb >= 1.1.11 fix).
+"""Partial upserts route per HASH bucket (dldb >= 1.1.11 fix).
 
-The new stack partitions landing by sub_job_id (not job_id like master), so
-the per-bucket routing groups on the model-backfilled shard id and one dldb
-upsert call covers exactly one physical bucket.
+Landing hashes sub_job_id and serving hashes job_id. Each dldb upsert call
+covers exactly one physical bucket and only that bucket's rows.
 """
 
 import wt_sdk.client as client_module
+from dldb.utils import stable_hash
 from wt_sdk import WTGatewayClient
 from wt_sdk.config import GatewayConfig, TableConfig
-from wt_sdk.models import LandingRecord
+from wt_sdk.models import LandingRecord, ServingRecord
 from wt_sdk.sharding import landing_bucket_for, plan_shards
 
 
@@ -33,7 +33,14 @@ class RecordingSession:
 def _client_with_recorder(monkeypatch):
     session = RecordingSession()
     monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: session)
-    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    client = WTGatewayClient(
+        GatewayConfig(
+            tables=TableConfig(
+                landing_table="landing_test",
+                serving_table="serving_test",
+            )
+        )
+    )
     return client, session
 
 
@@ -50,6 +57,28 @@ def _record(job_id, record_id, *, sub_job_id=None):
         step_reward=0.5,
         **kwargs,
     )
+
+
+def _serving_record(job_id, record_id):
+    return ServingRecord(
+        dataset_type="RL",
+        id=record_id,
+        created_at=100,
+        job_id=job_id,
+        sub_job_id=f"{job_id}#ignored-for-serving-routing",
+        analysis='{"status":"complete"}',
+    )
+
+
+def _serving_jobs_in_distinct_buckets():
+    first = "serving-route-job-0"
+    first_bucket = stable_hash(first) % 128
+    second = next(
+        f"serving-route-job-{index}"
+        for index in range(1, 130)
+        if stable_hash(f"serving-route-job-{index}") % 128 != first_bucket
+    )
+    return first, second
 
 
 def test_partial_landing_upsert_splits_by_hash_bucket(monkeypatch):
@@ -117,6 +146,64 @@ def test_full_landing_upsert_stays_unpartitioned(monkeypatch):
     # Legacy contract: one plain call, no partition=, no insert_missing flag.
     assert len(session.upsert_calls) == 1
     call = session.upsert_calls[0]
+    assert call["partition"] is None
+    assert call["kwargs"] == {}
+    assert len(call["datas"]) == 2
+
+
+def test_partial_serving_upsert_splits_by_job_id_hash_bucket(monkeypatch):
+    client, session = _client_with_recorder(monkeypatch)
+    fallback_keys = []
+
+    def serving_metadata(table_name, fallback_key):
+        fallback_keys.append(fallback_key)
+        assert table_name == "serving_test"
+        return {
+            "partition_column": "job_id",
+            "partition_type": "HASH",
+            "partitions": 128,
+        }
+
+    monkeypatch.setattr(client, "_get_partition_metadata_for_table", serving_metadata)
+    job_a, job_b = _serving_jobs_in_distinct_buckets()
+
+    client.upsert_serving_batch(
+        [
+            _serving_record(job_a, "serving-1"),
+            _serving_record(job_b, "serving-2"),
+        ],
+        insert_missing=False,
+    )
+
+    assert fallback_keys == ["job_id"]
+    assert len(session.upsert_calls) == 2
+    routed = {}
+    for call in session.upsert_calls:
+        assert call["table_name"] == "serving_test"
+        assert call["kwargs"] == {"insert_missing": False}
+        assert isinstance(call["partition"], int)
+        assert "sub_job_id" not in call["datas"].columns
+        job_ids = list(call["datas"]["job_id"])
+        assert len(job_ids) == 1
+        assert stable_hash(job_ids[0]) % 128 == call["partition"]
+        routed[call["partition"]] = job_ids[0]
+    assert set(routed.values()) == {job_a, job_b}
+
+
+def test_full_serving_upsert_stays_unpartitioned(monkeypatch):
+    client, session = _client_with_recorder(monkeypatch)
+    job_a, job_b = _serving_jobs_in_distinct_buckets()
+
+    client.upsert_serving_batch(
+        [
+            _serving_record(job_a, "serving-1"),
+            _serving_record(job_b, "serving-2"),
+        ],
+    )
+
+    assert len(session.upsert_calls) == 1
+    call = session.upsert_calls[0]
+    assert call["table_name"] == "serving_test"
     assert call["partition"] is None
     assert call["kwargs"] == {}
     assert len(call["datas"]) == 2

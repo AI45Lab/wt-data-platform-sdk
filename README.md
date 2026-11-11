@@ -353,14 +353,23 @@ keep IDs globally unique and must never move an existing ID to another `job_id`.
 The append/add `ingest_serving(_batch)` methods remain available and
 also stamp `serving_updated_at`.
 
-For landing reward or status patches that do not need to rewrite wide payload
-columns, pass `insert_missing=False` to `upsert_landing()` or
-`upsert_landing_batch()`. The SDK sends only the fields supplied by the
-`LandingRecord` (plus the match columns and refreshed `source_updated_at`) to
-dldb. Existing matching rows are patched in place; missing IDs are ignored and
-new HASH buckets are not created. All records in one batch must contain the
-same set of supplied fields. This mode is landing-only. Serving ETL continues
-to use the default complete-row upsert:
+For narrow patches that do not need to rewrite wide payload columns, pass
+`insert_missing=False` to `upsert_landing()`, `upsert_landing_batch()`,
+`upsert_serving()`, or `upsert_serving_batch()`. Existing matching rows are
+patched in place; unmatched keys are ignored and new HASH buckets are not
+created. All records in one batch must contain the same set of supplied fields.
+An explicitly supplied `None` clears that field, while omitted fields retain
+their existing values.
+
+For landing, the SDK submits the supplied `LandingRecord` fields plus the match
+columns, refreshed `source_updated_at`, and the `sub_job_id` routing column.
+For serving, only explicitly supplied fields are patched, except that
+`created_at`, `dt`, `source_updated_at`, and `sub_job_id` are protected (unless
+one is explicitly used as a custom match key). The default match keys are
+`job_id` + `id`; `job_id` is also retained for HASH routing. A caller-supplied
+`serving_updated_at` is ignored: the SDK generates one publication timestamp
+per batch and always submits it. Other supplied fields, including JSON strings
+such as `analysis` and `training_results`, are submitted normally:
 
 ```python
 with WTGatewayClient() as client:
@@ -369,10 +378,24 @@ with WTGatewayClient() as client:
         match_columns=("job_id", "id"),
         insert_missing=False,
     )
+
+    analysis_patch = ServingRecord(
+        dataset_type="RL",
+        id="serving-1",
+        job_id="evaluation-run-001",
+        created_at=0,  # Required by the model; protected in serving partial mode.
+        analysis='{"score": 0.9}',
+        training_results='{"status": "complete"}',
+    )
+    client.upsert_serving(analysis_patch, insert_missing=False)
 ```
 
 The default remains `insert_missing=True` for backward compatibility: an
 unmatched row is inserted and a matched row is replaced by the complete row.
+ETL should keep this complete-row publication behavior. Partial updates do not
+establish field ownership or protect fields from later complete-row writes: a
+subsequent full-row ETL republish can still overwrite serving-only fields such
+as `analysis` or `training_results`.
 
 The repository now includes the ETL v1 engine, durable per-bucket checkpoints,
 manual backfill modes, and the built-in chosen-trace/tag stages. Contributors
@@ -526,7 +549,7 @@ partitions.
 | Method | Purpose |
 | --- | --- |
 | ingest_serving(record) / ingest_serving_batch(records) | Append processed serving records and stamp `serving_updated_at`. |
-| upsert_serving(record, *, match_columns=None) / upsert_serving_batch(records, *, match_columns=None) | ETL publication by dldb match keys (default `job_id` + `id`); preserve `source_updated_at` and refresh `serving_updated_at`. |
+| upsert_serving(record, *, match_columns=None, insert_missing=True) / upsert_serving_batch(records, *, match_columns=None, insert_missing=True) | Complete ETL publication by dldb match keys (default `job_id` + `id`); preserve `source_updated_at` and refresh `serving_updated_at`. With `insert_missing=False`, patch only supplied fields and ignore unmatched keys. |
 | query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False) | Query serving with the same filtering and HASH pruning behavior; always return `List[dict]`. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
 | search(query, ..., deserialize_json=False, checkout_latest=True) | Search serving `search_text`, optionally constrained by tags/SQL filters; user `%`, `_`, and `\\` characters are treated literally. |

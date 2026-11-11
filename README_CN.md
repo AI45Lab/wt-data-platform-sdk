@@ -336,12 +336,43 @@ ingest/update”。重复 upsert 的业务内容最终一致，但 `serving_upda
 全局唯一，且已有 ID 不能迁移到另一个 `job_id`。保留 append/add 语义的
 `ingest_serving(_batch)` 仍可使用，也会刷新 `serving_updated_at`。
 
-对于只更新 reward、状态等窄字段、无需重写 `messages` 等宽 payload 的 landing
-记录，可以在 `upsert_landing()` 或 `upsert_landing_batch()` 中传入
-`insert_missing=False`。SDK 只会提交 `LandingRecord` 中由调用方提供的字段，另加匹配键
-和刷新的 `source_updated_at`；已存在的行只更新这些字段，不存在的 ID 会被忽略，也不会
-新建 HASH bucket。同一个 batch 中的记录必须提供相同字段集合。该模式只用于 landing；
-ETL serving 继续使用默认的完整行 upsert。
+对于只更新 reward、状态、`analysis` 等窄字段、无需重写 `messages` 等宽 payload 的
+记录，可以在 `upsert_landing()`、`upsert_landing_batch()`、`upsert_serving()` 或
+`upsert_serving_batch()` 中传入 `insert_missing=False`。已存在的匹配行只会被局部更新；
+不存在的匹配键会被忽略，也不会新建 HASH bucket。同一个 batch 中的记录必须提供相同
+字段集合。显式传入 `None` 会清空对应字段，未提供字段保持原值。
+
+Landing 局部更新会提交调用方提供的 `LandingRecord` 字段，另加匹配键、刷新的
+`source_updated_at` 和用于路由的 `sub_job_id`。Serving 局部更新只 patch 显式提供的
+字段，但保护 `created_at`、`dt`、`source_updated_at`、`sub_job_id` 不被覆盖（其中某个
+字段若被显式用作自定义匹配键，仍会保留）。默认匹配键为 `job_id` + `id`，同时始终保留
+`job_id` 用于 HASH 路由。调用方提供的 `serving_updated_at` 会被忽略，由 SDK 为整个
+batch 生成同一个发布时间并始终提交。其他显式字段正常提交，包括 JSON 字符串
+`analysis`、`training_results`：
+
+```python
+with WTGatewayClient() as client:
+    client.upsert_landing_batch(
+        reward_patches,
+        match_columns=("job_id", "id"),
+        insert_missing=False,
+    )
+
+    analysis_patch = ServingRecord(
+        dataset_type="RL",
+        id="serving-1",
+        job_id="evaluation-run-001",
+        created_at=0,  # model 必填；serving 局部更新不会 patch 该字段。
+        analysis='{"score": 0.9}',
+        training_results='{"status": "complete"}',
+    )
+    client.upsert_serving(analysis_patch, insert_missing=False)
+```
+
+为保持向后兼容，默认仍是 `insert_missing=True`：匹配键不存在时插入新行，存在时用完整行
+替换。ETL 应继续使用默认的完整行发布。局部更新接口不建立字段所有权，也不保护字段免受
+后续完整行写入影响；之后的完整行 ETL republish 仍可能覆盖 serving-only 的
+`analysis`、`training_results` 等字段。
 
 仓库现已包含 ETL v1 引擎、按 HASH bucket 持久化的 checkpoint、手动 backfill 模式，
 以及内置的 chosen-trace/tags stage。贡献者必须遵守
@@ -482,7 +513,7 @@ with WTGatewayClient() as client:
 | --- | --- |
 | `ingest_serving(record)` / `ingest_serving_batch(records)` | append 写入 serving，并刷新 `serving_updated_at`。 |
 | `upsert_landing(record, *, match_columns=None, insert_missing=True)` / `upsert_landing_batch(records, *, match_columns=None, insert_missing=True)` | 默认通过 dldb upsert 完整 landing 行；传 `insert_missing=False` 时只 patch 已提供字段，忽略不存在的 ID；默认按 `job_id` + `id` 匹配。 |
-| `upsert_serving(record, *, match_columns=None)` / `upsert_serving_batch(records, *, match_columns=None)` | ETL 通过 dldb 匹配键发布完整记录，默认按 `job_id` + `id` 匹配；保留 `source_updated_at` 并刷新 `serving_updated_at`。 |
+| `upsert_serving(record, *, match_columns=None, insert_missing=True)` / `upsert_serving_batch(records, *, match_columns=None, insert_missing=True)` | 默认通过 dldb 匹配键发布完整 ETL 记录（默认 `job_id` + `id`），保留 `source_updated_at` 并刷新 `serving_updated_at`；传 `insert_missing=False` 时只 patch 已提供字段并忽略不存在的匹配键。 |
 | `query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
 | `search(query, ..., deserialize_json=False, checkout_latest=True)` | 只检索 serving 的 `search_text`，可额外使用 tags、dataset type 或 SQL 条件过滤。 |
