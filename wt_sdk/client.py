@@ -1878,12 +1878,15 @@ class WTGatewayClient:
         table: Optional[str] = None,
         deserialize_json: bool = False,
         checkout_latest: bool = True,
+        columns: Optional[List[str]] = None,
     ) -> Union[pd.DataFrame, Iterator[pd.DataFrame]]:
         """Filter/search rows and return a DataFrame or one-frame iterator.
 
         Vector search is unsupported. Keyword search always targets search_text.
         LIKE metacharacters in the query are treated literally. Searches use the
-        latest table snapshot by default for long-lived serving clients.
+        latest table snapshot by default for long-lived serving clients. Pass
+        ``columns`` to project only the fields needed by a list view; the default
+        continues to return the complete row.
         """
         table_name = table or self.config.tables.serving_table
         if isinstance(query, list):
@@ -1922,7 +1925,7 @@ class WTGatewayClient:
             table_name,
             query=final_filter,
             limit=limit,
-            columns=None,
+            columns=columns,
             partitions=partitions,
             partition_cond=None,
             checkout_latest=checkout_latest,
@@ -1943,6 +1946,7 @@ class WTGatewayClient:
         table: Optional[str] = None,
         exclude_none: bool = True,
         deserialize_json: bool = False,
+        checkout_latest: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Return one row by ID, optionally decoding JSON columns."""
         table_name = table or self.config.tables.serving_table
@@ -1953,6 +1957,7 @@ class WTGatewayClient:
             table_name,
             query=filter_query,
             limit=1,
+            checkout_latest=checkout_latest,
         )
 
         if len(results) > 0:

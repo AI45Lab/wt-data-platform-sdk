@@ -796,6 +796,7 @@ def test_keyword_search_only_targets_search_text(monkeypatch):
         "(search_text LIKE '%example%' ESCAPE '\\')"
     )
     assert fake_session.last_filter_kwargs["checkout_latest"] is True
+    assert fake_session.last_filter_kwargs["columns"] is None
 
     client.search("100%_done\\now", checkout_latest=False)
     assert fake_session.last_filter_kwargs["query"] == (
@@ -805,6 +806,9 @@ def test_keyword_search_only_targets_search_text(monkeypatch):
 
     client.search("")
     assert fake_session.last_filter_kwargs["query"] == "id IS NOT NULL"
+
+    client.search("", columns=["id", "job_id", "job_name"])
+    assert fake_session.last_filter_kwargs["columns"] == ["id", "job_id", "job_name"]
 
 
 def test_public_row_read_apis_can_deserialize_json_columns(monkeypatch):
@@ -860,7 +864,9 @@ def test_public_row_read_apis_can_deserialize_json_columns(monkeypatch):
     by_id_result = client.get_by_id(
         "record-json",
         deserialize_json=True,
+        checkout_latest=True,
     )
+    assert fake_session.last_filter_kwargs["checkout_latest"] is True
     max_result = client.get_max_created_at(
         "dataset_type = 'RL' AND job_id = 'job-json'",
         deserialize_json=True,

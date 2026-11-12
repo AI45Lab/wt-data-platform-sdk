@@ -577,9 +577,9 @@ partitions.
 | upsert_serving(record, *, match_columns=None, insert_missing=True) / upsert_serving_batch(records, *, match_columns=None, insert_missing=True) | Complete ETL publication by dldb match keys (default `job_id` + `id`); preserve `source_updated_at` and refresh `serving_updated_at`. With `insert_missing=False`, patch only supplied fields and ignore unmatched keys. |
 | query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False) | Query serving with the same filtering and HASH pruning behavior; always return `List[dict]`. |
 | count_serving(partition=None) / delete_serving(filter_query) | Operate on serving data. |
-| search(query, ..., deserialize_json=False, checkout_latest=True) | Search serving `search_text`, optionally constrained by tags/SQL filters; user `%`, `_`, and `\\` characters are treated literally. |
+| search(query, ..., deserialize_json=False, checkout_latest=True, columns=None) | Search serving `search_text`, optionally constrained by tags/SQL filters; user `%`, `_`, and `\\` characters are treated literally. Optionally project only list-view columns; the default returns complete rows. |
 | get_tags_distribution() | Return serving tag frequencies. |
-| get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False) | Return one compact dictionary from serving by default, or exactly one named table. |
+| get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False, checkout_latest=False) | Return one compact dictionary from serving by default, or exactly one named table; long-lived readers can opt into the latest snapshot. |
 | pull_data(..., table=None, deserialize_json=False) / iter_data_batches(..., table=None, deserialize_json=False) | Read landing by default, or a named table, with manual-page or automatic-batch iteration. |
 | export_data_batches(filter_query="", ..., table=None, deserialize_json=False) | Reliably export a fixed ID manifest from serving by default; validates each exact-ID batch. |
 

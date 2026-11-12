@@ -539,9 +539,9 @@ with WTGatewayClient() as client:
 | `upsert_serving(record, *, match_columns=None, insert_missing=True)` / `upsert_serving_batch(records, *, match_columns=None, insert_missing=True)` | 默认通过 dldb 匹配键发布完整 ETL 记录（默认 `job_id` + `id`），保留 `source_updated_at` 并刷新 `serving_updated_at`；传 `insert_missing=False` 时只 patch 已提供字段并忽略不存在的匹配键。 |
 | `query_data(filter_query, ..., table=serving_table, exclude_none=True, deserialize_json=False)` | 使用相同的过滤和 HASH 剪枝行为查询 serving；始终返回 `List[dict]`。 |
 | `count_serving(partition=None)` / `delete_serving(filter_query)` | 对 serving 数据执行统计或删除。 |
-| `search(query, ..., deserialize_json=False, checkout_latest=True)` | 只检索 serving 的 `search_text`，可额外使用 tags、dataset type 或 SQL 条件过滤。 |
+| `search(query, ..., deserialize_json=False, checkout_latest=True, columns=None)` | 只检索 serving 的 `search_text`，可额外使用 tags、dataset type 或 SQL 条件过滤；可通过 `columns` 只返回列表所需字段，默认仍返回完整行。 |
 | `get_tags_distribution()` | 返回 serving 标签频次。 |
-| `get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False)` | 默认从 serving 返回一个精简字典，或精确查询一个指定表。 |
+| `get_by_id(record_id, table=None, exclude_none=True, deserialize_json=False, checkout_latest=False)` | 默认从 serving 返回一个精简字典，或精确查询一个指定表；长期驻留的读取服务可显式启用最新 snapshot。 |
 | `pull_data(..., table=None, deserialize_json=False)` / `iter_data_batches(..., table=None, deserialize_json=False)` | 默认读取 landing，或按指定表进行手动单页/自动分批读取。 |
 | `export_data_batches(filter_query="", ..., table=None, deserialize_json=False)` | 默认从 serving 可靠导出固定 ID 清单，并校验每个精确 ID batch。 |
 
