@@ -54,9 +54,10 @@ def test_cch_is_removed_from_text_content_blocks():
     session = [
         _row("row-1", 1, [{"role": "system", "content": first}, *_turns(1)]),
         _row("row-2", 2, [{"role": "system", "content": second}, *_turns(3)]),
+        _row("row-3", 3, [{"role": "system", "content": first}, *_turns(5)]),
     ]
 
-    assert _detect_trainable_record_ids(session) == {"row-2"}
+    assert _detect_trainable_record_ids(session) == {"row-3"}
 
 
 def test_rows_differing_only_in_cch_form_one_chain():
