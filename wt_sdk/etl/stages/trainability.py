@@ -48,17 +48,16 @@ class UpdateIsTrainableStage(ETLStage):
     structurally separated trajectory. A later strict prefix of an active chain
     tail is treated as a retry reset, so the abandoned longer row is not a
     trainable tail. Identical message snapshots are separate occurrences rather
-    than append operations. In a multi-chain session, chains shorter than
-    ``MIN_SIDE_CHAIN_LENGTH`` records are treated as short side branches or
-    subagents and are not trainable; a single-chain session is never a side
-    chain. Filtering error rows does not prevent the remaining rows from being
+    than append operations. Chains shorter than
+    ``MIN_SIDE_CHAIN_LENGTH`` records are not trainable, including when the session
+    contains only one chain. Filtering error rows does not prevent the remaining rows from being
     processed. Apart from masking the harness-managed date and ``cch`` values,
     this stage assigns no semantic meaning to message contents and copies the
     completion record's non-null ``reward`` to every selected row.
     """
 
     name = "update_is_trainable"
-    version = "9"
+    version = "10"
     required_fields = (
         "id",
         "step_id",
@@ -261,10 +260,10 @@ def _detect_trainable_record_ids(
         _annotate_chain_evidence(chains, diagnostics)
 
     # Every append-only chain tail contains the complete messages of one
-    # structurally separated trajectory. In a multi-chain session, short side
-    # branches are subagent-like and carry no trainable trajectory.
+    # structurally separated trajectory. Chains shorter than the minimum are excluded even
+    # when they are the only chain in the session.
     return {
-        chain[-1] for chain in chains if not _is_short_side_chain(chain, len(chains))
+        chain[-1] for chain in chains if not _is_short_side_chain(chain)
     }
 
 
@@ -307,7 +306,7 @@ def _annotate_chain_evidence(
     diagnostics: dict[str, dict[str, Any]],
 ) -> None:
     for chain_index, chain in enumerate(chains):
-        excluded = _is_short_side_chain(chain, len(chains))
+        excluded = _is_short_side_chain(chain)
         for record_id in chain:
             diagnostics[record_id].update(
                 {
@@ -327,10 +326,10 @@ def _annotate_chain_evidence(
             )
 
 
-def _is_short_side_chain(chain: Sequence[str], chain_count: int) -> bool:
-    """Return whether a multi-chain branch is shorter than the threshold."""
+def _is_short_side_chain(chain: Sequence[str]) -> bool:
+    """Return whether a chain is shorter than the threshold."""
 
-    return chain_count > 1 and len(chain) < MIN_SIDE_CHAIN_LENGTH
+    return len(chain) < MIN_SIDE_CHAIN_LENGTH
 
 
 def _is_eligible_trainability_record(record: Record) -> bool:
