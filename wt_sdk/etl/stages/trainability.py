@@ -16,7 +16,7 @@ from ..stage import ETLStage, Record, Session, SessionPatch, StageContext
 MIN_SIDE_CHAIN_LENGTH = 3
 
 _STREAM_FLAG_KEYS = ("stream", "streaming")
-_FINISH_REASON_KEYS = ("finish_reason", "finishReason")
+_FINISH_REASON_KEYS = ("finish_reason", "finishReason", "stop_reason", "stopReason")
 _HARNESS_CURRENT_DATE_PATTERN = re.compile(
     r"(?P<prefix><system-reminder>\s*"
     r"As you answer the user[’']s questions, you can use the following context:\s*"
@@ -57,11 +57,12 @@ class UpdateIsTrainableStage(ETLStage):
     """
 
     name = "update_is_trainable"
-    version = "10"
+    version = "11"
     required_fields = (
         "id",
         "step_id",
         "messages",
+        "response",
         "is_session_completed",
         "meta_json",
         "reward",
@@ -357,13 +358,13 @@ def _has_non_200_status_code(record: Record) -> bool:
 
 
 def _is_incomplete_stream_request(record: Record) -> bool:
-    """Return whether any streaming request or response payload is incomplete.
+    """Return whether a streaming row has no terminal response marker.
 
-    Providers place request and response metadata in different shapes. Decode
-    nested JSON strings and inspect all nested objects, accepting both boolean
-    and string stream markers and both snake_case and camelCase finish-reason
-    keys. A stream with no finish reason at all is incomplete, as is a finish
-    reason represented by null, ``"null"``, or an empty string.
+    Prefer the normalized response, then the raw metadata response, then legacy
+    metadata. Use the first source containing finish/stop-reason keys, so a
+    telemetry placeholder cannot veto a completed response (or rescue an
+    explicitly incomplete one). Within that source, a non-empty terminal marker
+    takes precedence over null placeholders from earlier streaming chunks.
     """
 
     payloads: list[object] = [record.get("meta_json"), record.get("response")]
@@ -378,12 +379,24 @@ def _is_incomplete_stream_request(record: Record) -> bool:
         for key in _STREAM_FLAG_KEYS
     ):
         return False
-    finish_reasons = [
+    metadata = _decode_json_object(record.get("meta_json"))
+    response_payloads = (
+        record.get("response"),
+        metadata.get("response") if metadata is not None else None,
+    )
+    for payload in response_payloads:
+        finish_reasons = _finish_reasons(_nested_json_objects(payload))
+        if finish_reasons:
+            return all(_is_empty_finish_reason(value) for value in finish_reasons)
+
+    # Older rows may carry completion metadata only in env_state or telemetry.
+    return all(_is_empty_finish_reason(value) for value in _finish_reasons(objects))
+
+
+def _finish_reasons(objects: Sequence[Mapping[str, object]]) -> list[object]:
+    return [
         item[key] for item in objects for key in _FINISH_REASON_KEYS if key in item
     ]
-    return not finish_reasons or any(
-        _is_empty_finish_reason(value) for value in finish_reasons
-    )
 
 
 def _nested_json_objects(value: object) -> list[Mapping[str, object]]:
@@ -394,7 +407,7 @@ def _nested_json_objects(value: object) -> list[Mapping[str, object]]:
         return []
     objects: list[Mapping[str, object]] = [decoded]
     for child in decoded.values():
-        if isinstance(child, list):
+        if isinstance(child, (list, tuple)):
             objects.extend(
                 nested for item in child for nested in _nested_json_objects(item)
             )
