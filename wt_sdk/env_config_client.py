@@ -67,6 +67,7 @@ UPDATABLE_FIELDS = (
     "job_id",
     "group_id",
     "finished",
+    "is_successed",
     "env_params",
     "image",
     "description",
@@ -313,6 +314,7 @@ class EnvConfigManager:
             "primary_category": cfg.get("primary_category"),
             "secondary_category": cfg.get("secondary_category"),
             "env_meta_data": cfg.get("env_meta_data"),
+            "is_successed": cfg.get("is_successed"),
         }
 
     def save_config(
@@ -518,6 +520,11 @@ class EnvConfigManager:
                     "primary_category": row.get("primary_category"),
                     "secondary_category": row.get("secondary_category"),
                     "env_meta_data": row.get("env_meta_data"),
+                    "is_successed": (
+                        None
+                        if pd.isna(row.get("is_successed"))
+                        else bool(row["is_successed"])
+                    ),
                 }
                 configs.append(config)
 
@@ -570,6 +577,11 @@ class EnvConfigManager:
                     "primary_category": row.get("primary_category"),
                     "secondary_category": row.get("secondary_category"),
                     "env_meta_data": row.get("env_meta_data"),
+                    "is_successed": (
+                        None
+                        if pd.isna(row.get("is_successed"))
+                        else bool(row["is_successed"])
+                    ),
                 }
                 configs.append(config)
 
@@ -892,7 +904,7 @@ class EnvConfigManager:
                 non-empty; an empty filter would update the whole table.
             updates: field -> new value applied to every matched row.
                 Allowed fields are UPDATABLE_FIELDS (env_name, job_id,
-                group_id, finished, env_params, image, description,
+                group_id, finished, is_successed, env_params, image, description,
                 primary_category, secondary_category, env_meta_data); identity
                 fields (id, env_id, created_at) are rejected. dict env_params
                 values are JSON-encoded automatically.

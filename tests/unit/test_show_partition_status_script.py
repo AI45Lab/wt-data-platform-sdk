@@ -118,6 +118,7 @@ def test_env_config_tables_use_their_own_btree_index_set():
         "job_id_idx": "BTREE",
         "group_id_idx": "BTREE",
         "finished_idx": "BTREE",
+        "is_successed_idx": "BTREE",
     }
     assert "sub_job_ids_idx" not in test_env
 

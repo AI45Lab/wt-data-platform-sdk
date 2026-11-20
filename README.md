@@ -605,11 +605,13 @@ explicit_envs = EnvConfigManager(table_name="wt_env_config")
 ```
 
 Environment configs also support the optional string fields `description`,
-`primary_category`, `secondary_category`, and `env_meta_data`. They can be
-provided to `save_config()` / `upsert_config()` and changed through the update
-APIs; `get_env_configs()` and `get_all_env_configs()` return them unchanged.
-In particular, `env_meta_data` is stored and returned as a string, not
-automatically JSON-encoded or decoded like `env_params`.
+`primary_category`, `secondary_category`, and `env_meta_data`, plus the nullable
+boolean `is_successed`. They can be provided to `save_config()` /
+`upsert_config()` and changed through the update APIs; `get_env_configs()` and
+`get_all_env_configs()` return them. `is_successed` returns `True`, `False`, or
+`None` when no success status has been recorded, and has a configured BTREE
+index for filtering. In particular, `env_meta_data` is stored and returned as a
+string, not automatically JSON-encoded or decoded like `env_params`.
 
 | Method | Purpose |
 | --- | --- |

@@ -70,6 +70,7 @@ def test_update_configs_where_accepts_env_metadata_fields(monkeypatch):
         "primary_category": "control",
         "secondary_category": "classic",
         "env_meta_data": '{"version":"v1"}',
+        "is_successed": True,
     }
 
     n = manager.update_configs_where("env_name = 'A'", updates)

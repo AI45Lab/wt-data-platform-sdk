@@ -75,13 +75,18 @@ class FakeSession:
         pass
 
 
-def test_maintain_creates_missing_job_index_per_hash_bucket():
+def test_maintain_creates_missing_indexes_per_hash_bucket():
     session = FakeSession(
         ["env_name_idx", "env_id_idx", "group_id_idx", "finished_idx"]
     )
     summary = script.maintain_env_config_indexes(session)
 
-    assert session.created == [("job_id", "BTREE", 3), ("job_id", "BTREE", 7)]
+    assert session.created == [
+        ("job_id", "BTREE", 3),
+        ("is_successed", "BTREE", 3),
+        ("job_id", "BTREE", 7),
+        ("is_successed", "BTREE", 7),
+    ]
     assert session.optimize_calls == [
         (script.TEST_ENV_CONFIG_TABLE, 3),
         (script.TEST_ENV_CONFIG_TABLE, 7),
@@ -97,9 +102,21 @@ def test_maintain_creates_missing_job_index_per_hash_bucket():
             "index_type": "BTREE",
         },
         {
+            "partition": 3,
+            "column": "is_successed",
+            "index_name": "is_successed_idx",
+            "index_type": "BTREE",
+        },
+        {
             "partition": 7,
             "column": "job_id",
             "index_name": "job_id_idx",
+            "index_type": "BTREE",
+        },
+        {
+            "partition": 7,
+            "column": "is_successed",
+            "index_name": "is_successed_idx",
             "index_type": "BTREE",
         },
     ]
@@ -130,7 +147,10 @@ def test_legacy_unpartitioned_table_keeps_whole_table_path():
     )
     summary = script.maintain_env_config_indexes(session)
 
-    assert session.created == [("job_id", "BTREE", None)]
+    assert session.created == [
+        ("job_id", "BTREE", None),
+        ("is_successed", "BTREE", None),
+    ]
     assert session.optimize_calls == [(script.TEST_ENV_CONFIG_TABLE, None)]
     assert summary["partition_type"] is None
     assert summary["targets"] == ["None"]

@@ -1861,6 +1861,7 @@ def test_env_config_manager_round_trips_metadata_fields(monkeypatch):
         "primary_category": "control",
         "secondary_category": "classic",
         "env_meta_data": '{"version":"v1"}',
+        "is_successed": True,
     }
 
     manager.save_config(
@@ -1878,6 +1879,7 @@ def test_env_config_manager_round_trips_metadata_fields(monkeypatch):
     assert all_configs[0]["primary_category"] == "control"
     assert all_configs[0]["secondary_category"] == "classic"
     assert all_configs[0]["env_meta_data"] == '{"version":"v1"}'
+    assert all_configs[0]["is_successed"] is True
 
     manager.upsert_config(
         {
@@ -1887,6 +1889,7 @@ def test_env_config_manager_round_trips_metadata_fields(monkeypatch):
             "primary_category": "rl",
             "secondary_category": "control",
             "env_meta_data": "updated-metadata",
+            "is_successed": False,
         }
     )
     updated = manager.get_env_configs(limit=1)[0]
@@ -1894,6 +1897,7 @@ def test_env_config_manager_round_trips_metadata_fields(monkeypatch):
     assert updated["primary_category"] == "rl"
     assert updated["secondary_category"] == "control"
     assert updated["env_meta_data"] == "updated-metadata"
+    assert updated["is_successed"] is False
 
 
 # ==================== Job splitting: sub_job_id behavior ====================

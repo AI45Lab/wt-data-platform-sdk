@@ -21,6 +21,7 @@ Schema matches the original SQLite schema from evaluation platform:
 - primary_category: Primary environment category.
 - secondary_category: Secondary environment category.
 - env_meta_data: Additional environment metadata (string).
+- is_successed: Optional environment success status.
 """
 import pyarrow as pa
 
@@ -62,6 +63,7 @@ EVALUATION_ENV_SCHEMA = pa.schema([
     pa.field('primary_category', pa.string(), nullable=True),
     pa.field('secondary_category', pa.string(), nullable=True),
     pa.field('env_meta_data', pa.string(), nullable=True),
+    pa.field('is_successed', pa.bool_(), nullable=True),
 ])
 
 
@@ -81,4 +83,5 @@ SCALAR_INDEX_COLUMNS = [
     "job_id",     # For job-scoped config reads and cleanup
     "group_id",   # For grouping queries (GRPO)
     "finished",   # For filtering by completion status
+    "is_successed",  # For filtering by environment success status
 ]
