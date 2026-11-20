@@ -36,7 +36,7 @@ REASONS = {
     "superseded_in_chain": "同链后续记录通过严格前缀延伸或回退替代了此记录。",
     "short_side_chain": "多链 session 中链长小于 20 的子链，被 stage 的短子链规则排除；不证明它是真实 subagent。",
     "non_200_status": "meta_json 顶层、env_state 或 telemetry 含显式非 200 状态码，先行排除。",
-    "incomplete_stream_request": "流式请求缺少 finish_reason，先行排除。",
+    "incomplete_stream_request": "流式请求在优先采用的响应或元数据中缺少有效结束原因（finish_reason / stop_reason），先行排除。",
     "selected_max_eligible_step": "降级模式选择过滤非 200 后 step_id 最大的一条。",
     "not_max_eligible_step": "降级模式未选中此记录。",
 }

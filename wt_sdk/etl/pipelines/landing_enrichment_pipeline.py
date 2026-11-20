@@ -10,7 +10,7 @@ def build_pipeline() -> PipelineDefinition:
 
     return PipelineDefinition(
         name="landing_enrichment_pipeline",
-        version="6",
+        version="7",
         mode=PipelineMode.LANDING,
         stages=(UpdateIsTrainableStage(), FreeCotStage()),
     )
