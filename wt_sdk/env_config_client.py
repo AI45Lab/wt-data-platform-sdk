@@ -62,7 +62,18 @@ def _decode_sub_job_ids(raw: Any) -> Optional[List[str]]:
 # created_at) are excluded so a query-driven update can never move or
 # re-identify a row. sub_job_ids is deliberately excluded too: it is written
 # once by the job creator at task creation and read-only afterwards.
-UPDATABLE_FIELDS = ("env_name", "job_id", "group_id", "finished", "env_params", "image")
+UPDATABLE_FIELDS = (
+    "env_name",
+    "job_id",
+    "group_id",
+    "finished",
+    "env_params",
+    "image",
+    "description",
+    "primary_category",
+    "secondary_category",
+    "env_meta_data",
+)
 
 
 class EnvConfigManager:
@@ -298,6 +309,10 @@ class EnvConfigManager:
             "image": cfg.get("image"),
             "created_at": cfg.get("created_at", int(time.time())),
             "sub_job_ids": json.dumps(list(sub_job_ids)) if sub_job_ids else None,
+            "description": cfg.get("description"),
+            "primary_category": cfg.get("primary_category"),
+            "secondary_category": cfg.get("secondary_category"),
+            "env_meta_data": cfg.get("env_meta_data"),
         }
 
     def save_config(
@@ -499,6 +514,10 @@ class EnvConfigManager:
                     "image": row.get("image"),
                     "created_at": int(row["created_at"]),
                     "sub_job_ids": _decode_sub_job_ids(row.get("sub_job_ids")),
+                    "description": row.get("description"),
+                    "primary_category": row.get("primary_category"),
+                    "secondary_category": row.get("secondary_category"),
+                    "env_meta_data": row.get("env_meta_data"),
                 }
                 configs.append(config)
 
@@ -547,6 +566,10 @@ class EnvConfigManager:
                     "image": row.get("image"),
                     "created_at": int(row["created_at"]),
                     "sub_job_ids": _decode_sub_job_ids(row.get("sub_job_ids")),
+                    "description": row.get("description"),
+                    "primary_category": row.get("primary_category"),
+                    "secondary_category": row.get("secondary_category"),
+                    "env_meta_data": row.get("env_meta_data"),
                 }
                 configs.append(config)
 
@@ -869,8 +892,9 @@ class EnvConfigManager:
                 non-empty; an empty filter would update the whole table.
             updates: field -> new value applied to every matched row.
                 Allowed fields are UPDATABLE_FIELDS (env_name, job_id,
-                group_id, finished, env_params, image); identity fields
-                (id, env_id, created_at) are rejected. dict env_params
+                group_id, finished, env_params, image, description,
+                primary_category, secondary_category, env_meta_data); identity
+                fields (id, env_id, created_at) are rejected. dict env_params
                 values are JSON-encoded automatically.
             count_only_read: When True (default), run a cheap id-projection
                 read first so the return value is the exact matched-row

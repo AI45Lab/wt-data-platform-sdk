@@ -17,6 +17,10 @@ Schema matches the original SQLite schema from evaluation platform:
 - sub_job_ids: Write shard ids for split jobs (JSON string array).
   Written once at task creation by the job creator, read-only afterwards.
   Empty/None for non-split jobs.
+- description: Human-readable environment description.
+- primary_category: Primary environment category.
+- secondary_category: Secondary environment category.
+- env_meta_data: Additional environment metadata (string).
 """
 import pyarrow as pa
 
@@ -53,6 +57,11 @@ EVALUATION_ENV_SCHEMA = pa.schema([
     # string array (same storage pattern as env_params). Only rows of split
     # jobs carry a value; written once at task creation, never updated.
     pa.field('sub_job_ids', pa.string(), nullable=True),
+
+    pa.field('description', pa.string(), nullable=True),
+    pa.field('primary_category', pa.string(), nullable=True),
+    pa.field('secondary_category', pa.string(), nullable=True),
+    pa.field('env_meta_data', pa.string(), nullable=True),
 ])
 
 

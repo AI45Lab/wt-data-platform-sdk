@@ -1848,6 +1848,54 @@ def test_env_config_manager_allows_stale_snapshot_override(monkeypatch):
     assert fake_session.filter_calls[-1]["checkout_latest"] is False
 
 
+def test_env_config_manager_round_trips_metadata_fields(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    monkeypatch.setattr(
+        env_manager_module.dldb,
+        "connect",
+        lambda db_uri, **kwargs: fake_session,
+    )
+    manager = EnvConfigManager(table_name="env_test")
+    metadata = {
+        "description": "CartPole control environment",
+        "primary_category": "control",
+        "secondary_category": "classic",
+        "env_meta_data": '{"version":"v1"}',
+    }
+
+    manager.save_config(
+        {
+            "env_name": "CartPole-v1",
+            "env_id": "env-001",
+            "job_id": "job-001",
+            **metadata,
+        }
+    )
+
+    paged = manager.get_env_configs(limit=10)
+    all_configs = manager.get_all_env_configs()
+    assert paged[0]["description"] == metadata["description"]
+    assert all_configs[0]["primary_category"] == "control"
+    assert all_configs[0]["secondary_category"] == "classic"
+    assert all_configs[0]["env_meta_data"] == '{"version":"v1"}'
+
+    manager.upsert_config(
+        {
+            "env_name": "CartPole-v1",
+            "env_id": "env-001",
+            "description": "Updated description",
+            "primary_category": "rl",
+            "secondary_category": "control",
+            "env_meta_data": "updated-metadata",
+        }
+    )
+    updated = manager.get_env_configs(limit=1)[0]
+    assert updated["description"] == "Updated description"
+    assert updated["primary_category"] == "rl"
+    assert updated["secondary_category"] == "control"
+    assert updated["env_meta_data"] == "updated-metadata"
+
+
 # ==================== Job splitting: sub_job_id behavior ====================
 
 

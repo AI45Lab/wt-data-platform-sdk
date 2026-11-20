@@ -556,6 +556,12 @@ dataset type 和普通 SQL 条件仍可作为过滤器。设置 `stream=True` �
 `checkout_latest=True`，因此长期运行的 gateway 进程可以看到 launcher 在它启动后
 写入的新配置。
 
+环境配置新增可选字符串字段 `description`、`primary_category`、
+`secondary_category` 和 `env_meta_data`。这些字段可通过 `save_config()` /
+`upsert_config()` 写入，也可通过更新接口修改；`get_env_configs()` 和
+`get_all_env_configs()` 会原样返回。其中 `env_meta_data` 按字符串存取，不会像
+`env_params` 一样自动进行 JSON 编码或解码。
+
 | 方法 | 用途 |
 | --- | --- |
 | `get_env_configs(limit, offset=0, filter_query="", *, checkout_latest=True)` | 按页读取配置，可选 SQL filter。 |

@@ -604,6 +604,13 @@ production_envs = EnvConfigManager(profile="production")
 explicit_envs = EnvConfigManager(table_name="wt_env_config")
 ```
 
+Environment configs also support the optional string fields `description`,
+`primary_category`, `secondary_category`, and `env_meta_data`. They can be
+provided to `save_config()` / `upsert_config()` and changed through the update
+APIs; `get_env_configs()` and `get_all_env_configs()` return them unchanged.
+In particular, `env_meta_data` is stored and returned as a string, not
+automatically JSON-encoded or decoded like `env_params`.
+
 | Method | Purpose |
 | --- | --- |
 | `get_env_configs(limit, offset=0, filter_query="", *, checkout_latest=True)` | Page through configs with an optional SQL filter. |

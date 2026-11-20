@@ -62,6 +62,23 @@ def test_update_configs_where_encodes_env_params_dict(monkeypatch):
     manager.close()
 
 
+def test_update_configs_where_accepts_env_metadata_fields(monkeypatch):
+    session = FakeSession(matched_ids=[1])
+    manager = _manager_with(monkeypatch, session)
+    updates = {
+        "description": "Control environment",
+        "primary_category": "control",
+        "secondary_category": "classic",
+        "env_meta_data": '{"version":"v1"}',
+    }
+
+    n = manager.update_configs_where("env_name = 'A'", updates)
+
+    assert n == 1
+    assert session.update_calls[0]["values"] == updates
+    manager.close()
+
+
 def test_update_configs_where_skips_write_when_nothing_matches(monkeypatch):
     session = FakeSession(matched_ids=[])
     manager = _manager_with(monkeypatch, session)
