@@ -98,7 +98,8 @@ ETL 的正确运行要求以下约束始终成立：
   一行变化后完整加载 session；内置 serving pipeline 按 session 分组，但直接加载其中
   `is_trainable=true` 的行，因为当前三个 serving stage 都只依赖并发布这些行。
 - discovery 之外的 session load 也使用 pipeline 的 `source_columns` 投影，不再默认读取整张
-  28 列 schema。Enrichment 当前只读取 stage/校验所需的 12 列；serving 仍需保留完整行 upsert
+  28 列 schema。Enrichment 当前只读取 stage/校验所需的 13 列，包含流式完成检查所需的
+  `response`；serving 仍需保留完整行 upsert
   所需字段，但跳过由 pipeline 必然重建的 `chosen_trace`、`tags`、`search_text` 和由 SDK
   自动刷新的 `serving_updated_at`。新增 pipeline 若自定义投影，必须保证 stage 输入和最终
   serving 完整行都能由 source columns 与 stage outputs 覆盖。
@@ -160,7 +161,7 @@ incremental 模式会使用 checkpoint。
 
 | Pipeline | 模式 | 当前 stage | 当前状态 |
 | --- | --- | --- | --- |
-| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable`、`freecot` | v6；完整 session 上计算 trainability，并在后续 stage 中补充可用的 Claude/GPT reasoning。 |
+| `landing_enrichment_pipeline` | landing 原地更新 | `update_is_trainable`、`freecot` | v7；完整 session 上计算 trainability，并在后续 stage 中补充可用的 Claude/GPT reasoning。 |
 | `landing_to_serving_pipeline` | landing → serving | `build_chosen_trace`、`derive_job_tags`、`build_search_text` | v3；可用于现有 OpenCode 轨迹，仅处理 `is_trainable is True` 的行。 |
 
 `build_chosen_trace` 将 `messages + response` 写入 `chosen_trace`；`derive_job_tags` 从
