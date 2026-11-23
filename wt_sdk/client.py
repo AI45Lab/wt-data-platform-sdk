@@ -2023,13 +2023,15 @@ class WTGatewayClient:
         columns: Optional[List[str]] = None,
         create_missing: bool = True,
         optimize: bool = True,
+        cleanup_only: bool = False,
         cleanup_older_than=None,
         delete_unverified: bool = False,
         retrain: bool = False,
     ) -> Dict[str, Any]:
-        """Maintain indexes for one of the four supported trajectory tables.
+        """Maintain indexes or only clean old versions for a supported table.
 
         Intended for explicit background or operations use, not the write path.
+        Cleanup-only mode requires dldb>=1.1.11 and skips all index/optimize work.
         """
         landing_tables = {DEFAULT_LANDING_TABLE, TEST_LANDING_TABLE}
         serving_tables = {DEFAULT_SERVING_TABLE, TEST_SERVING_TABLE}
@@ -2084,6 +2086,8 @@ class WTGatewayClient:
             "expected_indexes": [f"{column}_idx" for column, _ in index_specs],
             "indexes_created": [],
             "optimized_partitions": [],
+            "cleanup_only": cleanup_only,
+            "cleaned_up_partitions": [],
             "errors": [],
         }
 
@@ -2093,9 +2097,44 @@ class WTGatewayClient:
 
         for position, partition in enumerate(target_partitions, start=1):
             logger.info(
-                f"Maintaining {table_role} partition {partition} "
-                f"({position}/{len(target_partitions)})"
+                f"{'Cleaning up' if cleanup_only else 'Maintaining'} {table_role} "
+                f"partition {partition} ({position}/{len(target_partitions)})"
             )
+            if cleanup_only:
+                try:
+                    session = self._session_for_table(table_name)
+                    if not callable(getattr(session, "cleanup_old_versions", None)):
+                        raise RuntimeError(
+                            "Installed dldb does not expose session.cleanup_old_versions(...)"
+                        )
+                    session.cleanup_old_versions(
+                        table_name,
+                        partition=partition,
+                        cleanup_older_than=cleanup_older_than,
+                        delete_unverified=delete_unverified,
+                    )
+                    summary["cleaned_up_partitions"].append(partition)
+                    self._log_dldb_timing(
+                        "cleanup_old_versions",
+                        self._extract_dldb_last_call(),
+                        table_name=table_name,
+                        extra={
+                            "partition": partition,
+                            "api": "maintain_table_indexes",
+                            "table_role": table_role,
+                            "cleanup_only": True,
+                        },
+                    )
+                except Exception as exc:
+                    error = {
+                        "partition": partition,
+                        "action": "cleanup_old_versions",
+                        "error": str(exc),
+                    }
+                    summary["errors"].append(error)
+                    logger.warning(f"Failed to clean up old versions during maintenance: {error}")
+                continue
+
             try:
                 existing_indexes = {
                     index["name"] if isinstance(index, dict) else index.name
@@ -2185,6 +2224,7 @@ class WTGatewayClient:
             f"partitions={len(target_partitions)}, "
             f"indexes_created={len(summary['indexes_created'])}, "
             f"optimized={len(summary['optimized_partitions'])}, "
+            f"cleaned_up={len(summary['cleaned_up_partitions'])}, "
             f"errors={len(summary['errors'])}"
         )
         return summary

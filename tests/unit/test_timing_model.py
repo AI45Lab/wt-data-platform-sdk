@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +36,7 @@ class FakeSession:
         self.filter_calls: List[Dict[str, Any]] = []
         self.created_indexes: List[Dict[str, Any]] = []
         self.optimized_partitions: List[Dict[str, Any]] = []
+        self.cleaned_up_partitions: List[Dict[str, Any]] = []
         self.indexes: Dict[tuple, set] = {}
         self.rows: Dict[str, List[Dict[str, Any]]] = {}
         # Bucket ids whose physical tables exist (models lazy HASH bucket
@@ -257,6 +259,16 @@ class FakeSession:
             }
         )
         self._set_last_call("optimize")
+
+    def cleanup_old_versions(self, table_name: str, *, partition=None, **kwargs):
+        self.cleaned_up_partitions.append(
+            {
+                "table_name": table_name,
+                "partition": partition,
+                "kwargs": kwargs,
+            }
+        )
+        self._set_last_call("cleanup_old_versions")
 
     def shutdown(self):
         return self.shutdown_result
@@ -982,6 +994,8 @@ def test_landing_ingest_then_explicit_index_maintenance_optimizes(monkeypatch):
         "harness",
         "weight_version",
     ]
+    assert summary["cleanup_only"] is False
+    assert summary["cleaned_up_partitions"] == []
     assert fake_session.optimized_partitions == [
         {
             "table_name": "landing_test",
@@ -1068,6 +1082,111 @@ def test_serving_index_maintenance_uses_serving_indexes_and_optimizes(monkeypatc
                 "delete_unverified": False,
                 "retrain": False,
             },
+        }
+    ]
+
+
+def test_landing_cleanup_only_skips_indexes_and_full_optimize(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128, landing_partition_column="sub_job_id")
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(landing_table="landing_test")))
+    bucket = stable_hash("job-123") % 128
+    index_calls = []
+    timing_logs = []
+
+    def list_indices(table_name, partition=None):
+        index_calls.append((table_name, partition))
+        return []
+
+    def capture_timing(api_name, timing, **kwargs):
+        timing_logs.append({"api_name": api_name, "timing": timing, **kwargs})
+
+    monkeypatch.setattr(fake_session, "list_indices", list_indices)
+    monkeypatch.setattr(client, "_log_dldb_timing", capture_timing)
+    retention = timedelta(hours=6)
+
+    summary = client.maintain_table_indexes(
+        "landing_test",
+        partitions=["job-123"],
+        cleanup_only=True,
+        cleanup_older_than=retention,
+        delete_unverified=True,
+    )
+
+    assert summary["partitions"] == [bucket]
+    assert summary["cleanup_only"] is True
+    assert summary["cleaned_up_partitions"] == [bucket]
+    assert summary["optimized_partitions"] == []
+    assert summary["indexes_created"] == []
+    assert summary["errors"] == []
+    assert index_calls == []
+    assert fake_session.created_indexes == []
+    assert fake_session.optimized_partitions == []
+    assert fake_session.cleaned_up_partitions == [
+        {
+            "table_name": "landing_test",
+            "partition": bucket,
+            "kwargs": {
+                "cleanup_older_than": retention,
+                "delete_unverified": True,
+            },
+        }
+    ]
+    assert timing_logs == [
+        {
+            "api_name": "cleanup_old_versions",
+            "timing": fake_session.last_call,
+            "table_name": "landing_test",
+            "extra": {
+                "partition": bucket,
+                "api": "maintain_table_indexes",
+                "table_role": "landing",
+                "cleanup_only": True,
+            },
+        }
+    ]
+
+
+def test_serving_cleanup_only_supports_all_materialized_partitions(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.existing_partitions = [7, 3]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+
+    summary = client.maintain_table_indexes("serving_test", all_partitions=True, cleanup_only=True)
+
+    assert summary["partitions"] == [3, 7]
+    assert summary["cleaned_up_partitions"] == [3, 7]
+    assert [call["partition"] for call in fake_session.cleaned_up_partitions] == [3, 7]
+    assert fake_session.created_indexes == []
+    assert fake_session.optimized_partitions == []
+
+
+def test_cleanup_only_records_partition_errors_and_continues(monkeypatch):
+    fake_session = FakeSession(attach_df_timing=False)
+    fake_session.schema_table = _FakeSchemaTable("job_id", "HASH", 128)
+    fake_session.existing_partitions = [3, 7]
+    monkeypatch.setattr(client_module.dldb, "connect", lambda db_uri, **kwargs: fake_session)
+    client = WTGatewayClient(GatewayConfig(tables=TableConfig(serving_table="serving_test")))
+    original_cleanup = fake_session.cleanup_old_versions
+
+    def cleanup_old_versions(table_name, *, partition=None, **kwargs):
+        if partition == 3:
+            raise RuntimeError("cleanup failed")
+        return original_cleanup(table_name, partition=partition, **kwargs)
+
+    monkeypatch.setattr(fake_session, "cleanup_old_versions", cleanup_old_versions)
+
+    summary = client.maintain_table_indexes("serving_test", all_partitions=True, cleanup_only=True)
+
+    assert summary["cleaned_up_partitions"] == [7]
+    assert summary["errors"] == [
+        {
+            "partition": 3,
+            "action": "cleanup_old_versions",
+            "error": "cleanup failed",
         }
     ]
 

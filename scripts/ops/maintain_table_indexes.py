@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create missing indexes and optimize HASH buckets for landing or serving.
+"""Create missing indexes, optimize HASH buckets, or only clean old versions.
 
 Examples:
   python scripts/ops/maintain_table_indexes.py \
@@ -10,6 +10,9 @@ Examples:
 
   python scripts/ops/maintain_table_indexes.py \
     --table serving_test --partition job-123
+
+  python scripts/ops/maintain_table_indexes.py \
+    --table wt_landing --partition job-123 --cleanup-only
 
 Only the two production tables and two test tables are supported. Their table
 names determine whether landing or serving index definitions are used.
@@ -61,7 +64,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Create missing role-specific indexes and optimize selected "
-            "HASH(job_id) buckets"
+            "HASH(job_id) buckets, or only clean their old versions"
         )
     )
     parser.add_argument(
@@ -102,15 +105,24 @@ def main() -> int:
         help="Only create missing indexes; do not optimize buckets.",
     )
     parser.add_argument(
+        "--cleanup-only",
+        action="store_true",
+        help=(
+            "Only delete old versions in the selected buckets; skip index "
+            "inspection/creation and full optimize."
+        ),
+    )
+    parser.add_argument(
         "--cleanup-older-than-hours",
         type=float,
         default=24.0,
         metavar="HOURS",
         help=(
-            "Lance old-version retention window passed to optimize() "
-            "cleanup_old_versions. 0 deletes every superseded version "
-            "immediately; dldb's own fallback default (168h/7d) is only used "
-            "when this is unset, which does not happen through this CLI."
+            "Lance old-version retention window passed to cleanup_old_versions "
+            "directly with --cleanup-only, or through optimize() otherwise. "
+            "0 deletes every superseded version immediately; dldb's own "
+            "fallback default (168h/7d) is only used when this is unset, "
+            "which does not happen through this CLI."
         ),
     )
     parser.add_argument(
@@ -120,9 +132,11 @@ def main() -> int:
         help=(
             "dldb instrumentation model for this run. 'debug' emits dldb_debug "
             "started/heartbeat/completed progress logs for list_indices / "
-            "create_scalar_index / compact_files / optimize (requires dldb>=1.1.4). "
-            "Defaults to 'debug' so manual runs always show per-step progress; "
-            "use 'none' to silence. WT_SDK_DLDB_MODEL env var still overrides."
+            "create_scalar_index / compact_files / optimize / "
+            "cleanup_old_versions (requires dldb>=1.1.4; cleanup-only requires "
+            "dldb>=1.1.11). Defaults to 'debug' so manual runs always show "
+            "per-step progress; use 'none' to silence. WT_SDK_DLDB_MODEL env "
+            "var still overrides."
         ),
     )
     parser.add_argument(
@@ -142,6 +156,20 @@ def main() -> int:
         parser.error("use either --all-partitions or --partition, not both")
     if not args.all_partitions and not args.partition:
         parser.error("provide --all-partitions or at least one --partition")
+    if args.cleanup_only:
+        conflicts = [
+            flag
+            for flag, enabled in (
+                ("--columns", bool(args.columns)),
+                ("--no-create-missing", args.no_create_missing),
+                ("--no-optimize", args.no_optimize),
+            )
+            if enabled
+        ]
+        if conflicts:
+            parser.error(
+                "--cleanup-only cannot be combined with " + ", ".join(conflicts)
+            )
 
     resolve_table_role(args.table)
 
@@ -180,6 +208,7 @@ def main() -> int:
             columns=columns,
             create_missing=not args.no_create_missing,
             optimize=not args.no_optimize,
+            cleanup_only=args.cleanup_only,
             cleanup_older_than=timedelta(hours=args.cleanup_older_than_hours),
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True, default=str))

@@ -23,6 +23,24 @@ python scripts/ops/maintain_table_indexes.py \
   --table wt_serving --all-partitions
 ```
 
+To clean old versions without index work or full optimize with dldb>=1.1.11,
+select one or more buckets explicitly and pass `--cleanup-only`:
+
+```bash
+python scripts/ops/maintain_table_indexes.py \
+  --table wt_landing --partition job-123 \
+  --cleanup-only --cleanup-older-than-hours 24
+python scripts/ops/maintain_table_indexes.py \
+  --table wt_serving --partition job-123 \
+  --cleanup-only --cleanup-older-than-hours 24
+```
+
+This mode calls dldb `cleanup_old_versions()` directly for every resolved
+bucket. It does not inspect/create indexes, collect coverage, compact fragments,
+or refresh indexes, so it supplements rather than replaces the daily full
+`optimize()` maintenance. `--all-partitions` is also supported; retention
+defaults to 24 hours.
+
 The separate environment-config tables have their own maintenance command and
 automatically resolve `WT_SDK_ENV_CONFIG_DB_URI` (default: the GPFS env-config
 path). They are HASH(job_id)-partitioned with
@@ -36,13 +54,20 @@ python scripts/ops/maintain_env_config_indexes.py --dry-run
 python scripts/ops/maintain_env_config_indexes.py
 python scripts/ops/maintain_env_config_indexes.py \
   --table wt_env_config --dry-run
+python scripts/ops/maintain_env_config_indexes.py \
+  --table wt_env_config --cleanup-only --dry-run
+python scripts/ops/maintain_env_config_indexes.py \
+  --table wt_env_config --cleanup-only --cleanup-older-than-hours 24
 ```
 
 It creates missing indexes configured in
 `wt_sdk/core/evaluation_env_schema.py`, then calls dldb's full `optimize()` to
 compact fragments, clean old versions according to dldb's retention policy,
 and refresh index coverage. Pass `--no-optimize` only to create missing indexes
-without the full maintenance pass.
+without the full maintenance pass. `--cleanup-only` instead calls only
+`cleanup_old_versions()` on every materialized bucket (or the whole legacy
+unpartitioned table), without index inspection/creation, coverage collection, or
+full optimize. Combining it with `--dry-run` only reports the targets.
 
 Initialize or recreate the test table only after reviewing the dry-run. The
 same command can target production only with an explicit profile:

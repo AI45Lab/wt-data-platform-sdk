@@ -628,6 +628,28 @@ names. The exact table name selects the landing or serving index definitions.
 Callers must provide raw job IDs/HASH bucket integers or `all_partitions=True`;
 the method creates missing indexes and runs dldb optimize by default.
 
+For more frequent old-version cleanup with dldb>=1.1.11, `--cleanup-only` calls dldb
+`cleanup_old_versions()` directly for each selected bucket. It skips index
+inspection/creation, fragment compaction, index refreshes, coverage collection,
+and full `optimize()`:
+
+```bash
+# Clean only the landing bucket resolved from this sub_job_id/job_id
+python scripts/ops/maintain_table_indexes.py \
+  --table wt_landing --partition job-123 \
+  --cleanup-only --cleanup-older-than-hours 24
+
+# Clean only the serving bucket resolved from this job_id
+python scripts/ops/maintain_table_indexes.py \
+  --table wt_serving --partition job-123 \
+  --cleanup-only --cleanup-older-than-hours 24
+```
+
+Cleanup-only complements rather than replaces the daily full maintenance run:
+the default command still creates missing indexes, compacts fragments, refreshes
+indexes, and cleans old versions. Both modes require `--partition` (repeatable)
+or `--all-partitions` and default to a 24-hour retention window.
+
 The two HASH(job_id)-partitioned environment-config tables use their own
 database and maintenance command. The default database URI is the GPFS
 env-config path (`/mnt/shared-storage-user/adpc-share/wt-data-platform/env-config`),
@@ -658,6 +680,20 @@ By default the command calls dldb's full `optimize()`: it compacts fragments,
 cleans old versions according to dldb's retention policy, and refreshes index
 coverage. Use `--no-optimize` only when the operation should create missing
 indexes without the full maintenance pass.
+
+For old-version cleanup alone, preview the targets and then run cleanup-only:
+
+```bash
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production --cleanup-only --dry-run
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production --cleanup-only --cleanup-older-than-hours 24
+```
+
+The env command automatically cleans every materialized HASH bucket, or the
+whole table for a legacy unpartitioned table. Its cleanup-only mode does not
+inspect/create indexes, collect coverage, or run full `optimize()`; dry-run only
+reports those targets and does not write to the database.
 
 ## Timing and Metrics
 

@@ -1,6 +1,8 @@
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pyarrow as pa
+import pytest
 
 from scripts.ops import maintain_env_config_indexes as script
 
@@ -26,6 +28,9 @@ class FakeSession:
         self.existing_indexes = list(existing_indexes)
         self.created = []
         self.optimize_calls = []
+        self.cleanup_calls = []
+        self.list_indices_calls = []
+        self.coverage_calls = []
         self.tables = {}
         self._partition_type = partition_type
         self._partition_column = partition_column
@@ -48,6 +53,7 @@ class FakeSession:
 
     def list_indices(self, table_name, partition=None):
         assert table_name == self.table_name
+        self.list_indices_calls.append(partition)
         return [SimpleNamespace(name=name) for name in self.existing_indexes]
 
     def create_scalar_index(self, table_name, column, *, partition=None, index_type):
@@ -59,8 +65,25 @@ class FakeSession:
         self.optimize_calls.append((table_name, partition))
         self.cleanup_older_than = cleanup_older_than
 
+    def cleanup_old_versions(
+        self,
+        table_name,
+        partition=None,
+        cleanup_older_than=None,
+        delete_unverified=False,
+    ):
+        self.cleanup_calls.append(
+            {
+                "table_name": table_name,
+                "partition": partition,
+                "cleanup_older_than": cleanup_older_than,
+                "delete_unverified": delete_unverified,
+            }
+        )
+
     def list_index_coverage(self, table_name, partition=None):
         assert table_name == self.table_name
+        self.coverage_calls.append(partition)
         return [
             SimpleNamespace(
                 index_name=name,
@@ -121,6 +144,9 @@ def test_maintain_creates_missing_indexes_per_hash_bucket():
         },
     ]
     assert summary["optimized"] == [3, 7]
+    assert summary["cleanup_only"] is False
+    assert summary["cleaned_up"] == []
+    assert session.cleanup_calls == []
     assert {row["partition"] for row in summary["coverage"]} == {3, 7}
     assert summary["errors"] == []
 
@@ -137,6 +163,97 @@ def test_dry_run_reports_missing_per_bucket_without_writes():
         "7": summary["expected_indexes"],
     }
     assert summary["coverage"] == []
+
+
+def test_cleanup_only_cleans_each_bucket_without_index_or_optimize_work():
+    session = FakeSession([])
+    retention = timedelta(hours=6)
+
+    summary = script.maintain_env_config_indexes(
+        session,
+        cleanup_only=True,
+        cleanup_older_than=retention,
+    )
+
+    assert session.created == []
+    assert session.optimize_calls == []
+    assert session.list_indices_calls == []
+    assert session.coverage_calls == []
+    assert session.cleanup_calls == [
+        {
+            "table_name": script.TEST_ENV_CONFIG_TABLE,
+            "partition": partition,
+            "cleanup_older_than": retention,
+            "delete_unverified": False,
+        }
+        for partition in (3, 7)
+    ]
+    assert summary["cleanup_only"] is True
+    assert summary["cleaned_up"] == [3, 7]
+    assert summary["optimize_requested"] is False
+    assert summary["optimized"] == []
+    assert summary["coverage"] == []
+    assert summary["errors"] == []
+
+
+def test_cleanup_only_dry_run_reports_targets_without_writes_or_index_reads():
+    session = FakeSession([])
+
+    summary = script.maintain_env_config_indexes(
+        session,
+        cleanup_only=True,
+        dry_run=True,
+    )
+
+    assert summary["targets"] == ["3", "7"]
+    assert summary["dry_run"] is True
+    assert summary["cleaned_up"] == []
+    assert session.created == []
+    assert session.optimize_calls == []
+    assert session.cleanup_calls == []
+    assert session.list_indices_calls == []
+    assert session.coverage_calls == []
+
+
+def test_cleanup_only_legacy_unpartitioned_table_uses_whole_table_path():
+    session = FakeSession([], partition_type="", partition_column="")
+
+    summary = script.maintain_env_config_indexes(session, cleanup_only=True)
+
+    assert summary["targets"] == ["None"]
+    assert summary["cleaned_up"] == [None]
+    assert session.cleanup_calls == [
+        {
+            "table_name": script.TEST_ENV_CONFIG_TABLE,
+            "partition": None,
+            "cleanup_older_than": None,
+            "delete_unverified": False,
+        }
+    ]
+    assert session.optimize_calls == []
+
+
+def test_cleanup_only_records_errors_per_bucket_and_continues():
+    session = FakeSession([])
+    original_cleanup = session.cleanup_old_versions
+
+    def cleanup_old_versions(table_name, partition=None, **kwargs):
+        if partition == 3:
+            raise RuntimeError("cleanup failed")
+        return original_cleanup(table_name, partition=partition, **kwargs)
+
+    session.cleanup_old_versions = cleanup_old_versions
+
+    summary = script.maintain_env_config_indexes(session, cleanup_only=True)
+
+    assert summary["cleaned_up"] == [7]
+    assert summary["errors"] == [
+        {
+            "action": "cleanup_old_versions",
+            "partition": 3,
+            "error": "cleanup failed",
+        }
+    ]
 
 
 def test_legacy_unpartitioned_table_keeps_whole_table_path():
@@ -167,6 +284,46 @@ def test_production_table_can_be_selected_explicitly():
     )
 
     assert summary["table_name"] == production_table
+
+
+def test_cli_cleanup_only_forwards_retention(monkeypatch):
+    session = FakeSession([])
+    monkeypatch.setattr(script.dldb, "connect", lambda *args, **kwargs: session)
+    monkeypatch.setattr(
+        script.sys,
+        "argv",
+        [
+            "maintain_env_config_indexes.py",
+            "--cleanup-only",
+            "--cleanup-older-than-hours",
+            "2.5",
+        ],
+    )
+
+    assert script.main() == 0
+    assert [call["cleanup_older_than"] for call in session.cleanup_calls] == [
+        timedelta(hours=2.5),
+        timedelta(hours=2.5),
+    ]
+    assert session.created == []
+    assert session.optimize_calls == []
+
+
+@pytest.mark.parametrize("conflicting_arg", ["--no-create-missing", "--no-optimize"])
+def test_cli_cleanup_only_rejects_index_and_optimize_controls(
+    monkeypatch, capsys, conflicting_arg
+):
+    monkeypatch.setattr(
+        script.sys,
+        "argv",
+        ["maintain_env_config_indexes.py", "--cleanup-only", conflicting_arg],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        script.main()
+
+    assert exc_info.value.code == 2
+    assert "--cleanup-only cannot be combined with" in capsys.readouterr().err
 
 
 def test_cli_uses_shared_profile_for_env_table(monkeypatch):

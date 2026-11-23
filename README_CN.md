@@ -579,7 +579,27 @@ dataset type 和普通 SQL 条件仍可作为过滤器。设置 `stream=True` �
 原始 `job_id`/HASH bucket，或使用 `all_partitions=True`；方法会创建缺失索引，
 并默认执行 dldb optimize。
 
-两张未分区的 env-config 表位于独立数据库中。可以先用只读命令查看生产 env 表
+需要更频繁地清理旧版本时（要求 dldb>=1.1.11），`--cleanup-only` 会对每个目标 bucket 直接调用
+dldb `cleanup_old_versions()`，跳过索引检查/创建、fragment 合并、索引刷新、
+coverage 收集和完整 `optimize()`：
+
+```bash
+# 仅清理由此 sub_job_id/job_id 解析出的 landing bucket
+python scripts/ops/maintain_table_indexes.py \
+  --table wt_landing --partition job-123 \
+  --cleanup-only --cleanup-older-than-hours 24
+
+# 仅清理由此 job_id 解析出的 serving bucket
+python scripts/ops/maintain_table_indexes.py \
+  --table wt_serving --partition job-123 \
+  --cleanup-only --cleanup-older-than-hours 24
+```
+
+cleanup-only 是对每日完整维护的补充，不能替代它：默认命令仍会创建缺失索引、
+合并 fragment、刷新索引并清理旧版本。两种模式都要求提供可重复的
+`--partition` 或 `--all-partitions`，默认 retention 均为 24 小时。
+
+两张 HASH(job_id) 分区的 env-config 表位于独立数据库中。可以先用只读命令查看生产 env 表
 的行数、空间、fragment、预期/现有索引和索引覆盖情况：
 
 ```bash
@@ -598,6 +618,19 @@ python scripts/ops/maintain_env_config_indexes.py \
 
 正式维护会执行 dldb 的完整 `optimize()`，用于合并 fragment、按 retention 策略
 清理旧版本并刷新索引覆盖。
+
+只需要清理旧版本时，可以先预览目标，再执行 cleanup-only：
+
+```bash
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production --cleanup-only --dry-run
+python scripts/ops/maintain_env_config_indexes.py \
+  --profile production --cleanup-only --cleanup-older-than-hours 24
+```
+
+env 命令会自动清理所有已物化的 HASH bucket；legacy 未分区表则清理整张表。
+cleanup-only 不检查/创建索引、不收集 coverage，也不执行完整 `optimize()`；
+dry-run 只报告目标，不写数据库。
 
 ## 时延与指标
 

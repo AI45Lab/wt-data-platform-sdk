@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Create missing indexes and fully optimize an env-config table.
+"""Create missing indexes, fully optimize, or only clean an env-config table.
 
 The target is selected by ``WT_SDK_PROFILE`` (default: test), unless an explicit
 ``--table`` or ``--profile`` is supplied. ``env_test`` is the test table and
 ``wt_env_config`` is the production table, in the database selected by
 ``WT_SDK_ENV_CONFIG_DB_URI``. Since the 2026.10 job-splitting change these
-tables are HASH(job_id)-partitioned, so indexes are created and optimized per
-materialized bucket; legacy unpartitioned tables keep the single-table path.
+tables are HASH(job_id)-partitioned, so maintenance runs per materialized
+bucket; legacy unpartitioned tables keep the single-table path.
 
 Examples:
   python scripts/ops/maintain_env_config_indexes.py --dry-run
   python scripts/ops/maintain_env_config_indexes.py
   python scripts/ops/maintain_env_config_indexes.py --table wt_env_config --dry-run
   python scripts/ops/maintain_env_config_indexes.py --no-optimize
+  python scripts/ops/maintain_env_config_indexes.py --cleanup-only
 """
 
 import argparse
@@ -84,10 +85,11 @@ def maintain_env_config_indexes(
     table_name: str = TEST_ENV_CONFIG_TABLE,
     create_missing: bool = True,
     optimize: bool = True,
+    cleanup_only: bool = False,
     dry_run: bool = False,
     cleanup_older_than: timedelta | None = None,
 ) -> dict[str, Any]:
-    """Create missing indexes, compact fragments, and refresh index tails."""
+    """Create indexes and optimize, or only remove superseded table versions."""
     actual_schema = session.get_schema(table_name)
     expected_fields = set(EVALUATION_ENV_SCHEMA.names)
     actual_fields = set(actual_schema.names)
@@ -99,6 +101,48 @@ def maintain_env_config_indexes(
         )
 
     partition_type, targets = _maintenance_targets(session, table_name)
+
+    if cleanup_only:
+        summary: dict[str, Any] = {
+            "table_name": table_name,
+            "partition_type": partition_type,
+            "targets": [str(target) for target in targets],
+            "cleanup_only": True,
+            "cleaned_up": [],
+            "optimize_requested": False,
+            "optimized": [],
+            "coverage": [],
+            "dry_run": dry_run,
+            "errors": [],
+        }
+        if dry_run:
+            return summary
+
+        for target in targets:
+            label = "whole table" if target is None else f"bucket {target}"
+            try:
+                print(f"Cleaning old versions on {label}...", flush=True)
+                if not callable(getattr(session, "cleanup_old_versions", None)):
+                    raise RuntimeError(
+                        "Installed dldb does not expose session.cleanup_old_versions(...)"
+                    )
+                session.cleanup_old_versions(
+                    table_name,
+                    partition=target,
+                    cleanup_older_than=cleanup_older_than,
+                    delete_unverified=False,
+                )
+                summary["cleaned_up"].append(target)
+            except Exception as exc:
+                summary["errors"].append(
+                    {
+                        "action": "cleanup_old_versions",
+                        "partition": target,
+                        "error": str(exc),
+                    }
+                )
+        return summary
+
     configured = [(column, INDEX_TYPE) for column in SCALAR_INDEX_COLUMNS]
 
     per_target_existing = {}
@@ -130,6 +174,8 @@ def maintain_env_config_indexes(
             for target, missing in per_target_missing.items()
         },
         "indexes_created": [],
+        "cleanup_only": False,
+        "cleaned_up": [],
         "optimize_requested": optimize,
         "optimized": [],
         "coverage": [],
@@ -227,7 +273,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Create missing profile-selected env-config indexes, compact "
-            "fragments, refresh indexes, and clean old versions"
+            "fragments, refresh indexes, and clean old versions, or only "
+            "clean old versions"
         )
     )
     target = parser.add_mutually_exclusive_group()
@@ -254,7 +301,10 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Inspect existing/missing indexes without changing the table.",
+        help=(
+            "Preview indexes, or only report cleanup targets with "
+            "--cleanup-only, without changing the table."
+        ),
     )
     parser.add_argument(
         "--no-create-missing",
@@ -267,15 +317,23 @@ def main() -> int:
         help="Create missing indexes without full table optimize.",
     )
     parser.add_argument(
+        "--cleanup-only",
+        action="store_true",
+        help=(
+            "Only delete old versions in materialized buckets (or the legacy "
+            "whole table); skip index inspection/creation and full optimize."
+        ),
+    )
+    parser.add_argument(
         "--cleanup-older-than-hours",
         type=float,
         default=24.0,
         metavar="HOURS",
         help=(
-            "Lance old-version retention window passed to optimize() "
-            "cleanup_old_versions. 0 deletes every superseded version "
-            "immediately. dldb's own 168h/7d fallback is never used "
-            "through this CLI."
+            "Lance old-version retention window passed to cleanup_old_versions "
+            "directly with --cleanup-only, or through optimize() otherwise. "
+            "0 deletes every superseded version immediately. dldb's own "
+            "168h/7d fallback is never used through this CLI."
         ),
     )
     parser.add_argument(
@@ -285,8 +343,9 @@ def main() -> int:
         help=(
             "dldb instrumentation model for this run. 'debug' emits dldb_debug "
             "started/heartbeat/completed progress logs for create_scalar_index / "
-            "optimize (requires dldb>=1.1.4). Defaults to 'debug' so manual runs "
-            "always show per-step progress; use 'none' to silence."
+            "optimize / cleanup_old_versions (requires dldb>=1.1.4; "
+            "cleanup-only requires dldb>=1.1.11). Defaults to 'debug' so manual "
+            "runs always show per-step progress; use 'none' to silence."
         ),
     )
     parser.add_argument(
@@ -302,6 +361,19 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.cleanup_only:
+        conflicts = [
+            flag
+            for flag, enabled in (
+                ("--no-create-missing", args.no_create_missing),
+                ("--no-optimize", args.no_optimize),
+            )
+            if enabled
+        ]
+        if conflicts:
+            parser.error(
+                "--cleanup-only cannot be combined with " + ", ".join(conflicts)
+            )
     if args.no_create_missing and args.no_optimize:
         parser.error("both maintenance actions cannot be disabled")
 
@@ -326,6 +398,7 @@ def main() -> int:
             table_name=table_name,
             create_missing=not args.no_create_missing,
             optimize=not args.no_optimize,
+            cleanup_only=args.cleanup_only,
             dry_run=args.dry_run,
             cleanup_older_than=timedelta(hours=args.cleanup_older_than_hours),
         )
