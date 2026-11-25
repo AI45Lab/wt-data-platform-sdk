@@ -38,6 +38,8 @@ from wt_sdk.etl import (
     resolve_etl_state_db_uri,
 )
 from wt_sdk.etl.policy import trainability_policy_from_env_value
+from wt_sdk.trajectory_stats.service import TrajectoryStatsService
+from wt_sdk.trajectory_stats.store import TrajectoryStatsStore
 
 
 def _parse_time(value: str) -> int:
@@ -59,6 +61,7 @@ def _summary_payload(
     started_at_ms: int,
     ended_at_ms: int,
     serving_reward_positive_rows_by_job_id: dict[str, int] | None = None,
+    trajectory_stats: dict | None = None,
 ) -> dict:
     positive_counts = serving_reward_positive_rows_by_job_id
     payload = {
@@ -98,6 +101,7 @@ def _summary_payload(
             sum(positive_counts.values()) if positive_counts is not None else None
         ),
         "serving_reward_positive_rows_by_job_id": positive_counts or {},
+        "trajectory_stats": trajectory_stats,
         "warning_count": summary.warning_count,
         "warnings": [asdict(warning) for warning in summary.warnings],
         "failures": [asdict(failure) for failure in summary.failures],
@@ -184,6 +188,16 @@ def _pending_dirty_sessions(
     """Return handoff sessions not already completed by normal serving discovery."""
 
     return dirty_sessions - serving_summary.successful_sessions
+
+
+def _run_trajectory_stats_update(client, session_keys: set[SessionKey]) -> dict:
+    """Update production statistics after serving rows have been published."""
+    with TrajectoryStatsStore() as store:
+        service = TrajectoryStatsService(client, store)
+        result = service.update_sessions(
+            (key.job_id, key.session_id) for key in sorted(session_keys)
+        )
+    return asdict(result)
 
 
 def _inspection_payload(
@@ -536,6 +550,31 @@ def main() -> int:
                 summary.merge(immediate)
             if pipeline.mode is PipelineMode.LANDING:
                 dirty_sessions.update(summary.dirty_sessions)
+            trajectory_stats = None
+            if (
+                pipeline.mode is PipelineMode.SERVING
+                and table_config.profile == "production"
+                and not args.dry_run
+                and not unexpected_failure
+                and summary.successful_sessions
+            ):
+                try:
+                    trajectory_stats = _run_trajectory_stats_update(
+                        client,
+                        summary.successful_sessions,
+                    )
+                except Exception as exc:
+                    summary.add_failure(
+                        RecordFailure(
+                            record_id=None,
+                            job_id="",
+                            session_id="",
+                            stage_name="__trajectory_stats__",
+                            error_type=type(exc).__name__,
+                            message=f"failed to update trajectory statistics: {exc}",
+                        )
+                    )
+                    exit_code = 1
             serving_reward_positive_rows_by_job_id = None
             if (
                 pipeline.mode is PipelineMode.SERVING
@@ -571,6 +610,7 @@ def main() -> int:
                 serving_reward_positive_rows_by_job_id=(
                     serving_reward_positive_rows_by_job_id
                 ),
+                trajectory_stats=trajectory_stats,
             )
             _write_report(payload, args.report_dir)
             outputs.append(payload)

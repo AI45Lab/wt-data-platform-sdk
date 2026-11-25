@@ -828,3 +828,97 @@ def test_warning_only_pipeline_prints_report_and_returns_zero(
     report_path = tmp_path / f"{payload[0]['pipeline_run_id']}.json"
     report = json.loads(report_path.read_text())
     assert "record_id" not in report["warnings"][0]
+
+
+@pytest.mark.parametrize("stats_error", [None, RuntimeError("stats unavailable")])
+def test_production_serving_updates_trajectory_stats_and_reports_failure(
+    monkeypatch,
+    capsys,
+    tmp_path,
+    stats_error,
+):
+    pipeline = run_module.load_pipeline("landing_to_serving_pipeline")
+    successful_sessions = {
+        SessionKey("job-a", "s2"),
+        SessionKey("job-a", "s1"),
+    }
+    summary = RunSummary(
+        pipeline_name=pipeline.name,
+        pipeline_version=pipeline.version,
+        mode=pipeline.mode,
+        successful_rows=2,
+        serving_rows_upserted=2,
+        job_ids={"job-a"},
+        successful_sessions=successful_sessions,
+    )
+    stats_result = {
+        "sessions_updated": 2,
+        "categories_upserted": 1,
+        "categories_deleted": 0,
+    }
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def close(self):
+            return None
+
+    class FakeEngine:
+        def __init__(
+            self,
+            client,
+            checkpoint_store=None,
+            session_batch_size=25,
+            sink_batch_size=100,
+            trainability_policy=TrainabilityPolicy.NORMAL,
+        ):
+            del client, checkpoint_store, session_batch_size, sink_batch_size
+            del trainability_policy
+
+        def run_jobs(self, pipeline, job_ids, dry_run=False):
+            del pipeline, job_ids, dry_run
+            return summary
+
+        def count_serving_reward_positive_rows(self, job_ids):
+            assert job_ids == {"job-a"}
+            return {"job-a": 2}
+
+    def update_stats(client, session_keys):
+        assert isinstance(client, FakeClient)
+        captured["session_keys"] = session_keys
+        if stats_error is not None:
+            raise stats_error
+        return stats_result
+
+    monkeypatch.setenv("WT_SDK_PROFILE", "production")
+    monkeypatch.setattr(run_module, "load_pipeline", lambda name: pipeline)
+    monkeypatch.setattr(run_module, "WTGatewayClient", FakeClient)
+    monkeypatch.setattr(run_module, "ETLEngine", FakeEngine)
+    monkeypatch.setattr(run_module, "_run_trajectory_stats_update", update_stats)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run.py",
+            "--pipeline",
+            "example_pipeline",
+            "--job-id",
+            "job-a",
+            "--confirm-production",
+            "--report-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert run_module.main() == (1 if stats_error else 0)
+    assert captured["session_keys"] is successful_sessions
+    payload = json.loads(capsys.readouterr().out)[0]
+    assert payload["trajectory_stats"] == (None if stats_error else stats_result)
+    if stats_error:
+        assert payload["status"] == "FAILED"
+        assert payload["failures"][-1]["stage_name"] == "__trajectory_stats__"
+        assert "stats unavailable" in payload["failures"][-1]["message"]
+    else:
+        assert payload["status"] == "SUCCEEDED"
