@@ -30,86 +30,119 @@ def compute_session_metrics(
     ``sub_job_id`` shards, must be supplied by the caller. Message history is
     never scanned for tool calls; only each row's new response is inspected.
     """
-    if not isinstance(job_id, str) or not job_id.strip():
-        raise ValueError("job_id is required")
-    if not isinstance(session_id, str) or not session_id.strip():
-        raise ValueError("session_id is required")
+    accumulator = SessionMetricsAccumulator(job_id, session_id)
+    for row in landing_rows:
+        accumulator.add_row(row)
+    return accumulator.finalize(updated_at_ms=updated_at_ms)
 
-    rows = list(landing_rows)
-    for row in rows:
+
+class SessionMetricsAccumulator:
+    """Memory-bounded session state for either batch or streaming computation."""
+
+    def __init__(self, job_id: str, session_id: str) -> None:
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("job_id is required")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id is required")
+        self.job_id = job_id
+        self.session_id = session_id
+        self._request_count = 0
+        self._token_total = 0
+        self._token_available = 0
+        self._tool_total = 0
+        self._tool_available = 0
+        self._max_step_id: Optional[int] = None
+
+    def add_row(self, row: Mapping[str, object]) -> None:
         row_job_id = row.get("job_id")
         row_session_id = row.get("session_id")
-        if row_job_id is not None and row_job_id != job_id:
+        if row_job_id is not None and row_job_id != self.job_id:
             raise ValueError("landing row belongs to a different job_id")
-        if row_session_id is not None and row_session_id != session_id:
+        if row_session_id is not None and row_session_id != self.session_id:
             raise ValueError("landing row belongs to a different session_id")
+        if _is_placeholder(row.get("messages")):
+            return
 
-    request_rows = [row for row in rows if not _is_placeholder(row.get("messages"))]
-    token_values = [_extract_token_value(row) for row in request_rows]
-    tool_values = [_extract_response_tool_calls(row) for row in request_rows]
-    step_ids = [_valid_step_id(row.get("step_id")) for row in request_rows]
-    valid_step_ids = [step_id for step_id in step_ids if step_id is not None]
+        self._request_count += 1
+        token_value = _extract_token_value(row)
+        if token_value is not None:
+            self._token_total += token_value
+            self._token_available += 1
+        tool_value = _extract_response_tool_calls(row)
+        if tool_value is not None:
+            self._tool_total += tool_value
+            self._tool_available += 1
+        step_id = _valid_step_id(row.get("step_id"))
+        if step_id is not None and (
+            self._max_step_id is None or step_id > self._max_step_id
+        ):
+            self._max_step_id = step_id
 
-    if request_rows:
-        total_tokens, token_status, token_reason = _complete_sum(
-            token_values,
-            missing_reason="TOKEN_USAGE_MISSING",
-            incomplete_reason="TOKEN_USAGE_INCOMPLETE",
-        )
-        tool_calls, tool_status, tool_reason = _complete_sum(
-            tool_values,
-            missing_reason="TOOL_CALLS_MISSING",
-            incomplete_reason="TOOL_CALLS_INCOMPLETE",
-        )
-        if valid_step_ids:
-            total_steps = max(valid_step_ids)
-            step_status = METRIC_STATUS_VALID
-            step_reason = None
+    def finalize(self, *, updated_at_ms: int) -> dict[str, object]:
+        if self._request_count:
+            total_tokens, token_status, token_reason = _complete_sum_state(
+                self._token_total,
+                self._token_available,
+                self._request_count,
+                missing_reason="TOKEN_USAGE_MISSING",
+                incomplete_reason="TOKEN_USAGE_INCOMPLETE",
+            )
+            tool_calls, tool_status, tool_reason = _complete_sum_state(
+                self._tool_total,
+                self._tool_available,
+                self._request_count,
+                missing_reason="TOOL_CALLS_MISSING",
+                incomplete_reason="TOOL_CALLS_INCOMPLETE",
+            )
+            if self._max_step_id is not None:
+                total_steps = self._max_step_id
+                step_status = METRIC_STATUS_VALID
+                step_reason = None
+            else:
+                total_steps = None
+                step_status = METRIC_STATUS_MISSING
+                step_reason = "STEP_ID_MISSING"
         else:
+            total_tokens = None
             total_steps = None
+            tool_calls = None
+            token_status = METRIC_STATUS_MISSING
             step_status = METRIC_STATUS_MISSING
-            step_reason = "STEP_ID_MISSING"
-    else:
-        total_tokens = None
-        total_steps = None
-        tool_calls = None
-        token_status = METRIC_STATUS_MISSING
-        step_status = METRIC_STATUS_MISSING
-        tool_status = METRIC_STATUS_MISSING
-        token_reason = _NO_REAL_REQUESTS
-        step_reason = _NO_REAL_REQUESTS
-        tool_reason = _NO_REAL_REQUESTS
+            tool_status = METRIC_STATUS_MISSING
+            token_reason = _NO_REAL_REQUESTS
+            step_reason = _NO_REAL_REQUESTS
+            tool_reason = _NO_REAL_REQUESTS
 
-    category = parse_delivery_category(job_id)
-    if category is None:
-        category_fields = {
-            "dataset": None,
-            "harness": None,
-            "model": None,
-            "task_type": None,
-            "level": "",
+        category = parse_delivery_category(self.job_id)
+        if category is None:
+            category_fields = {
+                "dataset": None,
+                "harness": None,
+                "model": None,
+                "task_type": None,
+                "level": "",
+            }
+            classification_status = CLASSIFICATION_STATUS_INVALID_JOB_ID
+        else:
+            category_fields = category.as_dict()
+            classification_status = CLASSIFICATION_STATUS_VALID
+
+        return {
+            "job_id": self.job_id,
+            "session_id": self.session_id,
+            "classification_status": classification_status,
+            **category_fields,
+            "total_tokens": total_tokens,
+            "total_tokens_status": token_status,
+            "total_tokens_reason": token_reason,
+            "total_steps": total_steps,
+            "total_steps_status": step_status,
+            "total_steps_reason": step_reason,
+            "tool_calls": tool_calls,
+            "tool_calls_status": tool_status,
+            "tool_calls_reason": tool_reason,
+            "updated_at_ms": updated_at_ms,
         }
-        classification_status = CLASSIFICATION_STATUS_INVALID_JOB_ID
-    else:
-        category_fields = category.as_dict()
-        classification_status = CLASSIFICATION_STATUS_VALID
-
-    return {
-        "job_id": job_id,
-        "session_id": session_id,
-        "classification_status": classification_status,
-        **category_fields,
-        "total_tokens": total_tokens,
-        "total_tokens_status": token_status,
-        "total_tokens_reason": token_reason,
-        "total_steps": total_steps,
-        "total_steps_status": step_status,
-        "total_steps_reason": step_reason,
-        "tool_calls": tool_calls,
-        "tool_calls_status": tool_status,
-        "tool_calls_reason": tool_reason,
-        "updated_at_ms": updated_at_ms,
-    }
 
 
 def _decode_json(value: object) -> object:
@@ -185,16 +218,17 @@ def _valid_step_id(value: object) -> Optional[int]:
     return _nonnegative_integer(value)
 
 
-def _complete_sum(
-    values: list[Optional[int]],
+def _complete_sum_state(
+    total: int,
+    available_count: int,
+    request_count: int,
     *,
     missing_reason: str,
     incomplete_reason: str,
 ) -> tuple[Optional[int], str, Optional[str]]:
-    available = [value for value in values if value is not None]
-    if len(available) == len(values):
-        return sum(available), METRIC_STATUS_VALID, None
-    if available:
+    if available_count == request_count:
+        return total, METRIC_STATUS_VALID, None
+    if available_count:
         return None, METRIC_STATUS_INCOMPLETE, incomplete_reason
     return None, METRIC_STATUS_MISSING, missing_reason
 
