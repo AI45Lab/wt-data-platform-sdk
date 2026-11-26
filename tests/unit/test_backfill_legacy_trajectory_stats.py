@@ -323,6 +323,7 @@ def test_keyset_reverse_query_rejects_non_increasing_ids():
                 job_id=JOB_ID,
                 session_ids=["legacy-1"],
                 scan_batch_size=2,
+                checkout_latest=True,
             )
         )
 
@@ -367,4 +368,5 @@ def test_reverse_queries_are_grouped_by_parent_job_and_session_batch():
     assert "session_id IN ('s1', 's2')" in session.calls[0]["query"]
     assert "session_id IN ('s3')" in session.calls[1]["query"]
     assert "job_id = 'invalid-job'" in session.calls[2]["query"]
+    assert [call["checkout_latest"] for call in session.calls] == [True, False, False]
     assert store.sessions[(JOB_ID, "s1")]["total_tokens_status"] == "MISSING"

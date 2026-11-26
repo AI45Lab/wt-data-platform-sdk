@@ -149,6 +149,7 @@ def _backfill_delivered_sessions(
     sessions_updated = 0
     landing_rows_read = 0
     next_progress = PROGRESS_INTERVAL_SESSIONS
+    refresh_latest = True
     for job_id in sorted(sessions_by_job):
         session_ids = sessions_by_job[job_id]
         for start in range(0, len(session_ids), session_query_batch_size):
@@ -161,8 +162,10 @@ def _backfill_delivered_sessions(
                 job_id=job_id,
                 session_ids=batch_session_ids,
                 scan_batch_size=scan_batch_size,
+                checkout_latest=refresh_latest,
             )
             landing_rows_read += _accumulate_landing_rows(accumulators, landing_rows)
+            refresh_latest = False
             sessions_updated += _upsert_accumulators(
                 accumulators,
                 store,
@@ -288,6 +291,7 @@ def _iter_landing_rows(
     job_id: str,
     session_ids: list[str],
     scan_batch_size: int,
+    checkout_latest: bool,
 ) -> Iterable[dict[str, object]]:
     """Read bounded id pages for exact serving-delivered session keys."""
     if scan_batch_size <= 0:
@@ -302,7 +306,7 @@ def _iter_landing_rows(
         f"AND session_id IN ({session_literals}) AND id IS NOT NULL"
     )
     cursor = None
-    refresh_latest = True
+    refresh_latest = checkout_latest
     while True:
         query = base_query
         if cursor is not None:
