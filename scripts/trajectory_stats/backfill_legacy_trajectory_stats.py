@@ -34,8 +34,10 @@ LEGACY_LANDING_COLUMNS = [
     "response",
     "messages",
 ]
-DEFAULT_SCAN_BATCH_SIZE = 2000
-DEFAULT_SESSION_QUERY_BATCH_SIZE = 25
+# Keep each Arrow JSON materialization below its byte-offset limit.
+DEFAULT_SCAN_BATCH_SIZE = 100
+# Reuse each pruned job-partition scan across many delivered sessions.
+DEFAULT_SESSION_QUERY_BATCH_SIZE = 500
 PROGRESS_INTERVAL_SESSIONS = 1000
 
 
