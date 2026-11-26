@@ -11,6 +11,7 @@ from typing import Iterable, Mapping, Optional
 
 import dldb
 import pandas as pd
+from dldb.utils import stable_hash
 
 import wt_sdk._time as sdk_time
 from wt_sdk.config import TableConfig, storage_options_for
@@ -25,6 +26,8 @@ from wt_sdk.trajectory_stats.store import TrajectoryStatsStore
 LEGACY_DB_URI = "s3://wind-tunnel-dldb"
 LEGACY_LANDING_TABLE = "wind_tunnel_landing"
 LEGACY_SERVING_TABLE = "wind_tunnel_serving"
+# The read-only legacy landing table is HASH(job_id) partitioned.
+LEGACY_LANDING_PARTITIONS = 128
 LEGACY_LANDING_COLUMNS = [
     "id",
     "job_id",
@@ -295,7 +298,7 @@ def _iter_landing_rows(
     scan_batch_size: int,
     checkout_latest: bool,
 ) -> Iterable[dict[str, object]]:
-    """Read bounded id pages for exact serving-delivered session keys."""
+    """Read bounded JSON payloads from one pruned job bucket using id pages."""
     if scan_batch_size <= 0:
         raise ValueError("scan_batch_size must be positive")
     if not session_ids:
@@ -307,26 +310,33 @@ def _iter_landing_rows(
         f"job_id = '{_escape_sql(job_id)}' "
         f"AND session_id IN ({session_literals}) AND id IS NOT NULL"
     )
+    partitions = [stable_hash(job_id) % LEGACY_LANDING_PARTITIONS]
     cursor = None
     refresh_latest = checkout_latest
     while True:
-        query = base_query
+        id_query = base_query
         if cursor is not None:
-            query += f" AND id > '{_escape_sql(cursor)}'"
-        rows = _read_rows(
+            id_query += f" AND id > '{_escape_sql(cursor)}'"
+        # Sorting a JSON-projected Lance query can materialize every matching
+        # payload before applying its limit. Sort only ids, then fetch exactly
+        # one page of JSON rows without an order_by scan.
+        id_rows = _read_rows(
             session,
             table_name,
-            LEGACY_LANDING_COLUMNS,
-            query=query,
+            ["id"],
+            query=id_query,
             limit=scan_batch_size,
+            partitions=partitions,
             order_by="id",
             ascending=True,
             checkout_latest=refresh_latest,
         )
         refresh_latest = False
-        if not rows:
+        if not id_rows:
             break
-        for row in rows:
+
+        page_ids = []
+        for row in id_rows:
             row_id = row.get("id")
             if not isinstance(row_id, str) or not row_id:
                 raise ValueError(
@@ -338,8 +348,23 @@ def _iter_landing_rows(
                     f"{row_id!r} after {cursor!r}"
                 )
             cursor = row_id
-            yield row
-        if len(rows) < scan_batch_size:
+            page_ids.append(row_id)
+
+        id_literals = ", ".join(f"'{_escape_sql(row_id)}'" for row_id in page_ids)
+        rows = _read_rows(
+            session,
+            table_name,
+            LEGACY_LANDING_COLUMNS,
+            query=f"{base_query} AND id IN ({id_literals})",
+            limit=scan_batch_size,
+            partitions=partitions,
+            checkout_latest=False,
+        )
+        rows.sort(key=lambda row: row.get("id") or "")
+        if [row.get("id") for row in rows] != page_ids:
+            raise ValueError("legacy landing payload page does not match its id page")
+        yield from rows
+        if len(page_ids) < scan_batch_size:
             break
 
 

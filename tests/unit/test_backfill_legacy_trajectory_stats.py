@@ -220,11 +220,12 @@ class PagedLegacySession:
         checkout_latest,
     ):
         assert table_name == script.LEGACY_LANDING_TABLE
-        assert partitions is None
         self.calls.append(
             {
                 "query": query,
+                "columns": columns,
                 "limit": limit,
+                "partitions": partitions,
                 "order_by": order_by,
                 "ascending": ascending,
                 "checkout_latest": checkout_latest,
@@ -234,6 +235,9 @@ class PagedLegacySession:
         job_match = re.search(r"\bjob_id = '((?:''|[^'])*)'", query)
         assert job_match is not None
         expected_job = job_match.group(1).replace("''", "'")
+        assert partitions == [
+            script.stable_hash(expected_job) % script.LEGACY_LANDING_PARTITIONS
+        ]
         selected = [row for row in selected if row["job_id"] == expected_job]
         session_match = re.search(r"\bsession_id IN \((.*?)\)", query)
         assert session_match is not None
@@ -246,7 +250,14 @@ class PagedLegacySession:
         if cursor_match:
             cursor = cursor_match.group(1).replace("''", "'")
             selected = [row for row in selected if row["id"] > cursor]
-        assert order_by == "id"
+        id_page_match = re.search(r"\bid IN \((.*?)\)", query)
+        if id_page_match:
+            expected_ids = {
+                value.replace("''", "'")
+                for value in re.findall(r"'((?:''|[^'])*)'", id_page_match.group(1))
+            }
+            selected = [row for row in selected if row["id"] in expected_ids]
+        assert order_by in (None, "id")
         assert ascending is True
         if self.sort_rows:
             selected.sort(key=lambda row: row["id"])
@@ -301,11 +312,21 @@ def test_keyset_reverse_queries_match_batch_backfill_and_ignore_undelivered():
     assert streamed_store.categories == expected_store.categories
     assert streamed_store.sessions[(JOB_ID, "legacy-1")]["total_tokens"] == 15
     assert streamed_store.sessions[(JOB_ID, "legacy-1")]["total_steps"] == 2
-    assert [call["limit"] for call in session.calls] == [2, 2]
+    assert [call["limit"] for call in session.calls] == [2, 2, 2, 2]
+    assert [call["columns"] for call in session.calls[:2]] == [
+        ["id"],
+        script.LEGACY_LANDING_COLUMNS,
+    ]
     assert "not-delivered" not in session.calls[0]["query"]
     assert "session_id IN ('legacy-1', 'legacy-2')" in session.calls[0]["query"]
-    assert "id > 'b'" in session.calls[1]["query"]
-    assert [call["checkout_latest"] for call in session.calls] == [True, False]
+    assert "id IN ('a', 'b')" in session.calls[1]["query"]
+    assert "id > 'b'" in session.calls[2]["query"]
+    assert [call["checkout_latest"] for call in session.calls] == [
+        True,
+        False,
+        False,
+        False,
+    ]
 
 
 def test_keyset_reverse_query_rejects_non_increasing_ids():
