@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import re
 
 import pytest
 
@@ -40,7 +41,16 @@ def stored_session(job_id, session_id, tokens):
 
 
 class FakeClient:
-    def __init__(self, *, landing_rows=(), serving_rows=(), shards=None, profile="production"):
+    def __init__(
+        self,
+        *,
+        landing_rows=(),
+        serving_rows=(),
+        shards=None,
+        profile="production",
+        fail_on_landing_query=None,
+        ignore_partition=False,
+    ):
         self.config = SimpleNamespace(
             tables=SimpleNamespace(
                 profile=profile,
@@ -51,6 +61,8 @@ class FakeClient:
         self.landing_rows = list(landing_rows)
         self.serving_rows = list(serving_rows)
         self.shards = shards or {}
+        self.fail_on_landing_query = fail_on_landing_query
+        self.ignore_partition = ignore_partition
         self.queries = []
         self.resolved_jobs = []
 
@@ -58,18 +70,64 @@ class FakeClient:
         self.resolved_jobs.append(job_id)
         return self.shards.get(job_id, [job_id])
 
-    def query_data(self, *, filter_query, columns, checkout_latest, table):
+    def query_data(
+        self,
+        *,
+        filter_query,
+        columns,
+        checkout_latest,
+        table,
+        limit=None,
+        partition=None,
+        order_by=None,
+        ascending=True,
+    ):
         self.queries.append(
             {
                 "filter_query": filter_query,
                 "columns": columns,
                 "checkout_latest": checkout_latest,
                 "table": table,
+                "limit": limit,
+                "partition": partition,
+                "order_by": order_by,
+                "ascending": ascending,
             }
         )
         if table == "wt_serving":
             return list(self.serving_rows)
-        return list(self.landing_rows)
+        landing_queries = [query for query in self.queries if query["table"] == "wt_landing"]
+        if len(landing_queries) == self.fail_on_landing_query:
+            raise RuntimeError("landing unavailable")
+
+        rows = [row for row in self.landing_rows if _matches_landing_query(row, filter_query)]
+        if partition is not None and not self.ignore_partition:
+            rows = [row for row in rows if row.get("sub_job_id") == partition]
+        if order_by is not None:
+            rows.sort(key=lambda row: row[order_by], reverse=not ascending)
+        if limit is not None:
+            rows = rows[:limit]
+        return [{column: row[column] for column in columns if column in row} for row in rows]
+
+
+def _matches_landing_query(row, query):
+    for column in ("job_id", "session_id", "sub_job_id"):
+        match = re.search(rf"\b{column} = '((?:''|[^'])*)'", query)
+        if match and row.get(column) != match.group(1).replace("''", "'"):
+            return False
+    for column in ("session_id", "id"):
+        match = re.search(rf"\b{column} IN \(([^)]*)\)", query)
+        if match:
+            values = {
+                value.replace("''", "'")
+                for value in re.findall(r"'((?:''|[^'])*)'", match.group(1))
+            }
+            if row.get(column) not in values:
+                return False
+    match = re.search(r"\bid > '((?:''|[^'])*)'", query)
+    if match and row.get("id", "") <= match.group(1).replace("''", "'"):
+        return False
+    return True
 
 
 class FakeStore:
@@ -126,12 +184,20 @@ def test_update_sessions_combines_split_shards_and_recomputes_whole_category():
         categories_deleted=0,
     )
     assert client.resolved_jobs == [JOB_ID]
-    assert len(client.queries) == 1
+    assert len(client.queries) == 4
     query = client.queries[0]
     assert f"job_id = '{JOB_ID}'" in query["filter_query"]
     assert "session_id IN ('s1', 's2')" in query["filter_query"]
     assert "sub_job_id" not in query["filter_query"]
+    assert query["partition"] == shards[0]
+    assert query["columns"] == ["id"]
+    assert query["limit"] == 100
+    assert query["order_by"] == "id"
     assert query["checkout_latest"] is True
+    assert client.queries[1]["columns"][0] == "id"
+    assert "meta_json" in client.queries[1]["columns"]
+    assert client.queries[1]["order_by"] is None
+    assert client.queries[1]["checkout_latest"] is False
     assert [row["total_tokens"] for row in store.session_writes[0]] == [10, 20]
     assert len(store.category_writes) == 1
     category = store.category_writes[0][0]
@@ -141,10 +207,99 @@ def test_update_sessions_combines_split_shards_and_recomputes_whole_category():
     assert category["total_steps_max"] == 2
 
 
+def test_update_sessions_paginates_each_shard_with_bounded_id_payload_pages():
+    shards = [f"{JOB_ID}#a", f"{JOB_ID}#b"]
+    rows = [
+        dict(landing_row(JOB_ID, "s2", 3, 40, sub_job_id=shards[1]), id="b-3"),
+        dict(landing_row(JOB_ID, "s1", 2, 20, sub_job_id=shards[0]), id="a-2"),
+        dict(landing_row(JOB_ID, "s1", 1, 10, sub_job_id=shards[0]), id="a-1"),
+        dict(landing_row(JOB_ID, "s2", 1, 30, sub_job_id=shards[1]), id="b-1"),
+        dict(landing_row(JOB_ID, "s1", 3, 30, sub_job_id=shards[0]), id="a-3"),
+        dict(landing_row(JOB_ID, "s2", 2, 35, sub_job_id=shards[1]), id="b-2"),
+    ]
+    client = FakeClient(landing_rows=rows, shards={JOB_ID: shards})
+    store = FakeStore()
+    service = TrajectoryStatsService(client, store)
+
+    result = service.update_sessions(
+        [(JOB_ID, "s1"), (JOB_ID, "s2")],
+        updated_at_ms=UPDATED_AT_MS,
+        landing_page_size=2,
+    )
+
+    assert result.sessions_updated == 2
+    assert client.resolved_jobs == [JOB_ID]
+    computed = {row["session_id"]: row for row in store.session_writes[0]}
+    assert computed["s1"]["total_tokens"] == 60
+    assert computed["s1"]["total_steps"] == 3
+    assert computed["s2"]["total_tokens"] == 105
+    assert computed["s2"]["total_steps"] == 3
+
+    id_queries = [query for query in client.queries if query["columns"] == ["id"]]
+    payload_queries = [query for query in client.queries if query["columns"] != ["id"]]
+    assert len(id_queries) == 4
+    assert len(payload_queries) == 4
+    assert [query["partition"] for query in id_queries] == [
+        shards[0],
+        shards[0],
+        shards[1],
+        shards[1],
+    ]
+    assert all(query["limit"] == 2 for query in client.queries)
+    assert all(query["order_by"] == "id" for query in id_queries)
+    assert all(query["order_by"] is None for query in payload_queries)
+    assert "id > 'a-2'" in id_queries[1]["filter_query"]
+    assert "id > 'b-2'" in id_queries[3]["filter_query"]
+    assert client.queries[0]["checkout_latest"] is True
+    assert all(query["checkout_latest"] is False for query in client.queries[1:])
+
+
+def test_update_sessions_does_not_write_partial_results_when_later_page_fails():
+    rows = [
+        landing_row(JOB_ID, "s1", 1, 10),
+        landing_row(JOB_ID, "s1", 2, 20),
+    ]
+    client = FakeClient(landing_rows=rows, fail_on_landing_query=3)
+    store = FakeStore()
+    service = TrajectoryStatsService(client, store)
+
+    with pytest.raises(RuntimeError, match="landing unavailable"):
+        service.update_sessions([(JOB_ID, "s1")], landing_page_size=1)
+
+    assert len(client.queries) == 3
+    assert store.session_writes == []
+    assert store.category_writes == []
+    assert store.category_deletes == []
+
+
+def test_update_sessions_does_not_write_when_a_later_shard_resolution_fails():
+    other_job = JOB_ID.replace("cybergym", "other")
+
+    class FailingShardClient(FakeClient):
+        def resolve_sub_jobs(self, job_id):
+            super().resolve_sub_jobs(job_id)
+            if job_id == other_job:
+                raise RuntimeError("env config unavailable")
+            return [job_id]
+
+    client = FailingShardClient(landing_rows=[landing_row(JOB_ID, "s1", 1, 10)])
+    store = FakeStore()
+    service = TrajectoryStatsService(client, store)
+
+    with pytest.raises(RuntimeError, match="env config unavailable"):
+        service.update_sessions([(JOB_ID, "s1"), (other_job, "s2")])
+
+    assert client.resolved_jobs == [JOB_ID, other_job]
+    assert store.session_writes == []
+    assert store.category_writes == []
+    assert store.category_deletes == []
+
+
 def test_update_sessions_does_not_write_partial_results_when_shard_is_unknown():
     client = FakeClient(
         landing_rows=[landing_row(JOB_ID, "s1", 1, 10, sub_job_id="unknown")],
         shards={JOB_ID: [f"{JOB_ID}#a", f"{JOB_ID}#b"]},
+        ignore_partition=True,
     )
     store = FakeStore()
     service = TrajectoryStatsService(client, store)

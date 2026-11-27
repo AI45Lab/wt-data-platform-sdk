@@ -12,7 +12,7 @@ from .schemas import (
     CATEGORY_TRAJECTORY_STATS_UPSERT_KEYS,
     CLASSIFICATION_STATUS_VALID,
 )
-from .session_metrics import compute_session_metrics
+from .session_metrics import SessionMetricsAccumulator
 from .store import CategoryKey, TrajectoryStatsStore
 
 
@@ -85,10 +85,12 @@ class TrajectoryStatsService:
         job_ids: Optional[Iterable[str]] = None,
         *,
         updated_at_ms: Optional[int] = None,
+        landing_page_size: int = 100,
     ) -> TrajectoryStatsUpdate:
         return self.update_sessions(
             self.discover_delivered_sessions(job_ids),
             updated_at_ms=updated_at_ms,
+            landing_page_size=landing_page_size,
         )
 
     def update_sessions(
@@ -96,8 +98,11 @@ class TrajectoryStatsService:
         session_keys: Iterable[SessionIdentity],
         *,
         updated_at_ms: Optional[int] = None,
+        landing_page_size: int = 100,
     ) -> TrajectoryStatsUpdate:
         """Idempotently recompute complete parent sessions from all landing shards."""
+        if landing_page_size <= 0:
+            raise ValueError("landing_page_size must be positive")
         keys = sorted({_session_identity(key) for key in session_keys})
         if not keys:
             return TrajectoryStatsUpdate()
@@ -106,17 +111,11 @@ class TrajectoryStatsService:
         sessions_by_key = {
             (row["job_id"], row["session_id"]): row for row in existing_rows
         }
-        landing_by_key = self._load_landing_rows(keys)
-
-        computed_rows = [
-            compute_session_metrics(
-                job_id,
-                session_id,
-                landing_by_key.get((job_id, session_id), []),
-                updated_at_ms=timestamp,
-            )
-            for job_id, session_id in keys
-        ]
+        computed_rows = self._compute_session_rows(
+            keys,
+            updated_at_ms=timestamp,
+            landing_page_size=landing_page_size,
+        )
         # Only old/new categories for changed sessions can be affected.
         changed_keys = set(keys)
         affected_categories = {
@@ -167,41 +166,105 @@ class TrajectoryStatsService:
         """Rebuild every category from the complete new session table."""
         return rebuild_category_table(self.store, updated_at_ms=updated_at_ms)
 
-    def _load_landing_rows(
+    def _compute_session_rows(
         self,
         keys: list[SessionIdentity],
-    ) -> dict[SessionIdentity, list[dict[str, object]]]:
+        *,
+        updated_at_ms: int,
+        landing_page_size: int,
+    ) -> list[dict[str, object]]:
+        accumulators = {key: SessionMetricsAccumulator(*key) for key in keys}
+        self._accumulate_landing_rows(accumulators, landing_page_size)
+        # Finalize only after every landing read and validation has succeeded.
+        return [accumulators[key].finalize(updated_at_ms=updated_at_ms) for key in keys]
+
+    def _accumulate_landing_rows(
+        self,
+        accumulators: dict[SessionIdentity, SessionMetricsAccumulator],
+        landing_page_size: int,
+    ) -> None:
         sessions_by_job: dict[str, set[str]] = {}
-        for job_id, session_id in keys:
+        for job_id, session_id in accumulators:
             sessions_by_job.setdefault(job_id, set()).add(session_id)
 
-        result: dict[SessionIdentity, list[dict[str, object]]] = {key: [] for key in keys}
+        checkout_latest = True
         for job_id, session_ids in sorted(sessions_by_job.items()):
-            # Resolve explicitly so env read failures abort before any writes. The
-            # subsequent public query uses the same SDK shard-resolution contract.
-            shards = set(self.client.resolve_sub_jobs(job_id))
+            # Resolve once per parent job, then paginate each HASH shard separately.
+            shards = sorted(set(self.client.resolve_sub_jobs(job_id)))
             session_literals = ", ".join(
                 f"'{_escape_sql(session_id)}'" for session_id in sorted(session_ids)
             )
-            rows = self.client.query_data(
-                filter_query=(
-                    f"job_id = '{_escape_sql(job_id)}' "
-                    f"AND session_id IN ({session_literals})"
-                ),
-                columns=LANDING_METRIC_COLUMNS,
-                checkout_latest=True,
-                table=self.client.config.tables.landing_table,
+            base_query = (
+                f"job_id = '{_escape_sql(job_id)}' "
+                f"AND session_id IN ({session_literals}) AND id IS NOT NULL"
             )
-            for row in rows:
-                if row.get("job_id") != job_id or row.get("session_id") not in session_ids:
-                    raise ValueError("landing query returned a row outside the requested sessions")
-                sub_job_id = row.get("sub_job_id")
-                if len(shards) > 1 and sub_job_id not in shards:
-                    raise ValueError(
-                        f"split job {job_id!r} returned landing row with unknown sub_job_id"
+            for sub_job_id in shards:
+                cursor = None
+                while True:
+                    id_query = base_query
+                    if cursor is not None:
+                        id_query += f" AND id > '{_escape_sql(cursor)}'"
+                    # Sorting a JSON-projected Lance query can materialize every
+                    # matching payload before applying its limit. Sort only ids.
+                    id_rows = self.client.query_data(
+                        filter_query=id_query,
+                        columns=["id"],
+                        limit=landing_page_size,
+                        partition=sub_job_id,
+                        order_by="id",
+                        ascending=True,
+                        checkout_latest=checkout_latest,
+                        table=self.client.config.tables.landing_table,
                     )
-                result[(job_id, row["session_id"])].append(row)
-        return result
+                    checkout_latest = False
+                    if not id_rows:
+                        break
+
+                    page_ids = []
+                    for row in id_rows:
+                        row_id = row.get("id")
+                        if not isinstance(row_id, str) or not row_id:
+                            raise ValueError("landing pagination requires non-empty string ids")
+                        if cursor is not None and row_id <= cursor:
+                            raise ValueError(
+                                f"landing ids are not strictly increasing: "
+                                f"{row_id!r} after {cursor!r}"
+                            )
+                        cursor = row_id
+                        page_ids.append(row_id)
+
+                    id_literals = ", ".join(f"'{_escape_sql(row_id)}'" for row_id in page_ids)
+                    rows = self.client.query_data(
+                        filter_query=f"{base_query} AND id IN ({id_literals})",
+                        columns=LANDING_METRIC_COLUMNS,
+                        limit=landing_page_size,
+                        partition=sub_job_id,
+                        checkout_latest=False,
+                        table=self.client.config.tables.landing_table,
+                    )
+                    rows.sort(key=lambda row: row.get("id") or "")
+                    if [row.get("id") for row in rows] != page_ids:
+                        raise ValueError("landing payload page does not match its id page")
+                    for row in rows:
+                        session_id = row.get("session_id")
+                        if row.get("job_id") != job_id or session_id not in session_ids:
+                            raise ValueError(
+                                "landing query returned a row outside the requested sessions"
+                            )
+                        row_shard = row.get("sub_job_id")
+                        if row_shard not in shards:
+                            raise ValueError(
+                                f"split job {job_id!r} returned landing row with "
+                                "unknown sub_job_id"
+                            )
+                        if row_shard != sub_job_id:
+                            raise ValueError(
+                                f"landing row belongs to shard {row_shard!r}, "
+                                f"not queried shard {sub_job_id!r}"
+                            )
+                        accumulators[(job_id, session_id)].add_row(row)
+                    if len(page_ids) < landing_page_size:
+                        break
 
 
 def rebuild_category_table(
