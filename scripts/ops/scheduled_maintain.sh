@@ -40,7 +40,7 @@ fi
 # Nightly maintenance tolerates slow S3: huge version-dir LISTs on XSKY can
 # exceed lance's per-request default (observed 120s failures on 2026-10-25).
 # Only this job gets the raised timeout; interactive writers keep defaults.
-export WT_SDK_S3_REQUEST_TIMEOUT="${WT_SDK_S3_REQUEST_TIMEOUT:-300}"
+export WT_SDK_S3_REQUEST_TIMEOUT="${WT_SDK_S3_REQUEST_TIMEOUT:-120}"
 
 # Always import wt_sdk from THIS repo, not whatever the python env's editable
 # install points at (hosts may share the env with other services).
@@ -74,7 +74,7 @@ for table in "$@"; do
         --table "$table" \
         "${partition_args[@]}" \
         --dldb-model debug \
-        --cleanup-older-than-hours 24 \
+        --cleanup-older-than-hours 1 \
         >>"$log_file" 2>&1 &
     maintain_pid=$!
 
@@ -115,7 +115,7 @@ env_log_file="$LOG_DIR/maintain_env_config_production_${ts}.log"
 echo "=== $(date -Is) env-config maintain table=wt_env_config ===" | tee -a "$env_log_file"
 "$PYTHON_BIN" "$ENV_CONFIG_MAINTAIN" \
     --table wt_env_config \
-    --cleanup-older-than-hours 24 \
+    --cleanup-older-than-hours 1 \
     >>"$env_log_file" 2>&1
 env_status=$?
 echo "=== $(date -Is) env-config maintain exited with $env_status, log: $env_log_file ===" | tee -a "$env_log_file"
